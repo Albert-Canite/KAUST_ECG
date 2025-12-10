@@ -236,6 +236,14 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Epochs to keep CE unweighted and sampler off before applying rebalancing",
     )
+    parser.add_argument("--recall_target_miss", type=float, default=0.15, help="Trigger recall rescue when miss rate exceeds this")
+    parser.add_argument(
+        "--adaptive_fpr_cap",
+        type=float,
+        default=0.25,
+        help="Only trigger recall rescue when FPR is below this cap",
+    )
+    parser.add_argument("--recall_rescue_limit", type=int, default=2, help="Max number of adaptive recall boosts")
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument(
@@ -384,7 +392,7 @@ def main() -> None:
 
     history: List[Dict[str, float]] = []
     collapse_handled = False
-    recall_rescue_done = False
+    recall_rescue_count = 0
     kd_active = False if kd_enabled else False
     imbalance_active = False
 
@@ -449,9 +457,9 @@ def main() -> None:
         if (
             args.enable_adaptive_reweight
             and imbalance_active
-            and not recall_rescue_done
-            and val_metrics["miss_rate"] > 0.30
-            and val_metrics["fpr"] < 0.20
+            and recall_rescue_count < args.recall_rescue_limit
+            and val_metrics["miss_rate"] > args.recall_target_miss
+            and val_metrics["fpr"] < args.adaptive_fpr_cap
         ):
             if args.use_class_weights and current_class_weights is not None and current_class_weights.numel() > 1:
                 boost = 1.2
@@ -471,7 +479,7 @@ def main() -> None:
                 print(
                     f"[ADAPT] Enabled weighted sampler with abnormal boost {current_sampler_boost:.2f} to improve recall."
                 )
-            recall_rescue_done = True
+            recall_rescue_count += 1
         if (
             not collapse_handled
             and val_argmax_metrics["fpr"] > 0.95
@@ -493,7 +501,7 @@ def main() -> None:
             collapse_handled = True
 
         if (
-            not recall_rescue_done
+            recall_rescue_count < args.recall_rescue_limit
             and val_argmax_metrics["miss_rate"] > 0.95
             and val_argmax_metrics["fpr"] < 0.05
             and epoch > args.imbalance_warmup_epochs
@@ -510,10 +518,10 @@ def main() -> None:
             train_loader = _build_train_loader(use_sampler, current_sampler_boost)
             kd_active = False  # let CE recover before KD resumes
             collapse_handled = True
-            recall_rescue_done = True
+            recall_rescue_count += 1
         scheduler.step(val_loss)
 
-        epoch_score = val_metrics["f1"] - val_metrics["miss_rate"] - val_metrics["fpr"]
+        epoch_score = val_metrics["f1"] + val_metrics["sensitivity"] - 0.5 * val_metrics["fpr"]
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "

@@ -72,22 +72,26 @@ def confusion_metrics(y_true: List[int], y_pred: List[int]) -> Dict[str, float]:
 def sweep_thresholds(
     y_true: List[int], probs: List[float], thresholds: List[float] | None = None
 ) -> Tuple[float, Dict[str, float]]:
-    """Search for the best decision threshold using a composite score.
+    """Search for the best decision threshold using a recall-biased score.
 
-    The score mirrors training early-stopping logic: ``f1 - miss_rate - fpr``.
+    The score emphasizes sensitivity (1 - miss_rate) while still balancing
+    F1 and FPR: ``score = f1 + sensitivity - 0.5 * fpr``. This biases the
+    selection toward lower miss rates when FPR remains acceptable.
 
     Args:
         y_true: Ground-truth labels (0/1).
         probs: Predicted probabilities for the positive class.
         thresholds: Optional list of thresholds to evaluate. If None, use a
-            coarse linspace in [0.05, 0.95].
+            dense linspace in [0.05, 0.95] plus probability quantiles.
 
     Returns:
         best_threshold, best_metrics (dict from ``confusion_metrics``)
     """
 
     if thresholds is None:
-        thresholds = np.linspace(0.05, 0.95, num=19).tolist()
+        dense = np.linspace(0.05, 0.95, num=19)
+        quantiles = np.quantile(probs, q=np.linspace(0.05, 0.95, num=19))
+        thresholds = np.unique(np.concatenate([dense, quantiles])).tolist()
 
     y_true_arr = np.array(y_true)
     probs_arr = np.array(probs)
@@ -98,7 +102,7 @@ def sweep_thresholds(
     for thr in thresholds:
         preds = (probs_arr >= thr).astype(int).tolist()
         metrics = confusion_metrics(y_true_arr.tolist(), preds)
-        score = metrics["f1"] - metrics["miss_rate"] - metrics["fpr"]
+        score = metrics["f1"] + metrics["sensitivity"] - 0.5 * metrics["fpr"]
         if score > best_score:
             best_score = score
             best_thr = float(thr)
