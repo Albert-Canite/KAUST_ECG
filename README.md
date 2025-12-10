@@ -1,0 +1,64 @@
+# Segment-Aware MIT-BIH ECG Classification
+
+This project provides a fully configurable training pipeline for single-lead beat classification on the MIT-BIH Arrhythmia Database using a lightweight segment-aware student model and an optional ResNet18-based teacher for knowledge distillation. Value-constrained layers and activation scaling are available to bound weights/activations for deployment in limited numeric domains.
+
+## Repository Layout
+- `train.py` – Training entrypoint with argument-parsable hyperparameters, early stopping, LR scheduling, class weighting, and optional distillation.
+- `data.py` – MIT-BIH loading, per-beat preprocessing (mean removal + max-abs scaling to `[-1, 1]`), and dataset split utilities.
+- `models/student.py` – Segment-aware student encoder that slices beats into P/QRS/T/Global windows, produces eight 4-D tokens, feeds a configurable photonic MLP, and classifies beats.
+- `models/teacher.py` – 1D ResNet18 teacher producing logits and an intermediate embedding for distillation.
+- `constraints.py` – Tanh-reparameterized Conv1d/Linear layers plus activation scaling helpers for bounded weights/inputs.
+- `utils.py` – Class-weight computation, confusion metrics, and KD logit loss helpers.
+
+## Installation
+1. Install Python 3.9+ and PyTorch (with CUDA if available).
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt  # if present
+   pip install wfdb numpy torch seaborn matplotlib
+   ```
+
+## Data
+Download the MIT-BIH Arrhythmia Database and set `--data_path` to the folder containing record files (e.g., `100.dat`, `100.hea`). Each beat is extracted as a 360-sample window centered on annotations and normalized per beat.
+
+## Training
+Basic training (student only):
+```bash
+python train.py --data_path /path/to/mit-bih --batch_size 128 --max_epochs 90
+```
+
+Enable knowledge distillation with a ResNet18 teacher and feature/logit alignment:
+```bash
+python train.py --data_path /path/to/mit-bih --use_kd \
+  --teacher_checkpoint /path/to/teacher.pth --teacher_embedding_dim 128 \
+  --kd_temperature 2.0 --kd_d 16 --alpha 1.0 --beta 1.0 --gamma 1.0
+```
+
+Enable bounded-weight/value pipeline:
+```bash
+python train.py --data_path /path/to/mit-bih --use_value_constraint --use_tanh_activations \
+  --constraint_scale 1.0 --dropout_rate 0.1
+```
+
+Early stopping monitors validation loss with configurable patience (`--patience`, default 10). Learning-rate scheduling uses `ReduceLROnPlateau` on the validation loss (`--scheduler_patience`, default 3, `factor=0.5`). Gradients are clipped to `max_norm=1.0`.
+
+## Segment-Aware Student Overview
+- Inputs: `(batch_size, 1, 360)`
+- Four Conv1d encoders (P/QRS/T/Global): `Conv1d(1, 4, kernel_size=4, stride=1, padding=0)`
+- Token pooling: P→2 tokens, QRS→3 tokens, T→2 tokens (AvgPool over time), Global→1 token (global average); concatenated tokens shape `(batch, 8, 4)`
+- Photonic MLP: `num_mlp_layers` (>=2) of `Linear(4, 4) + ReLU` (optionally tanh with constrained weights)
+- Token average pooling → `h_pool` `(batch, 4)` → optional dropout → classifier `Linear(4, 2)`
+
+## Knowledge Distillation
+- Teacher: 1D ResNet18 producing logits and an embedding (`embedding_dim`).
+- Student: logits + pooled feature (`h_pool`).
+- Loss: `alpha * CE` + `beta * KL(softmax(z_T/T) || softmax(z_S/T))` + `gamma * MSE(norm(proj_T(feat_T)), norm(proj_S(h_pool)))`.
+- Projections: `proj_T: Linear(embedding_dim, kd_d)`, `proj_S: Linear(4, kd_d)` (constrained if `--use_value_constraint`).
+
+## Value Constraints & Normalization
+- Constrained layers use tanh-reparameterized weights (and optional bias) scaled by `constraint_scale` to keep weights in `[-scale, scale]`.
+- Inputs to constrained layers can be scaled to `[-1, 1]` via `scale_to_unit`; alternatively, tanh activations bound them directly (`--use_tanh_activations`).
+- Beat preprocessing keeps raw inputs in `[-1, 1]` via mean removal and max-abs scaling; optional post-layer dropout mitigates overfitting.
+
+## Saved Artifacts
+Checkpoints are written to `saved_models/student_model.pth` with the CLI configuration. Adjust paths as needed for your environment.
