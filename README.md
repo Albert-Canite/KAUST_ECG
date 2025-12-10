@@ -22,23 +22,27 @@ This project provides a fully configurable training pipeline for single-lead bea
 Download the MIT-BIH Arrhythmia Database and set `--data_path` to the folder containing record files (e.g., `100.dat`, `100.hea`). Each beat is extracted as a 360-sample window centered on annotations and normalized per beat.
 
 ## Training
-Basic training (student only):
-```bash
-python train.py --data_path /path/to/mit-bih --batch_size 128 --max_epochs 90
-```
+### One-click / default run
+Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`). By default, the student trains **with knowledge distillation enabled**. If no teacher checkpoint is provided, a compact ResNet18-1D teacher is auto-trained for a few epochs and reused for distillation. Checkpoints and the auto-trained teacher are saved under `saved_models/`.
 
-Enable knowledge distillation with a ResNet18 teacher and feature/logit alignment:
-```bash
-python train.py --data_path /path/to/mit-bih --use_kd \
-  --teacher_checkpoint /path/to/teacher.pth --teacher_embedding_dim 128 \
-  --kd_temperature 2.0 --kd_d 16 --alpha 1.0 --beta 1.0 --gamma 1.0
-```
+### Command-line customization
+- Basic student-only training:
+  ```bash
+  python train.py --data_path /path/to/mit-bih --max_epochs 90 --no-use-kd
+  ```
 
-Enable bounded-weight/value pipeline:
-```bash
-python train.py --data_path /path/to/mit-bih --use_value_constraint --use_tanh_activations \
-  --constraint_scale 1.0 --dropout_rate 0.1
-```
+- Knowledge distillation with an existing teacher:
+  ```bash
+  python train.py --data_path /path/to/mit-bih --use-kd \
+    --teacher_checkpoint /path/to/teacher.pth --teacher_embedding_dim 128 \
+    --kd_temperature 2.0 --kd_d 16 --alpha 1.0 --beta 1.0 --gamma 1.0
+  ```
+
+- Enable bounded-weight/value pipeline:
+  ```bash
+  python train.py --data_path /path/to/mit-bih --use_value_constraint --use_tanh_activations \
+    --constraint_scale 1.0 --dropout_rate 0.1
+  ```
 
 Early stopping monitors validation loss with configurable patience (`--patience`, default 10). Learning-rate scheduling uses `ReduceLROnPlateau` on the validation loss (`--scheduler_patience`, default 3, `factor=0.5`). Gradients are clipped to `max_norm=1.0`.
 

@@ -40,7 +40,7 @@
 - 训练：`--batch_size`，`--lr=1e-3`，`--weight_decay=1e-4`，`--max_epochs`(默认 90)，`--patience=10`，`--scheduler_patience=3`。
 - 类别不平衡：`compute_class_weights` 提供异常类权重提升（默认 1.3x）。
 - 模型：`--num_mlp_layers`(≥2)、`--dropout_rate`、`--use_value_constraint`、`--use_tanh_activations`、`--constraint_scale`。
-- 蒸馏：`--use_kd`、`--teacher_checkpoint`、`--teacher_embedding_dim`、`--kd_temperature`、`--kd_d`、`--alpha/beta/gamma`。
+- 蒸馏：`--use_kd`（默认开启，可用 `--no-use-kd` 关闭）、`--teacher_checkpoint`（若未提供且启用 KD，将自动轻量预训练一个 ResNet18 teacher 后用于蒸馏）、`--teacher_embedding_dim`、`--kd_temperature`、`--kd_d`、`--alpha/beta/gamma`。
 
 ## 代码接口与输出
 - 前向接口：Student/Teacher 输入 `(batch,1,360)`，Student 输出 `(logits, h_pool)`，Teacher 输出 `(logits_T, feat_T)`。

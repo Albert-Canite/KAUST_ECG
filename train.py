@@ -80,6 +80,65 @@ def build_teacher(num_classes: int, embedding_dim: int, device: torch.device) ->
     return teacher
 
 
+def train_teacher(
+    teacher: nn.Module,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    class_weights: torch.Tensor,
+    device: torch.device,
+    lr: float,
+    weight_decay: float,
+    max_epochs: int,
+) -> None:
+    teacher.train()
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    optimizer = Adam(teacher.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=weight_decay)
+    scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2, verbose=False)
+
+    best_loss = float("inf")
+    best_state = None
+
+    for epoch in range(1, max_epochs + 1):
+        teacher.train()
+        running_loss = 0.0
+        total = 0
+        for signals, labels in train_loader:
+            signals, labels = signals.to(device), labels.to(device)
+            optimizer.zero_grad()
+            logits, _ = teacher(signals)
+            loss = criterion(logits, labels)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(teacher.parameters(), max_norm=1.0)
+            optimizer.step()
+            running_loss += loss.item() * labels.size(0)
+            total += labels.size(0)
+        train_loss = running_loss / max(total, 1)
+
+        # validation
+        teacher.eval()
+        val_loss = 0.0
+        vtotal = 0
+        with torch.no_grad():
+            for signals, labels in val_loader:
+                signals, labels = signals.to(device), labels.to(device)
+                logits, _ = teacher(signals)
+                loss = criterion(logits, labels)
+                val_loss += loss.item() * labels.size(0)
+                vtotal += labels.size(0)
+        val_loss = val_loss / max(vtotal, 1)
+        scheduler.step(val_loss)
+
+        if val_loss < best_loss:
+            best_loss = val_loss
+            best_state = teacher.state_dict()
+        if epoch % 1 == 0:
+            print(f"[Teacher] Epoch {epoch:02d}/{max_epochs} TrainLoss {train_loss:.4f} ValLoss {val_loss:.4f}")
+
+    if best_state is not None:
+        teacher.load_state_dict(best_state)
+    teacher.eval()
+
+
 def build_student(args: argparse.Namespace, device: torch.device) -> nn.Module:
     student = SegmentAwareStudent(
         num_classes=len(set(BEAT_LABEL_MAP.values())),
@@ -125,7 +184,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout_rate", type=float, default=0.0)
     parser.add_argument("--num_mlp_layers", type=int, default=2)
     parser.add_argument("--class_weight_abnormal", type=float, default=1.3)
-    parser.add_argument("--use_kd", action="store_true")
+    parser.add_argument("--use_kd", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--teacher_checkpoint", type=str, default=None)
     parser.add_argument("--teacher_embedding_dim", type=int, default=128)
     parser.add_argument("--kd_temperature", type=float, default=2.0)
@@ -133,9 +192,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--gamma", type=float, default=1.0)
-    parser.add_argument("--use_value_constraint", action="store_true")
-    parser.add_argument("--use_tanh_activations", action="store_true")
+    parser.add_argument("--use_value_constraint", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--use_tanh_activations", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
+    parser.add_argument("--auto_train_teacher", action=argparse.BooleanOptionalAction, default=True,
+                        help="Train a teacher automatically when KD is enabled and no checkpoint is provided.")
+    parser.add_argument("--teacher_auto_train_epochs", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -162,15 +224,61 @@ def main() -> None:
 
     student = build_student(args, device)
 
+    class_weights = compute_class_weights(tr_y, abnormal_boost=args.class_weight_abnormal).to(device)
+
     teacher = None
     proj_T: nn.Module
     proj_S: nn.Module
-    if args.use_kd:
-        teacher = build_teacher(num_classes=len(set(BEAT_LABEL_MAP.values())), embedding_dim=args.teacher_embedding_dim, device=device)
+    kd_enabled = args.use_kd
+    auto_teacher_path = os.path.join("saved_models", "auto_trained_teacher.pth")
+    if kd_enabled:
+        os.makedirs("saved_models", exist_ok=True)
+        checkpoint_path = args.teacher_checkpoint or auto_teacher_path
         if args.teacher_checkpoint and os.path.exists(args.teacher_checkpoint):
-            ckpt = torch.load(args.teacher_checkpoint, map_location=device)
-            teacher.load_state_dict(ckpt)
-            print(f"Loaded teacher checkpoint from {args.teacher_checkpoint}")
+            checkpoint_found = True
+        else:
+            checkpoint_found = os.path.exists(checkpoint_path)
+        if checkpoint_found:
+            teacher = build_teacher(
+                num_classes=len(set(BEAT_LABEL_MAP.values())),
+                embedding_dim=args.teacher_embedding_dim,
+                device=device,
+            )
+            ckpt = torch.load(checkpoint_path, map_location=device)
+            state = ckpt.get("model_state_dict", ckpt)
+            teacher.load_state_dict(state)
+            print(f"Loaded teacher checkpoint from {checkpoint_path}")
+        elif args.auto_train_teacher:
+            teacher = build_teacher(
+                num_classes=len(set(BEAT_LABEL_MAP.values())),
+                embedding_dim=args.teacher_embedding_dim,
+                device=device,
+            )
+            for p in teacher.parameters():
+                p.requires_grad = True
+            print(
+                "[INFO] No teacher checkpoint found. Auto-training a teacher for knowledge distillation."
+            )
+            train_teacher(
+                teacher,
+                train_loader,
+                val_loader,
+                class_weights,
+                device,
+                lr=args.lr,
+                weight_decay=args.weight_decay,
+                max_epochs=args.teacher_auto_train_epochs,
+            )
+            torch.save({"model_state_dict": teacher.state_dict()}, auto_teacher_path)
+            for p in teacher.parameters():
+                p.requires_grad = False
+            teacher.eval()
+            print(f"[INFO] Auto-trained teacher saved to {auto_teacher_path}")
+        else:
+            print("[WARNING] KD enabled but no teacher available. Distillation will be disabled.")
+            kd_enabled = False
+
+    if kd_enabled and teacher is not None:
         proj_T = nn.Linear(args.teacher_embedding_dim, args.kd_d).to(device)
         proj_cls = ConstrainedLinear if args.use_value_constraint else nn.Linear
         proj_kwargs = {"scale": args.constraint_scale} if args.use_value_constraint else {}
@@ -179,7 +287,6 @@ def main() -> None:
         proj_T = nn.Identity()
         proj_S = nn.Identity()
 
-    class_weights = compute_class_weights(tr_y, abnormal_boost=args.class_weight_abnormal).to(device)
     ce_loss_fn = nn.CrossEntropyLoss(weight=class_weights)
     mse_loss = nn.MSELoss()
 
@@ -202,7 +309,7 @@ def main() -> None:
             loss_ce = ce_loss_fn(logits_s, labels)
             loss = loss_ce
 
-            if args.use_kd and teacher is not None:
+            if kd_enabled and teacher is not None:
                 with torch.no_grad():
                     logits_t, feat_t = teacher(signals)
                 kd_logits = kd_logit_loss(logits_s, logits_t, args.kd_temperature)
