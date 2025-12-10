@@ -25,6 +25,7 @@ from utils import (
     kd_logit_loss,
     l2_normalize,
     make_weighted_sampler,
+    sweep_thresholds,
 )
 
 
@@ -165,6 +166,7 @@ def evaluate(
     data_loader: DataLoader,
     device: torch.device,
     return_probs: bool = False,
+    threshold: float | None = None,
 ) -> Tuple[float, Dict[str, float], List[int], List[int], List[float]]:
     model.eval()
     criterion = nn.CrossEntropyLoss()
@@ -180,11 +182,15 @@ def evaluate(
             loss = criterion(logits, labels)
             total_loss += loss.item() * labels.size(0)
             total += labels.size(0)
-            pred = torch.argmax(logits, dim=1)
+            prob_pos = torch.softmax(logits, dim=1)[:, 1]
+            if threshold is None:
+                pred = torch.argmax(logits, dim=1)
+            else:
+                pred = (prob_pos >= threshold).long()
             preds.extend(pred.cpu().tolist())
             trues.extend(labels.cpu().tolist())
             if return_probs:
-                probs.extend(torch.softmax(logits, dim=1)[:, 1].cpu().tolist())
+                probs.extend(prob_pos.cpu().tolist())
     avg_loss = total_loss / max(total, 1)
     metrics = confusion_metrics(trues, preds)
     return avg_loss, metrics, trues, preds, probs
@@ -373,6 +379,7 @@ def main() -> None:
 
     best_val_score = -float("inf")
     best_state = None
+    best_threshold = 0.5
     patience_counter = 0
 
     history: List[Dict[str, float]] = []
@@ -433,7 +440,11 @@ def main() -> None:
 
         train_loss = running_loss / max(total, 1)
 
-        val_loss, val_metrics, _, _, _ = evaluate(student, val_loader, device)
+        val_loss, val_argmax_metrics, val_true, _, val_probs = evaluate(
+            student, val_loader, device, return_probs=True
+        )
+
+        best_thr_epoch, val_metrics = sweep_thresholds(val_true, val_probs)
 
         if (
             args.enable_adaptive_reweight
@@ -463,8 +474,8 @@ def main() -> None:
             recall_rescue_done = True
         if (
             not collapse_handled
-            and val_metrics["fpr"] > 0.95
-            and val_metrics["miss_rate"] < 0.05
+            and val_argmax_metrics["fpr"] > 0.95
+            and val_argmax_metrics["miss_rate"] < 0.05
         ):
             print(
                 "[WARN] Detected positive-collapse (predicting nearly all abnormal). Relaxing rebalancing and pausing KD."
@@ -483,8 +494,8 @@ def main() -> None:
 
         if (
             not recall_rescue_done
-            and val_metrics["miss_rate"] > 0.95
-            and val_metrics["fpr"] < 0.05
+            and val_argmax_metrics["miss_rate"] > 0.95
+            and val_argmax_metrics["fpr"] < 0.05
             and epoch > args.imbalance_warmup_epochs
         ):
             # collapsed to predicting normal only
@@ -506,8 +517,8 @@ def main() -> None:
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
-            f"Val F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}% "
-            f"Score {epoch_score:.4f}"
+            f"Val@thr={best_thr_epoch:.2f} F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% "
+            f"FPR {val_metrics['fpr'] * 100:.2f}% Score {epoch_score:.4f}"
         )
 
         history.append(
@@ -524,6 +535,7 @@ def main() -> None:
         if epoch_score > best_val_score:
             best_val_score = epoch_score
             best_state = student.state_dict()
+            best_threshold = best_thr_epoch
             patience_counter = 0
             print("  -> New best model saved.")
         else:
@@ -535,14 +547,26 @@ def main() -> None:
     if best_state is not None:
         student.load_state_dict(best_state)
 
-    val_loss, val_metrics, val_true, val_pred, val_probs = evaluate(
+    val_loss, _, val_true, _, val_probs = evaluate(
         student, val_loader, device, return_probs=True
     )
-    gen_loss, gen_metrics, gen_true, gen_pred, gen_probs = evaluate(
+    best_threshold, val_metrics = sweep_thresholds(val_true, val_probs)
+    val_pred = (np.array(val_probs) >= best_threshold).astype(int).tolist()
+
+    gen_loss, _, gen_true, _, gen_probs = evaluate(
         student, gen_loader, device, return_probs=True
     )
-    print(f"Final Val: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, miss={val_metrics['miss_rate'] * 100:.2f}%, fpr={val_metrics['fpr'] * 100:.2f}%")
-    print(f"Generalization: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, miss={gen_metrics['miss_rate'] * 100:.2f}%, fpr={gen_metrics['fpr'] * 100:.2f}%")
+    gen_pred = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
+    gen_metrics = confusion_metrics(gen_true, gen_pred)
+
+    print(
+        f"Final Val@thr={best_threshold:.2f}: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, "
+        f"miss={val_metrics['miss_rate'] * 100:.2f}%, fpr={val_metrics['fpr'] * 100:.2f}%"
+    )
+    print(
+        f"Generalization@thr={best_threshold:.2f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, "
+        f"miss={gen_metrics['miss_rate'] * 100:.2f}%, fpr={gen_metrics['fpr'] * 100:.2f}%"
+    )
 
     os.makedirs("saved_models", exist_ok=True)
     save_path = os.path.join("saved_models", "student_model.pth")
@@ -550,6 +574,7 @@ def main() -> None:
         {
             "student_state_dict": student.state_dict(),
             "config": vars(args),
+            "best_threshold": best_threshold,
         },
         save_path,
     )
