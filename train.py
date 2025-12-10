@@ -236,6 +236,12 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Epochs to keep CE unweighted and sampler off before applying rebalancing",
     )
+    parser.add_argument(
+        "--imbalance_ramp_epochs",
+        type=int,
+        default=5,
+        help="Epochs over which to linearly ramp class weights/sampler boost after warmup",
+    )
     parser.add_argument("--recall_target_miss", type=float, default=0.15, help="Trigger recall rescue when miss rate exceeds this")
     parser.add_argument(
         "--adaptive_fpr_cap",
@@ -297,6 +303,8 @@ def main() -> None:
         args.auto_enable_sampler and abnormal_ratio < args.auto_sampler_ratio
     )
     current_sampler_boost = args.sampler_abnormal_boost
+    target_sampler_boost = current_sampler_boost
+    last_sampler_boost_used: float | None = None
 
     def _build_train_loader(use_weighted: bool, boost: float) -> DataLoader:
         if use_weighted:
@@ -317,6 +325,7 @@ def main() -> None:
             abnormal_boost=args.class_weight_abnormal,
             max_ratio=args.max_class_weight_ratio,
         ).to(device)
+    class_weight_scale = 1.0
 
     teacher = None
     proj_T: nn.Module
@@ -409,8 +418,13 @@ def main() -> None:
     recall_rescue_count = 0
     kd_active = False if kd_enabled else False
     imbalance_active = False
+    ramp_den = max(1, args.imbalance_ramp_epochs)
+    weight_ones = torch.ones_like(base_class_weights) if base_class_weights is not None else None
 
     for epoch in range(1, args.max_epochs + 1):
+        ramp_factor = 0.0
+        if epoch > args.imbalance_warmup_epochs:
+            ramp_factor = min(1.0, (epoch - args.imbalance_warmup_epochs) / ramp_den)
         # Gradually enable imbalance handling and KD after warmup
         if (not imbalance_active) and epoch > args.imbalance_warmup_epochs:
             if args.use_class_weights and base_class_weights is not None:
@@ -421,9 +435,9 @@ def main() -> None:
                 )
             if plan_sampler:
                 use_sampler = True
-                train_loader = _build_train_loader(use_sampler, current_sampler_boost)
+                train_loader = _build_train_loader(use_sampler, target_sampler_boost)
                 print(
-                    f"[WARMUP END] Enabled weighted sampler (abnormal boost {current_sampler_boost:.2f})"
+                    f"[WARMUP END] Enabled weighted sampler (abnormal boost {target_sampler_boost:.2f})"
                 )
             imbalance_active = True
 
@@ -434,6 +448,23 @@ def main() -> None:
         student.train()
         running_loss = 0.0
         total = 0
+
+        if args.use_class_weights and base_class_weights is not None:
+            scaled_weights = base_class_weights.clone()
+            if weight_ones is not None:
+                scaled_weights = weight_ones + (base_class_weights - weight_ones) * (ramp_factor * class_weight_scale)
+                scaled_weights[1] = min(
+                    scaled_weights[1], scaled_weights[0] * args.max_class_weight_ratio
+                )
+            current_class_weights = scaled_weights
+            ce_loss_fn = nn.CrossEntropyLoss(weight=current_class_weights)
+
+        if use_sampler:
+            effective_boost = 1.0 + (target_sampler_boost - 1.0) * ramp_factor
+            if last_sampler_boost_used is None or abs(effective_boost - last_sampler_boost_used) > 1e-3:
+                train_loader = _build_train_loader(use_sampler, effective_boost)
+                last_sampler_boost_used = effective_boost
+
         for signals, labels in train_loader:
             signals, labels = signals.to(device), labels.to(device)
             optimizer.zero_grad()
@@ -481,22 +512,19 @@ def main() -> None:
             and val_metrics["fpr"] < args.adaptive_fpr_cap
         ):
             if args.use_class_weights and current_class_weights is not None and current_class_weights.numel() > 1:
-                boost = 1.2
-                current_class_weights = current_class_weights.clone()
-                current_class_weights[1] = min(
-                    current_class_weights[1] * boost,
-                    current_class_weights[0] * args.max_class_weight_ratio,
+                class_weight_scale = min(
+                    class_weight_scale * 1.2,
+                    args.max_class_weight_ratio,
                 )
-                ce_loss_fn = nn.CrossEntropyLoss(weight=current_class_weights)
                 print(
-                    f"[ADAPT] High miss detected. Increasing abnormal class weight to {current_class_weights.tolist()}"
+                    f"[ADAPT] High miss detected. Increasing abnormal class weight scale to {class_weight_scale:.2f}"
                 )
             if not use_sampler:
                 use_sampler = True
-                current_sampler_boost = max(current_sampler_boost, 1.5)
-                train_loader = _build_train_loader(use_sampler, current_sampler_boost)
+                target_sampler_boost = max(target_sampler_boost, 1.5)
+                train_loader = _build_train_loader(use_sampler, target_sampler_boost)
                 print(
-                    f"[ADAPT] Enabled weighted sampler with abnormal boost {current_sampler_boost:.2f} to improve recall."
+                    f"[ADAPT] Enabled weighted sampler with abnormal boost {target_sampler_boost:.2f} to improve recall."
                 )
             recall_rescue_count += 1
 
@@ -532,6 +560,7 @@ def main() -> None:
                 print("       Switched to unweighted sampler.")
             current_class_weights = None
             ce_loss_fn = nn.CrossEntropyLoss(weight=current_class_weights)
+            class_weight_scale = 1.0
             kd_active = False
             patience_counter = 0
             collapse_handled = True
@@ -550,8 +579,8 @@ def main() -> None:
                     f"[WARN] Detected normal-collapse. Restoring class weights {current_class_weights.tolist()} and enabling sampler."
                 )
             use_sampler = True
-            current_sampler_boost = max(current_sampler_boost, 1.5)
-            train_loader = _build_train_loader(use_sampler, current_sampler_boost)
+            target_sampler_boost = max(target_sampler_boost, 1.5)
+            train_loader = _build_train_loader(use_sampler, target_sampler_boost)
             kd_active = False  # let CE recover before KD resumes
             collapse_handled = True
             recall_rescue_count += 1
