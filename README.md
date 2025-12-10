@@ -44,9 +44,9 @@ Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`)
     --constraint_scale 1.0 --dropout_rate 0.1
   ```
 
-Early stopping monitors a composite score (`F1 - miss_rate - FPR`) with configurable patience (`--patience`, default 15) and a minimum epoch guard (`--min_epochs`, default 20). Learning-rate scheduling uses `ReduceLROnPlateau` on the validation loss (`--scheduler_patience`, default 3, `factor=0.5`). Gradients are clipped to `max_norm=1.0`.
+Early stopping monitors a composite score (`F1 - miss_rate - FPR`) with configurable patience (`--patience`, default 25) and a minimum epoch guard (`--min_epochs`, default 25). Learning-rate scheduling uses `ReduceLROnPlateau` on the validation loss (`--scheduler_patience`, default 3, `factor=0.5`). Gradients are clipped to `max_norm=1.0`.
 
-**Class imbalance handling**: the training loader defaults to a weighted sampler (`--use_weighted_sampler/--no-use-weighted-sampler`) that upsamples abnormal beats (boost configurable via `--sampler_abnormal_boost`, default 1.2). Class-weighted CE can be toggled (`--use_class_weights/--no-use-class-weights`); when enabled, the abnormal boost defaults to `--class_weight_abnormal=1.5` with a ratio clamp (`--max_class_weight_ratio`, default 3.0) to avoid collapsing into always-positive predictions.
+**Class imbalance handling**: reweighting/reshuffling is now opt-in. By default the sampler is uniform (`--use_weighted_sampler/--no-use-weighted-sampler`, default off, boost `--sampler_abnormal_boost` default 1.0) and class-weighted CE is disabled (`--use_class_weights`), with conservative defaults if enabled (`--class_weight_abnormal=1.0`, ratio clamp `--max_class_weight_ratio=2.0`). A collapse detector in training will automatically drop weights/sampler if it observes FPR >95% with miss <5% to recover normal-class learning.
 
 ## Segment-Aware Student Overview
 - Inputs: `(batch_size, 1, 360)`

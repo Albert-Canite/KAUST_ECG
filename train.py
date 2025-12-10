@@ -205,13 +205,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--max_epochs", type=int, default=90)
-    parser.add_argument("--patience", type=int, default=15, help="Early stopping patience on monitored metric")
-    parser.add_argument("--min_epochs", type=int, default=20, help="Minimum epochs before early stopping")
+    parser.add_argument("--patience", type=int, default=25, help="Early stopping patience on monitored metric")
+    parser.add_argument("--min_epochs", type=int, default=25, help="Minimum epochs before early stopping")
     parser.add_argument("--scheduler_patience", type=int, default=3)
     parser.add_argument("--dropout_rate", type=float, default=0.0)
     parser.add_argument("--num_mlp_layers", type=int, default=2)
-    parser.add_argument("--class_weight_abnormal", type=float, default=1.5)
-    parser.add_argument("--max_class_weight_ratio", type=float, default=3.0)
+    parser.add_argument("--class_weight_abnormal", type=float, default=1.0)
+    parser.add_argument("--max_class_weight_ratio", type=float, default=2.0)
     parser.add_argument("--teacher_checkpoint", type=str, default=None)
     parser.add_argument("--teacher_embedding_dim", type=int, default=128)
     parser.add_argument("--kd_temperature", type=float, default=2.0)
@@ -228,17 +228,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sampler_abnormal_boost",
         type=float,
-        default=1.2,
-        help="Boost factor for abnormal beats in weighted sampler",
+        default=1.0,
+        help="Boost factor for abnormal beats in weighted sampler (set >1 to upsample abnormal)",
     )
 
-    _add_bool_arg(parser, "use_class_weights", default=True, help_text="class-weighted CE loss")
+    _add_bool_arg(parser, "use_class_weights", default=False, help_text="class-weighted CE loss")
 
     _add_bool_arg(parser, "use_kd", default=True, help_text="knowledge distillation")
     _add_bool_arg(parser, "use_value_constraint", default=False, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
     _add_bool_arg(parser, "auto_train_teacher", default=True, help_text="auto teacher training when no checkpoint is provided")
-    _add_bool_arg(parser, "use_weighted_sampler", default=True, help_text="weighted sampler to rebalance classes")
+    _add_bool_arg(parser, "use_weighted_sampler", default=False, help_text="weighted sampler to rebalance classes")
 
     return parser.parse_args()
 
@@ -363,6 +363,7 @@ def main() -> None:
     patience_counter = 0
 
     history: List[Dict[str, float]] = []
+    collapse_handled = False
 
     for epoch in range(1, args.max_epochs + 1):
         student.train()
@@ -397,6 +398,26 @@ def main() -> None:
         train_loss = running_loss / max(total, 1)
 
         val_loss, val_metrics, _, _, _ = evaluate(student, val_loader, device)
+        if (
+            not collapse_handled
+            and val_metrics["fpr"] > 0.95
+            and val_metrics["miss_rate"] < 0.05
+        ):
+            print(
+                "[WARN] Detected positive-collapse (predicting nearly all abnormal). Relaxing rebalancing."
+            )
+            if args.use_weighted_sampler:
+                train_loader = DataLoader(
+                    train_dataset, batch_size=args.batch_size, shuffle=True
+                )
+                args.use_weighted_sampler = False
+                print("       Switched to unweighted sampler.")
+            if args.use_class_weights and ce_loss_fn.weight is not None:
+                ce_loss_fn = nn.CrossEntropyLoss()
+                args.use_class_weights = False
+                print("       Removed class weights for CE loss.")
+            patience_counter = 0
+            collapse_handled = True
         scheduler.step(val_loss)
 
         epoch_score = val_metrics["f1"] - val_metrics["miss_rate"] - val_metrics["fpr"]

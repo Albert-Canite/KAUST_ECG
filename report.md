@@ -20,7 +20,7 @@
   - Logit 蒸馏：`KL(softmax(z_T/T), softmax(z_S/T))`，`T=kd_temperature`。
   - 特征蒸馏：`proj_T(feat_T)`、`proj_S(h_pool)` 映射到 `d_kd` 维，L2 归一化后用 MSE 对齐。
   - 总损失：`alpha*CE + beta*KD_logits + gamma*KD_feat`，三者均可配置。
-- **训练细节**：Teacher 仅前向、`eval()` 模式，`requires_grad=False`；梯度裁剪 `max_norm=1.0`；Adam 优化器、ReduceLROnPlateau 调度；验证集早停监控组合指标 `F1 - miss_rate - FPR`，`patience=15`、`min_epochs=20`，避免过早停止。
+- **训练细节**：Teacher 仅前向、`eval()` 模式，`requires_grad=False`；梯度裁剪 `max_norm=1.0`；Adam 优化器、ReduceLROnPlateau 调度；验证集早停监控组合指标 `F1 - miss_rate - FPR`，`patience=25`、`min_epochs=25`，避免过早停止。
 
 ## 数值归一化与约束
 - **输入预处理**：每条 beat 减均值、按最大绝对值缩放到 `[-1,1]`，必要时裁剪。
@@ -37,10 +37,10 @@
 - `split_dataset` 将训练数据按 80/20 划分训练/验证，batch size 默认 128，可调。
 
 ## 超参数与可配置项
-- 训练：`--batch_size`，`--lr=1e-3`，`--weight_decay=1e-4`，`--max_epochs`(默认 90)，`--patience=15`，`--min_epochs=20`，`--scheduler_patience=3`。
+- 训练：`--batch_size`，`--lr=1e-3`，`--weight_decay=1e-4`，`--max_epochs`(默认 90)，`--patience=25`，`--min_epochs=25`，`--scheduler_patience=3`。
 - 类别不平衡：
-  - 类别权重：异常类默认 2.5x (`--class_weight_abnormal`)。
-  - 采样：默认开启加权采样 (`--use_weighted_sampler/--no-use-weighted-sampler`)，异常类采样增强倍率 `--sampler_abnormal_boost`（默认 2.0）。
+  - 类别权重：默认关闭，若开启（`--use_class_weights`）异常类默认 1.0x，可调且受 `--max_class_weight_ratio`（默认 2.0）限制。
+  - 采样：默认关闭加权采样 (`--use_weighted_sampler/--no-use-weighted-sampler`)，异常类采样增强倍率 `--sampler_abnormal_boost`（默认 1.0，可调 >1）。
 - 模型：`--num_mlp_layers`(≥2)、`--dropout_rate`、`--use_value_constraint`、`--use_tanh_activations`、`--constraint_scale`。
 - 蒸馏：`--use_kd`（默认开启，可用 `--no-use-kd` 关闭）、`--teacher_checkpoint`（若未提供且启用 KD，将自动预训练 ResNet18 teacher）`--teacher_auto_train_epochs`（默认 15）、`--teacher_embedding_dim`、`--kd_temperature`、`--kd_d`、`--alpha/beta/gamma`、教师质量阈值 `--teacher_min_f1`、`--teacher_min_sensitivity`，若教师低于阈值会自动禁用 KD 以保护召回率。
 
@@ -73,7 +73,20 @@
   2. **教师正常，KD 信号不是主因**：教师验证损失低、质量守卫通过，学生崩塌主要来自损失权重与采样策略的偏置。
   3. **早停仍保留了崩塌解**：组合指标 `F1 - miss - FPR` 对 FPR=100% 会给出极低得分，但由于训练曲线未明显改善且 patience 已耗尽，提前在劣质解上停止。
 - **改进措施（已代码化）**：
-  - 下调默认异常类权重至 1.5，并新增 `--max_class_weight_ratio`（默认 3.0）对权重做比值裁剪，防止极端不平衡导致“全异常”预测。
-  - 下调采样异常放大倍数默认值至 1.2，避免与类别权重叠加产生过强偏置。
-  - 新增 `--use_class_weights/--no-use-class-weights` 以便快速关闭权重，仅保留采样或反之，便于排查与调优。
-  - 继续保留 F1/miss/FPR 组合早停，但建议在异常权重过高时先降低权重或关闭 class weights 再训练，以获得更均衡的召回与误报。
+  - 下调默认异常类权重至 1.0，并新增 `--max_class_weight_ratio`（默认 2.0）对权重做比值裁剪，防止极端不平衡导致“全异常”预测。
+  - 默认关闭采样与类别权重，需手动开启且倍率可控（采样默认 1.0），降低叠加偏置风险。
+  - 新增 `--use_class_weights/--no-use-class-weights` 与 `--use_weighted_sampler/--no-use-weighted-sampler` 便于快速排查与调优。
+  - 继续保留 F1/miss/FPR 组合早停，并提高 patience/min_epochs，避免短期波动导致的提前停止。
+
+## v3_debug 问题分析（最新日志：FPR=100%，miss=0%，F1≈0.11）
+- **现象**：学生依旧“全预测异常”，验证/泛化 TN≈0；教师预训练正常（ValLoss≈0.073）。
+- **定位结果**：
+  1. **正类偏置叠加仍在**：上轮虽降低权重/采样倍数，但默认依然开启，累积偏置仍将损失重心推向正类，模型在早期就进入“全异常”解。
+  2. **缺少在线纠偏**：崩塌出现后，训练循环缺乏自动降权/换采样的防护，导致后续梯度继续固化该解。
+- **本轮修复**：
+  - 将重加权与重采样默认关闭（需显式开启），并将异常权重默认设为 1.0、权重比值上限 2.0、采样默认倍率 1.0，降低初始偏置。
+  - 在训练循环中新增“正类崩塌”自检：若验证集满足 `FPR>95%` 且 `miss<5%`，自动切换为无权重、无采样的 DataLoader，并移除 CE 类别权重，重置早停计数，强制模型重新学习正常类。
+  - 延长 patience/min_epochs 至 25，给自检后的再训练留出迭代窗口。
+- **后续建议**：
+  - 如需提升召回，可先单独调高 `class_weight_abnormal` 或 `sampler_abnormal_boost`，避免权重与采样叠加；观察 FPR，一旦上升可降低倍率或依赖自检。
+  - 若仍出现崩塌，可暂时关闭 KD，或降低蒸馏温度，待学生稳定后再恢复 KD。
