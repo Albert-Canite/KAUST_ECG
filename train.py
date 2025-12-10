@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -11,6 +11,9 @@ import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
+
+from matplotlib import pyplot as plt
+from sklearn.metrics import auc, confusion_matrix, roc_curve
 
 from constraints import ConstrainedLinear, scale_to_unit
 from data import BEAT_LABEL_MAP, ECGBeatDataset, load_records, set_seed, split_dataset
@@ -151,13 +154,19 @@ def build_student(args: argparse.Namespace, device: torch.device) -> nn.Module:
     return student
 
 
-def evaluate(model: SegmentAwareStudent, data_loader: DataLoader, device: torch.device) -> Tuple[float, Dict[str, float]]:
+def evaluate(
+    model: SegmentAwareStudent,
+    data_loader: DataLoader,
+    device: torch.device,
+    return_probs: bool = False,
+) -> Tuple[float, Dict[str, float], List[int], List[int], List[float]]:
     model.eval()
     criterion = nn.CrossEntropyLoss()
     total_loss = 0.0
     total = 0
-    preds = []
-    trues = []
+    preds: List[int] = []
+    trues: List[int] = []
+    probs: List[float] = []
     with torch.no_grad():
         for signals, labels in data_loader:
             signals, labels = signals.to(device), labels.to(device)
@@ -165,11 +174,14 @@ def evaluate(model: SegmentAwareStudent, data_loader: DataLoader, device: torch.
             loss = criterion(logits, labels)
             total_loss += loss.item() * labels.size(0)
             total += labels.size(0)
-            preds.extend(torch.argmax(logits, dim=1).cpu().tolist())
+            pred = torch.argmax(logits, dim=1)
+            preds.extend(pred.cpu().tolist())
             trues.extend(labels.cpu().tolist())
+            if return_probs:
+                probs.extend(torch.softmax(logits, dim=1)[:, 1].cpu().tolist())
     avg_loss = total_loss / max(total, 1)
     metrics = confusion_metrics(trues, preds)
-    return avg_loss, metrics
+    return avg_loss, metrics, trues, preds, probs
 
 
 def _add_bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
@@ -187,7 +199,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--max_epochs", type=int, default=90)
-    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience on val loss")
+    parser.add_argument("--patience", type=int, default=15, help="Early stopping patience on monitored metric")
+    parser.add_argument("--min_epochs", type=int, default=20, help="Minimum epochs before early stopping")
     parser.add_argument("--scheduler_patience", type=int, default=3)
     parser.add_argument("--dropout_rate", type=float, default=0.0)
     parser.add_argument("--num_mlp_layers", type=int, default=2)
@@ -302,9 +315,11 @@ def main() -> None:
     optimizer = Adam(student.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=args.scheduler_patience, verbose=True)
 
-    best_val_loss = float("inf")
+    best_val_score = -float("inf")
     best_state = None
     patience_counter = 0
+
+    history: List[Dict[str, float]] = []
 
     for epoch in range(1, args.max_epochs + 1):
         student.train()
@@ -338,30 +353,48 @@ def main() -> None:
 
         train_loss = running_loss / max(total, 1)
 
-        val_loss, val_metrics = evaluate(student, val_loader, device)
+        val_loss, val_metrics, _, _, _ = evaluate(student, val_loader, device)
         scheduler.step(val_loss)
+
+        epoch_score = val_metrics["f1"] - val_metrics["miss_rate"] - val_metrics["fpr"]
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
-            f"Val F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}%"
+            f"Val F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}% "
+            f"Score {epoch_score:.4f}"
         )
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "val_f1": val_metrics["f1"],
+                "val_miss": val_metrics["miss_rate"],
+                "val_fpr": val_metrics["fpr"],
+            }
+        )
+
+        if epoch_score > best_val_score:
+            best_val_score = epoch_score
             best_state = student.state_dict()
             patience_counter = 0
             print("  -> New best model saved.")
         else:
             patience_counter += 1
-            if patience_counter >= args.patience:
+            if patience_counter >= args.patience and epoch >= args.min_epochs:
                 print("Early stopping triggered.")
                 break
 
     if best_state is not None:
         student.load_state_dict(best_state)
 
-    val_loss, val_metrics = evaluate(student, val_loader, device)
-    gen_loss, gen_metrics = evaluate(student, gen_loader, device)
+    val_loss, val_metrics, val_true, val_pred, val_probs = evaluate(
+        student, val_loader, device, return_probs=True
+    )
+    gen_loss, gen_metrics, gen_true, gen_pred, gen_probs = evaluate(
+        student, gen_loader, device, return_probs=True
+    )
     print(f"Final Val: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, miss={val_metrics['miss_rate'] * 100:.2f}%, fpr={val_metrics['fpr'] * 100:.2f}%")
     print(f"Generalization: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, miss={gen_metrics['miss_rate'] * 100:.2f}%, fpr={gen_metrics['fpr'] * 100:.2f}%")
 
@@ -375,6 +408,65 @@ def main() -> None:
         save_path,
     )
     print(f"Saved student checkpoint to {save_path}")
+
+    # Visualization and artifact saving
+    os.makedirs("artifacts", exist_ok=True)
+
+    def _save_training_curves() -> None:
+        epochs = [h["epoch"] for h in history]
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        axes[0].plot(epochs, [h["train_loss"] for h in history], label="Train Loss")
+        axes[0].plot(epochs, [h["val_loss"] for h in history], label="Val Loss")
+        axes[0].set_xlabel("Epoch")
+        axes[0].set_ylabel("Loss")
+        axes[0].set_title("Loss Curves")
+        axes[0].legend()
+
+        axes[1].plot(epochs, [h["val_f1"] for h in history], label="F1")
+        axes[1].plot(epochs, [h["val_miss"] for h in history], label="Miss Rate")
+        axes[1].plot(epochs, [h["val_fpr"] for h in history], label="FPR")
+        axes[1].set_xlabel("Epoch")
+        axes[1].set_title("Val Metrics")
+        axes[1].legend()
+        plt.tight_layout()
+        fig.savefig(os.path.join("artifacts", "training_curves.png"))
+        plt.close(fig)
+
+    def _save_roc(y_true: List[int], probs: List[float], name: str) -> None:
+        fpr, tpr, _ = roc_curve(y_true, probs)
+        roc_auc = auc(fpr, tpr)
+        fig, ax = plt.subplots(figsize=(5, 4))
+        ax.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
+        ax.plot([0, 1], [0, 1], "k--", alpha=0.4)
+        ax.set_xlabel("False Positive Rate")
+        ax.set_ylabel("True Positive Rate")
+        ax.set_title(f"ROC - {name}")
+        ax.legend()
+        fig.savefig(os.path.join("artifacts", f"roc_{name.lower()}.png"))
+        plt.close(fig)
+
+    def _save_confusion(y_true: List[int], y_pred: List[int], name: str) -> None:
+        cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+        fig, ax = plt.subplots(figsize=(4, 4))
+        im = ax.imshow(cm, cmap="Blues")
+        ax.set_xticks([0, 1])
+        ax.set_yticks([0, 1])
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("True")
+        ax.set_title(f"Confusion Matrix - {name}")
+        for i in range(2):
+            for j in range(2):
+                ax.text(j, i, cm[i, j], ha="center", va="center", color="black")
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        fig.savefig(os.path.join("artifacts", f"confusion_{name.lower()}.png"))
+        plt.close(fig)
+
+    _save_training_curves()
+    _save_roc(val_true, val_probs, "Val")
+    _save_roc(gen_true, gen_probs, "Generalization")
+    _save_confusion(val_true, val_pred, "Val")
+    _save_confusion(gen_true, gen_pred, "Generalization")
+    print("Saved training curves, ROC curves, and confusion matrices to ./artifacts")
 
 
 if __name__ == "__main__":

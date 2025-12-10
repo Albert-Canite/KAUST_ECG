@@ -20,7 +20,7 @@
   - Logit 蒸馏：`KL(softmax(z_T/T), softmax(z_S/T))`，`T=kd_temperature`。
   - 特征蒸馏：`proj_T(feat_T)`、`proj_S(h_pool)` 映射到 `d_kd` 维，L2 归一化后用 MSE 对齐。
   - 总损失：`alpha*CE + beta*KD_logits + gamma*KD_feat`，三者均可配置。
-- **训练细节**：Teacher 仅前向、`eval()` 模式，`requires_grad=False`；梯度裁剪 `max_norm=1.0`；Adam 优化器、ReduceLROnPlateau 调度、验证集早停 (`patience=10`)。
+- **训练细节**：Teacher 仅前向、`eval()` 模式，`requires_grad=False`；梯度裁剪 `max_norm=1.0`；Adam 优化器、ReduceLROnPlateau 调度；验证集早停监控组合指标 `F1 - miss_rate - FPR`，`patience=15`、`min_epochs=20`，避免过早停止。
 
 ## 数值归一化与约束
 - **输入预处理**：每条 beat 减均值、按最大绝对值缩放到 `[-1,1]`，必要时裁剪。
@@ -37,14 +37,14 @@
 - `split_dataset` 将训练数据按 80/20 划分训练/验证，batch size 默认 128，可调。
 
 ## 超参数与可配置项
-- 训练：`--batch_size`，`--lr=1e-3`，`--weight_decay=1e-4`，`--max_epochs`(默认 90)，`--patience=10`，`--scheduler_patience=3`。
+- 训练：`--batch_size`，`--lr=1e-3`，`--weight_decay=1e-4`，`--max_epochs`(默认 90)，`--patience=15`，`--min_epochs=20`，`--scheduler_patience=3`。
 - 类别不平衡：`compute_class_weights` 提供异常类权重提升（默认 1.3x）。
 - 模型：`--num_mlp_layers`(≥2)、`--dropout_rate`、`--use_value_constraint`、`--use_tanh_activations`、`--constraint_scale`。
 - 蒸馏：`--use_kd`（默认开启，可用 `--no-use-kd` 关闭）、`--teacher_checkpoint`（若未提供且启用 KD，将自动轻量预训练一个 ResNet18 teacher 后用于蒸馏）、`--teacher_embedding_dim`、`--kd_temperature`、`--kd_d`、`--alpha/beta/gamma`。
 
 ## 代码接口与输出
 - 前向接口：Student/Teacher 输入 `(batch,1,360)`，Student 输出 `(logits, h_pool)`，Teacher 输出 `(logits_T, feat_T)`。
-- 训练脚本保存学生模型到 `saved_models/student_model.pth`，包含 CLI 配置。
+- 训练脚本保存学生模型到 `saved_models/student_model.pth`，包含 CLI 配置；训练曲线、ROC（验证/泛化）与混淆矩阵 PNG 自动写入 `./artifacts`。
 
 ## 需求符合性检查
 - 分段卷积 + 8 token 池化 + photonic MLP + 均值池化分类流水线已实现并可配置（`models/student.py`）。

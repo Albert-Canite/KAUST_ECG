@@ -44,7 +44,7 @@ Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`)
     --constraint_scale 1.0 --dropout_rate 0.1
   ```
 
-Early stopping monitors validation loss with configurable patience (`--patience`, default 10). Learning-rate scheduling uses `ReduceLROnPlateau` on the validation loss (`--scheduler_patience`, default 3, `factor=0.5`). Gradients are clipped to `max_norm=1.0`.
+Early stopping monitors a composite score (`F1 - miss_rate - FPR`) with configurable patience (`--patience`, default 15) and a minimum epoch guard (`--min_epochs`, default 20). Learning-rate scheduling uses `ReduceLROnPlateau` on the validation loss (`--scheduler_patience`, default 3, `factor=0.5`). Gradients are clipped to `max_norm=1.0`.
 
 ## Segment-Aware Student Overview
 - Inputs: `(batch_size, 1, 360)`
@@ -65,4 +65,4 @@ Early stopping monitors validation loss with configurable patience (`--patience`
 - Beat preprocessing keeps raw inputs in `[-1, 1]` via mean removal and max-abs scaling; optional post-layer dropout mitigates overfitting.
 
 ## Saved Artifacts
-Checkpoints are written to `saved_models/student_model.pth` with the CLI configuration. Adjust paths as needed for your environment.
+Checkpoints are written to `saved_models/student_model.pth` with the CLI configuration. Training curves, ROC curves (val/generalization), and confusion matrices are exported to `./artifacts` as PNG files. Adjust paths as needed for your environment.
