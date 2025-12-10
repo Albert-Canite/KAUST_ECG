@@ -46,7 +46,7 @@ Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`)
 
 Early stopping monitors a composite score (`F1 - miss_rate - FPR`) with configurable patience (`--patience`, default 15) and a minimum epoch guard (`--min_epochs`, default 20). Learning-rate scheduling uses `ReduceLROnPlateau` on the validation loss (`--scheduler_patience`, default 3, `factor=0.5`). Gradients are clipped to `max_norm=1.0`.
 
-**Class imbalance handling**: the training loader defaults to a weighted sampler (`--use_weighted_sampler/--no-use-weighted-sampler`) that upsamples abnormal beats (boost configurable via `--sampler_abnormal_boost`, default 2.0) and class weights with an abnormal boost (`--class_weight_abnormal`, default 2.5).
+**Class imbalance handling**: the training loader defaults to a weighted sampler (`--use_weighted_sampler/--no-use-weighted-sampler`) that upsamples abnormal beats (boost configurable via `--sampler_abnormal_boost`, default 1.2). Class-weighted CE can be toggled (`--use_class_weights/--no-use-class-weights`); when enabled, the abnormal boost defaults to `--class_weight_abnormal=1.5` with a ratio clamp (`--max_class_weight_ratio`, default 3.0) to avoid collapsing into always-positive predictions.
 
 ## Segment-Aware Student Overview
 - Inputs: `(batch_size, 1, 360)`

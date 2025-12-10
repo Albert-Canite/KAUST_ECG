@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -93,7 +93,7 @@ def train_teacher(
     teacher: nn.Module,
     train_loader: DataLoader,
     val_loader: DataLoader,
-    class_weights: torch.Tensor,
+    class_weights: torch.Tensor | None,
     device: torch.device,
     lr: float,
     weight_decay: float,
@@ -210,7 +210,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler_patience", type=int, default=3)
     parser.add_argument("--dropout_rate", type=float, default=0.0)
     parser.add_argument("--num_mlp_layers", type=int, default=2)
-    parser.add_argument("--class_weight_abnormal", type=float, default=2.5)
+    parser.add_argument("--class_weight_abnormal", type=float, default=1.5)
+    parser.add_argument("--max_class_weight_ratio", type=float, default=3.0)
     parser.add_argument("--teacher_checkpoint", type=str, default=None)
     parser.add_argument("--teacher_embedding_dim", type=int, default=128)
     parser.add_argument("--kd_temperature", type=float, default=2.0)
@@ -227,9 +228,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sampler_abnormal_boost",
         type=float,
-        default=2.0,
+        default=1.2,
         help="Boost factor for abnormal beats in weighted sampler",
     )
+
+    _add_bool_arg(parser, "use_class_weights", default=True, help_text="class-weighted CE loss")
 
     _add_bool_arg(parser, "use_kd", default=True, help_text="knowledge distillation")
     _add_bool_arg(parser, "use_value_constraint", default=False, help_text="value-constrained weights/activations")
@@ -267,7 +270,13 @@ def main() -> None:
 
     student = build_student(args, device)
 
-    class_weights = compute_class_weights(tr_y, abnormal_boost=args.class_weight_abnormal).to(device)
+    class_weights = None
+    if args.use_class_weights:
+        class_weights = compute_class_weights(
+            tr_y,
+            abnormal_boost=args.class_weight_abnormal,
+            max_ratio=args.max_class_weight_ratio,
+        ).to(device)
 
     teacher = None
     proj_T: nn.Module

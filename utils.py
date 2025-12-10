@@ -10,7 +10,13 @@ import torch.nn.functional as F
 from torch.utils.data import WeightedRandomSampler
 
 
-def compute_class_weights(labels: np.ndarray, abnormal_boost: float = 2.5) -> torch.Tensor:
+def compute_class_weights(
+    labels: np.ndarray,
+    abnormal_boost: float = 1.5,
+    max_ratio: float = 3.0,
+) -> torch.Tensor:
+    """Inverse-frequency class weights with optional abnormal boost and ratio clamp."""
+
     counter = Counter(labels.tolist())
     total = len(labels)
     weights: List[float] = []
@@ -23,7 +29,17 @@ def compute_class_weights(labels: np.ndarray, abnormal_boost: float = 2.5) -> to
             weights.append(base)
         else:
             weights.append(1.0)
-    return torch.tensor(weights, dtype=torch.float32)
+
+    weight_tensor = torch.tensor(weights, dtype=torch.float32)
+
+    # Clamp extreme ratios to avoid collapsing to predicting全异常或全正常
+    if max_ratio is not None and max_ratio > 0:
+        mean_w = weight_tensor.mean()
+        min_w = mean_w / max_ratio
+        max_w = mean_w * max_ratio
+        weight_tensor = weight_tensor.clamp(min=min_w, max=max_w)
+
+    return weight_tensor
 
 
 def confusion_metrics(y_true: List[int], y_pred: List[int]) -> Dict[str, float]:
