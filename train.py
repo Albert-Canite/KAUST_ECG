@@ -172,6 +172,14 @@ def evaluate(model: SegmentAwareStudent, data_loader: DataLoader, device: torch.
     return avg_loss, metrics
 
 
+def _add_bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
+    """Backward-compatible boolean flags with --name / --no-name."""
+
+    parser.add_argument(f"--{name}", dest=name, action="store_true", help=f"Enable {help_text}")
+    parser.add_argument(f"--no-{name}", dest=name, action="store_false", help=f"Disable {help_text}")
+    parser.set_defaults(**{name: default})
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MIT-BIH ECG training with KD and constraints")
     parser.add_argument("--data_path", type=str, default="E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/")
@@ -184,7 +192,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout_rate", type=float, default=0.0)
     parser.add_argument("--num_mlp_layers", type=int, default=2)
     parser.add_argument("--class_weight_abnormal", type=float, default=1.3)
-    parser.add_argument("--use_kd", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--teacher_checkpoint", type=str, default=None)
     parser.add_argument("--teacher_embedding_dim", type=int, default=128)
     parser.add_argument("--kd_temperature", type=float, default=2.0)
@@ -192,13 +199,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--gamma", type=float, default=1.0)
-    parser.add_argument("--use_value_constraint", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--use_tanh_activations", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
-    parser.add_argument("--auto_train_teacher", action=argparse.BooleanOptionalAction, default=True,
-                        help="Train a teacher automatically when KD is enabled and no checkpoint is provided.")
     parser.add_argument("--teacher_auto_train_epochs", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
+
+    _add_bool_arg(parser, "use_kd", default=True, help_text="knowledge distillation")
+    _add_bool_arg(parser, "use_value_constraint", default=False, help_text="value-constrained weights/activations")
+    _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
+    _add_bool_arg(parser, "auto_train_teacher", default=True, help_text="auto teacher training when no checkpoint is provided")
+
     return parser.parse_args()
 
 
