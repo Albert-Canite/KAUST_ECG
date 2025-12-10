@@ -44,7 +44,7 @@ Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`)
     --constraint_scale 1.0 --dropout_rate 0.1
   ```
 
-Early stopping monitors a recall-biased score (`F1 + 1.5*sensitivity - FPR`) with configurable patience (`--patience`, default 25) and a minimum epoch guard (`--min_epochs`, default 25). Learning-rate scheduling uses `ReduceLROnPlateau` on the validation loss (`--scheduler_patience`, default 3, `factor=0.5`). Gradients are clipped to `max_norm=1.0`.
+Early stopping monitors a recall-biased score (`F1 + 1.5*sensitivity - FPR`) with configurable patience (`--patience`, default 25) and a minimum epoch guard (`--min_epochs`, default 25). You can blend validation and generalization scores for the stopping criterion via `--use_generalization_score/--no-use_generalization_score` and `--generalization_score_weight` (default 0.3) to reduce validation overfitting. Learning-rate scheduling uses `ReduceLROnPlateau` on the validation loss (`--scheduler_patience`, default 3, `factor=0.5`). Gradients are clipped to `max_norm=1.0`.
 
 **Threshold tuning**: each validation pass sweeps a dense grid plus probability quantiles in `[0.05, 0.95]`, first filtering thresholds that satisfy `miss <= --threshold_target_miss` (default 0.12) and `fpr <= --threshold_max_fpr` (default 0.20). Among feasible candidates it maximizes `F1 + 1.5*sensitivity - FPR`; if none meet the constraints, the best score over all thresholds is used. The chosen threshold drives early stopping, artifact reporting, generalization evaluation, and is stored in the checkpoint.
 

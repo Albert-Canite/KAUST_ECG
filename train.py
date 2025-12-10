@@ -272,6 +272,18 @@ def parse_args() -> argparse.Namespace:
     _add_bool_arg(parser, "auto_train_teacher", default=True, help_text="auto teacher training when no checkpoint is provided")
     _add_bool_arg(parser, "use_weighted_sampler", default=False, help_text="weighted sampler to rebalance classes")
     _add_bool_arg(parser, "auto_enable_sampler", default=True, help_text="auto enable sampler when imbalance is high")
+    _add_bool_arg(
+        parser,
+        "use_generalization_score",
+        default=True,
+        help_text="blend validation and generalization scores for early stopping",
+    )
+    parser.add_argument(
+        "--generalization_score_weight",
+        type=float,
+        default=0.3,
+        help="Weight for the generalization score when blending with validation (0-1).",
+    )
 
     return parser.parse_args()
 
@@ -504,6 +516,11 @@ def main() -> None:
             fpr_cap=args.threshold_max_fpr,
         )
 
+        gen_loss, gen_argmax_metrics, gen_true, _, gen_probs = evaluate(
+            student, gen_loader, device, return_probs=True, threshold=best_thr_epoch
+        )
+        gen_metrics = confusion_metrics(gen_true, (np.array(gen_probs) >= best_thr_epoch).astype(int).tolist())
+
         if (
             args.enable_adaptive_reweight
             and imbalance_active
@@ -586,12 +603,19 @@ def main() -> None:
             recall_rescue_count += 1
         scheduler.step(val_loss)
 
-        epoch_score = val_metrics["f1"] + val_metrics["sensitivity"] - 0.5 * val_metrics["fpr"]
+        val_score = val_metrics["f1"] + val_metrics["sensitivity"] - 0.5 * val_metrics["fpr"]
+        gen_score = gen_metrics["f1"] + gen_metrics["sensitivity"] - 0.5 * gen_metrics["fpr"]
+        if args.use_generalization_score:
+            blend = np.clip(args.generalization_score_weight, 0.0, 1.0)
+            epoch_score = (1 - blend) * val_score + blend * gen_score
+        else:
+            epoch_score = val_score
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
             f"Val@thr={best_thr_epoch:.2f} F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% "
-            f"FPR {val_metrics['fpr'] * 100:.2f}% Score {epoch_score:.4f}"
+            f"FPR {val_metrics['fpr'] * 100:.2f}% | Gen@thr={best_thr_epoch:.2f} F1 {gen_metrics['f1']:.3f} "
+            f"Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}% Score {epoch_score:.4f}"
         )
 
         history.append(
@@ -602,6 +626,9 @@ def main() -> None:
                 "val_f1": val_metrics["f1"],
                 "val_miss": val_metrics["miss_rate"],
                 "val_fpr": val_metrics["fpr"],
+                "gen_f1": gen_metrics["f1"],
+                "gen_miss": gen_metrics["miss_rate"],
+                "gen_fpr": gen_metrics["fpr"],
             }
         )
 
@@ -674,6 +701,10 @@ def main() -> None:
         axes[1].plot(epochs, [h["val_f1"] for h in history], label="F1")
         axes[1].plot(epochs, [h["val_miss"] for h in history], label="Miss Rate")
         axes[1].plot(epochs, [h["val_fpr"] for h in history], label="FPR")
+        if any("gen_f1" in h for h in history):
+            axes[1].plot(epochs, [h.get("gen_f1", float("nan")) for h in history], label="Gen F1", linestyle="--")
+            axes[1].plot(epochs, [h.get("gen_miss", float("nan")) for h in history], label="Gen Miss", linestyle="--")
+            axes[1].plot(epochs, [h.get("gen_fpr", float("nan")) for h in history], label="Gen FPR", linestyle="--")
         axes[1].set_xlabel("Epoch")
         axes[1].set_title("Val Metrics")
         axes[1].legend()
