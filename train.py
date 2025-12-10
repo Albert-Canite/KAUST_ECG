@@ -223,6 +223,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teacher_auto_train_epochs", type=int, default=15)
     parser.add_argument("--teacher_min_f1", type=float, default=0.6, help="Minimum teacher F1 to keep KD enabled")
     parser.add_argument("--teacher_min_sensitivity", type=float, default=0.7, help="Minimum teacher TPR to keep KD enabled")
+    parser.add_argument("--kd_warmup_epochs", type=int, default=5, help="Epochs to train without KD before enabling distillation")
+    parser.add_argument(
+        "--imbalance_warmup_epochs",
+        type=int,
+        default=5,
+        help="Epochs to keep CE unweighted and sampler off before applying rebalancing",
+    )
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument(
@@ -260,7 +267,7 @@ def main() -> None:
     print(f"Train: {len(tr_x)} | Val: {len(va_x)} | Generalization: {len(gen_x)}")
 
     train_dataset = ECGBeatDataset(tr_x, tr_y)
-    use_sampler = args.use_weighted_sampler
+    use_sampler = False  # start without sampler to avoid early collapse
     current_sampler_boost = args.sampler_abnormal_boost
 
     def _build_train_loader(use_weighted: bool, boost: float) -> DataLoader:
@@ -275,9 +282,9 @@ def main() -> None:
 
     student = build_student(args, device)
 
-    class_weights = None
+    base_class_weights = None
     if args.use_class_weights:
-        class_weights = compute_class_weights(
+        base_class_weights = compute_class_weights(
             tr_y,
             abnormal_boost=args.class_weight_abnormal,
             max_ratio=args.max_class_weight_ratio,
@@ -320,7 +327,7 @@ def main() -> None:
                 teacher,
                 train_loader,
                 val_loader,
-                class_weights,
+                base_class_weights,
                 device,
                 lr=args.lr,
                 weight_decay=args.weight_decay,
@@ -357,7 +364,8 @@ def main() -> None:
         proj_T = nn.Identity()
         proj_S = nn.Identity()
 
-    ce_loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+    current_class_weights = None
+    ce_loss_fn = nn.CrossEntropyLoss(weight=current_class_weights)
     mse_loss = nn.MSELoss()
 
     optimizer = Adam(student.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
@@ -370,8 +378,30 @@ def main() -> None:
     history: List[Dict[str, float]] = []
     collapse_handled = False
     recall_rescue_done = False
+    kd_active = False if kd_enabled else False
+    imbalance_active = False
 
     for epoch in range(1, args.max_epochs + 1):
+        # Gradually enable imbalance handling and KD after warmup
+        if (not imbalance_active) and epoch > args.imbalance_warmup_epochs:
+            if args.use_class_weights and base_class_weights is not None:
+                current_class_weights = base_class_weights.clone()
+                ce_loss_fn = nn.CrossEntropyLoss(weight=current_class_weights)
+                print(
+                    f"[WARMUP END] Enabled class weights {current_class_weights.tolist()} after {args.imbalance_warmup_epochs} epochs"
+                )
+            if args.use_weighted_sampler:
+                use_sampler = True
+                train_loader = _build_train_loader(use_sampler, current_sampler_boost)
+                print(
+                    f"[WARMUP END] Enabled weighted sampler (abnormal boost {current_sampler_boost:.2f})"
+                )
+            imbalance_active = True
+
+        if kd_enabled and (not kd_active) and epoch > args.kd_warmup_epochs:
+            kd_active = True
+            print(f"[WARMUP END] KD activated after {args.kd_warmup_epochs} epochs")
+
         student.train()
         running_loss = 0.0
         total = 0
@@ -383,7 +413,7 @@ def main() -> None:
             loss_ce = ce_loss_fn(logits_s, labels)
             loss = loss_ce
 
-            if kd_enabled and teacher is not None:
+            if kd_active and kd_enabled and teacher is not None:
                 with torch.no_grad():
                     logits_t, feat_t = teacher(signals)
                 kd_logits = kd_logit_loss(logits_s, logits_t, args.kd_temperature)
@@ -407,19 +437,21 @@ def main() -> None:
 
         if (
             args.enable_adaptive_reweight
+            and imbalance_active
             and not recall_rescue_done
             and val_metrics["miss_rate"] > 0.30
             and val_metrics["fpr"] < 0.20
         ):
-            if args.use_class_weights and class_weights is not None and class_weights.numel() > 1:
-                boost = 1.25
-                class_weights = class_weights.clone()
-                class_weights[1] = min(
-                    class_weights[1] * boost, class_weights[0] * args.max_class_weight_ratio
+            if args.use_class_weights and current_class_weights is not None and current_class_weights.numel() > 1:
+                boost = 1.2
+                current_class_weights = current_class_weights.clone()
+                current_class_weights[1] = min(
+                    current_class_weights[1] * boost,
+                    current_class_weights[0] * args.max_class_weight_ratio,
                 )
-                ce_loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+                ce_loss_fn = nn.CrossEntropyLoss(weight=current_class_weights)
                 print(
-                    f"[ADAPT] High miss detected. Increasing abnormal class weight to {class_weights.tolist()}"
+                    f"[ADAPT] High miss detected. Increasing abnormal class weight to {current_class_weights.tolist()}"
                 )
             if not use_sampler:
                 use_sampler = True
@@ -435,20 +467,39 @@ def main() -> None:
             and val_metrics["miss_rate"] < 0.05
         ):
             print(
-                "[WARN] Detected positive-collapse (predicting nearly all abnormal). Relaxing rebalancing."
+                "[WARN] Detected positive-collapse (predicting nearly all abnormal). Relaxing rebalancing and pausing KD."
             )
-            if args.use_weighted_sampler:
+            if use_sampler:
                 train_loader = DataLoader(
                     train_dataset, batch_size=args.batch_size, shuffle=True
                 )
-                args.use_weighted_sampler = False
+                use_sampler = False
                 print("       Switched to unweighted sampler.")
-            if args.use_class_weights and ce_loss_fn.weight is not None:
-                ce_loss_fn = nn.CrossEntropyLoss()
-                args.use_class_weights = False
-                print("       Removed class weights for CE loss.")
+            current_class_weights = None
+            ce_loss_fn = nn.CrossEntropyLoss(weight=current_class_weights)
+            kd_active = False
             patience_counter = 0
             collapse_handled = True
+
+        if (
+            not recall_rescue_done
+            and val_metrics["miss_rate"] > 0.95
+            and val_metrics["fpr"] < 0.05
+            and epoch > args.imbalance_warmup_epochs
+        ):
+            # collapsed to predicting normal only
+            if base_class_weights is not None:
+                current_class_weights = base_class_weights.clone()
+                ce_loss_fn = nn.CrossEntropyLoss(weight=current_class_weights)
+                print(
+                    f"[WARN] Detected normal-collapse. Restoring class weights {current_class_weights.tolist()} and enabling sampler."
+                )
+            use_sampler = True
+            current_sampler_boost = max(current_sampler_boost, 1.5)
+            train_loader = _build_train_loader(use_sampler, current_sampler_boost)
+            kd_active = False  # let CE recover before KD resumes
+            collapse_handled = True
+            recall_rescue_done = True
         scheduler.step(val_loss)
 
         epoch_score = val_metrics["f1"] - val_metrics["miss_rate"] - val_metrics["fpr"]

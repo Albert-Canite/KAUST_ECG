@@ -23,7 +23,7 @@ Download the MIT-BIH Arrhythmia Database and set `--data_path` to the folder con
 
 ## Training
 ### One-click / default run
-Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`). By default, the student trains **with knowledge distillation enabled**. If no teacher checkpoint is provided, a compact ResNet18-1D teacher is auto-trained (15 epochs by default), validated, and only used for KD if it meets minimal F1/TPR thresholds; otherwise KD is disabled to avoid harming recall. Checkpoints and the auto-trained teacher are saved under `saved_models/`.
+Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`). By default, the student trains **with knowledge distillation enabled**, but KD stays off for the first few epochs (`--kd_warmup_epochs`, default 5) until the student stabilizes. If no teacher checkpoint is provided, a compact ResNet18-1D teacher is auto-trained (15 epochs by default), validated, and only used for KD if it meets minimal F1/TPR thresholds; otherwise KD is disabled to avoid harming recall. Checkpoints and the auto-trained teacher are saved under `saved_models/`.
 
 ### Command-line customization
 - Basic student-only training:
@@ -46,7 +46,7 @@ Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`)
 
 Early stopping monitors a composite score (`F1 - miss_rate - FPR`) with configurable patience (`--patience`, default 25) and a minimum epoch guard (`--min_epochs`, default 25). Learning-rate scheduling uses `ReduceLROnPlateau` on the validation loss (`--scheduler_patience`, default 3, `factor=0.5`). Gradients are clipped to `max_norm=1.0`.
 
-**Class imbalance handling**: mild reweighting is on by default (abnormal weight `--class_weight_abnormal=1.2`, ratio clamp `--max_class_weight_ratio=2.0`) while the sampler stays uniform unless explicitly enabled (`--use_weighted_sampler/--no-use-weighted-sampler`, boost `--sampler_abnormal_boost` default 1.2). A recall-rescue path automatically raises abnormal weight and enables a weighted sampler when validation shows high miss but low FPR, and a collapse detector drops weights/sampler if FPR exceeds 95% with miss <5%, keeping both extremes in check.
+**Class imbalance handling**: training begins with **no class weights and no weighted sampler** for a short warmup (`--imbalance_warmup_epochs`, default 5) to avoid early collapse, then switches to mild reweighting (abnormal weight `--class_weight_abnormal=1.2`, ratio clamp `--max_class_weight_ratio=2.0`) and optional sampler (`--use_weighted_sampler/--no-use-weighted-sampler`, boost `--sampler_abnormal_boost` default 1.2) if enabled. A recall-rescue path automatically raises abnormal weight and enables a weighted sampler when validation shows high miss but low FPR, while dual collapse detectors pause KD and drop rebalancing if the model predicts nearly all abnormal (`FPR>95% & miss<5%`) or nearly all normal (`miss>95% & FPR<5%`).
 
 ## Segment-Aware Student Overview
 - Inputs: `(batch_size, 1, 360)`
