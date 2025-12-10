@@ -46,7 +46,7 @@ Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`)
 
 Early stopping monitors a composite score (`F1 - miss_rate - FPR`) with configurable patience (`--patience`, default 25) and a minimum epoch guard (`--min_epochs`, default 25). Learning-rate scheduling uses `ReduceLROnPlateau` on the validation loss (`--scheduler_patience`, default 3, `factor=0.5`). Gradients are clipped to `max_norm=1.0`.
 
-**Class imbalance handling**: reweighting/reshuffling is now opt-in. By default the sampler is uniform (`--use_weighted_sampler/--no-use-weighted-sampler`, default off, boost `--sampler_abnormal_boost` default 1.0) and class-weighted CE is disabled (`--use_class_weights`), with conservative defaults if enabled (`--class_weight_abnormal=1.0`, ratio clamp `--max_class_weight_ratio=2.0`). A collapse detector in training will automatically drop weights/sampler if it observes FPR >95% with miss <5% to recover normal-class learning.
+**Class imbalance handling**: mild reweighting is on by default (abnormal weight `--class_weight_abnormal=1.2`, ratio clamp `--max_class_weight_ratio=2.0`) while the sampler stays uniform unless explicitly enabled (`--use_weighted_sampler/--no-use-weighted-sampler`, boost `--sampler_abnormal_boost` default 1.2). A recall-rescue path automatically raises abnormal weight and enables a weighted sampler when validation shows high miss but low FPR, and a collapse detector drops weights/sampler if FPR exceeds 95% with miss <5%, keeping both extremes in check.
 
 ## Segment-Aware Student Overview
 - Inputs: `(batch_size, 1, 360)`

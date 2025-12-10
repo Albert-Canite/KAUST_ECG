@@ -210,7 +210,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler_patience", type=int, default=3)
     parser.add_argument("--dropout_rate", type=float, default=0.0)
     parser.add_argument("--num_mlp_layers", type=int, default=2)
-    parser.add_argument("--class_weight_abnormal", type=float, default=1.0)
+    parser.add_argument("--class_weight_abnormal", type=float, default=1.2)
     parser.add_argument("--max_class_weight_ratio", type=float, default=2.0)
     parser.add_argument("--teacher_checkpoint", type=str, default=None)
     parser.add_argument("--teacher_embedding_dim", type=int, default=128)
@@ -228,12 +228,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sampler_abnormal_boost",
         type=float,
-        default=1.0,
+        default=1.2,
         help="Boost factor for abnormal beats in weighted sampler (set >1 to upsample abnormal)",
     )
 
-    _add_bool_arg(parser, "use_class_weights", default=False, help_text="class-weighted CE loss")
-
+    _add_bool_arg(parser, "use_class_weights", default=True, help_text="class-weighted CE loss")
+    _add_bool_arg(parser, "enable_adaptive_reweight", default=True, help_text="increase abnormal emphasis when recall is low")
     _add_bool_arg(parser, "use_kd", default=True, help_text="knowledge distillation")
     _add_bool_arg(parser, "use_value_constraint", default=False, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
@@ -260,11 +260,16 @@ def main() -> None:
     print(f"Train: {len(tr_x)} | Val: {len(va_x)} | Generalization: {len(gen_x)}")
 
     train_dataset = ECGBeatDataset(tr_x, tr_y)
-    if args.use_weighted_sampler:
-        sampler = make_weighted_sampler(tr_y, abnormal_boost=args.sampler_abnormal_boost)
-        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=sampler)
-    else:
-        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    use_sampler = args.use_weighted_sampler
+    current_sampler_boost = args.sampler_abnormal_boost
+
+    def _build_train_loader(use_weighted: bool, boost: float) -> DataLoader:
+        if use_weighted:
+            sampler = make_weighted_sampler(tr_y, abnormal_boost=boost)
+            return DataLoader(train_dataset, batch_size=args.batch_size, sampler=sampler)
+        return DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+
+    train_loader = _build_train_loader(use_sampler, current_sampler_boost)
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
 
@@ -364,6 +369,7 @@ def main() -> None:
 
     history: List[Dict[str, float]] = []
     collapse_handled = False
+    recall_rescue_done = False
 
     for epoch in range(1, args.max_epochs + 1):
         student.train()
@@ -398,6 +404,31 @@ def main() -> None:
         train_loss = running_loss / max(total, 1)
 
         val_loss, val_metrics, _, _, _ = evaluate(student, val_loader, device)
+
+        if (
+            args.enable_adaptive_reweight
+            and not recall_rescue_done
+            and val_metrics["miss_rate"] > 0.30
+            and val_metrics["fpr"] < 0.20
+        ):
+            if args.use_class_weights and class_weights is not None and class_weights.numel() > 1:
+                boost = 1.25
+                class_weights = class_weights.clone()
+                class_weights[1] = min(
+                    class_weights[1] * boost, class_weights[0] * args.max_class_weight_ratio
+                )
+                ce_loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+                print(
+                    f"[ADAPT] High miss detected. Increasing abnormal class weight to {class_weights.tolist()}"
+                )
+            if not use_sampler:
+                use_sampler = True
+                current_sampler_boost = max(current_sampler_boost, 1.5)
+                train_loader = _build_train_loader(use_sampler, current_sampler_boost)
+                print(
+                    f"[ADAPT] Enabled weighted sampler with abnormal boost {current_sampler_boost:.2f} to improve recall."
+                )
+            recall_rescue_done = True
         if (
             not collapse_handled
             and val_metrics["fpr"] > 0.95
