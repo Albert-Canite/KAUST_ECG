@@ -44,11 +44,11 @@ Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`)
     --constraint_scale 1.0 --dropout_rate 0.1
   ```
 
-Early stopping monitors a recall-biased score (`F1 + sensitivity - 0.5*FPR`) with configurable patience (`--patience`, default 25) and a minimum epoch guard (`--min_epochs`, default 25). Learning-rate scheduling uses `ReduceLROnPlateau` on the validation loss (`--scheduler_patience`, default 3, `factor=0.5`). Gradients are clipped to `max_norm=1.0`.
+Early stopping monitors a recall-biased score (`F1 + 1.5*sensitivity - FPR`) with configurable patience (`--patience`, default 25) and a minimum epoch guard (`--min_epochs`, default 25). Learning-rate scheduling uses `ReduceLROnPlateau` on the validation loss (`--scheduler_patience`, default 3, `factor=0.5`). Gradients are clipped to `max_norm=1.0`.
 
-**Threshold tuning**: at each validation pass the script sweeps a dense grid plus probability quantiles in `[0.05, 0.95]` and selects the value that maximizes `F1 + sensitivity - 0.5*FPR`; early stopping and artifact reporting use this tuned threshold, while the same value is applied to generalization evaluation and stored in the checkpoint.
+**Threshold tuning**: each validation pass sweeps a dense grid plus probability quantiles in `[0.05, 0.95]`, first filtering thresholds that satisfy `miss <= --threshold_target_miss` (default 0.12) and `fpr <= --threshold_max_fpr` (default 0.20). Among feasible candidates it maximizes `F1 + 1.5*sensitivity - FPR`; if none meet the constraints, the best score over all thresholds is used. The chosen threshold drives early stopping, artifact reporting, generalization evaluation, and is stored in the checkpoint.
 
-**Class imbalance handling**: training begins with **no class weights and no weighted sampler** for a short warmup (`--imbalance_warmup_epochs`, default 5) to avoid early collapse, then switches to mild reweighting (abnormal weight `--class_weight_abnormal=1.2`, ratio clamp `--max_class_weight_ratio=2.0`) and optional sampler (`--use_weighted_sampler/--no-use-weighted-sampler`, boost `--sampler_abnormal_boost` default 1.2) if enabled. Adaptive recall rescue now triggers when miss exceeds `--recall_target_miss` (default 0.15) under an FPR cap (`--adaptive_fpr_cap`, default 0.25) and can fire up to `--recall_rescue_limit` times, gently increasing abnormal emphasis and enabling the sampler. Dual collapse detectors pause KD and drop rebalancing if the model predicts nearly all abnormal (`FPR>95% & miss<5%`) or nearly all normal (`miss>95% & FPR<5%`).
+**Class imbalance handling**: training begins with **no class weights and no weighted sampler** for a short warmup (`--imbalance_warmup_epochs`, default 5) to avoid early collapse, then switches to mild reweighting (abnormal weight `--class_weight_abnormal=1.2`, ratio clamp `--max_class_weight_ratio=2.0`). Weighted sampling is auto-enabled after warmup when the abnormal ratio is below `--auto_sampler_ratio` (default 0.35) or when `--use_weighted_sampler` is set, using boost `--sampler_abnormal_boost` (default 1.2). Adaptive recall rescue triggers when miss exceeds `--recall_target_miss` (default 0.15) under an FPR cap (`--adaptive_fpr_cap`, default 0.25) and can fire up to `--recall_rescue_limit` times (default 3), increasing abnormal emphasis and enabling the sampler. Dual collapse detectors pause KD and drop rebalancing if the model predicts nearly all abnormal (`FPR>95% & miss<5%`) or nearly all normal (`miss>95% & FPR<5%`).
 
 ## Segment-Aware Student Overview
 - Inputs: `(batch_size, 1, 360)`
@@ -62,7 +62,7 @@ Early stopping monitors a recall-biased score (`F1 + sensitivity - 0.5*FPR`) wit
 - Student: logits + pooled feature (`h_pool`).
 - Loss: `alpha * CE` + `beta * KL(softmax(z_T/T) || softmax(z_S/T))` + `gamma * MSE(norm(proj_T(feat_T)), norm(proj_S(h_pool)))`.
 - Projections: `proj_T: Linear(embedding_dim, kd_d)`, `proj_S: Linear(4, kd_d)` (constrained if `--use_value_constraint`).
-- Teacher quality guard: KD is automatically disabled if the teacher validation F1 or sensitivity drops below `--teacher_min_f1/--teacher_min_sensitivity`.
+- Teacher quality guard: KD is automatically disabled if the teacher validation F1 or sensitivity drops below `--teacher_min_f1/--teacher_min_sensitivity`; KD also pauses when validation miss exceeds `--kd_pause_miss` and resumes after it falls below `--kd_resume_miss`.
 
 ## Value Constraints & Normalization
 - Constrained layers use tanh-reparameterized weights (and optional bias) scaled by `constraint_scale` to keep weights in `[-scale, scale]`.

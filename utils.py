@@ -70,19 +70,27 @@ def confusion_metrics(y_true: List[int], y_pred: List[int]) -> Dict[str, float]:
 
 
 def sweep_thresholds(
-    y_true: List[int], probs: List[float], thresholds: List[float] | None = None
+    y_true: List[int],
+    probs: List[float],
+    thresholds: List[float] | None = None,
+    miss_target: float | None = None,
+    fpr_cap: float | None = None,
 ) -> Tuple[float, Dict[str, float]]:
-    """Search for the best decision threshold using a recall-biased score.
+    """Search for a decision threshold with an explicit miss-rate target.
 
-    The score emphasizes sensitivity (1 - miss_rate) while still balancing
-    F1 and FPR: ``score = f1 + sensitivity - 0.5 * fpr``. This biases the
-    selection toward lower miss rates when FPR remains acceptable.
+    The search first prioritizes thresholds that meet ``miss_target`` (if
+    provided) and optionally satisfy an ``fpr_cap``. Among candidates that
+    meet the target, the score emphasizes recall while penalizing FPR:
+    ``score = f1 + 1.5 * sensitivity - fpr``. If no threshold meets the
+    target, the best score across all thresholds is returned as a fallback.
 
     Args:
         y_true: Ground-truth labels (0/1).
         probs: Predicted probabilities for the positive class.
         thresholds: Optional list of thresholds to evaluate. If None, use a
             dense linspace in [0.05, 0.95] plus probability quantiles.
+        miss_target: Optional maximum acceptable miss rate used for filtering.
+        fpr_cap: Optional maximum acceptable FPR used alongside miss_target.
 
     Returns:
         best_threshold, best_metrics (dict from ``confusion_metrics``)
@@ -95,18 +103,31 @@ def sweep_thresholds(
 
     y_true_arr = np.array(y_true)
     probs_arr = np.array(probs)
+
+    def _score(metrics: Dict[str, float]) -> float:
+        return metrics["f1"] + 1.5 * metrics["sensitivity"] - metrics["fpr"]
+
     best_score = -float("inf")
     best_thr = 0.5
     best_metrics: Dict[str, float] = {}
 
+    filtered_candidates: List[Tuple[float, Dict[str, float]]] = []
+
     for thr in thresholds:
         preds = (probs_arr >= thr).astype(int).tolist()
         metrics = confusion_metrics(y_true_arr.tolist(), preds)
-        score = metrics["f1"] + metrics["sensitivity"] - 0.5 * metrics["fpr"]
+        if miss_target is not None and metrics["miss_rate"] <= miss_target:
+            if fpr_cap is None or metrics["fpr"] <= fpr_cap:
+                filtered_candidates.append((float(thr), metrics))
+        score = _score(metrics)
         if score > best_score:
             best_score = score
             best_thr = float(thr)
             best_metrics = metrics
+
+    if filtered_candidates:
+        # Choose the best among candidates that meet the constraints
+        best_thr, best_metrics = max(filtered_candidates, key=lambda x: _score(x[1]))
 
     return best_thr, best_metrics
 

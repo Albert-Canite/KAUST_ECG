@@ -243,7 +243,12 @@ def parse_args() -> argparse.Namespace:
         default=0.25,
         help="Only trigger recall rescue when FPR is below this cap",
     )
-    parser.add_argument("--recall_rescue_limit", type=int, default=2, help="Max number of adaptive recall boosts")
+    parser.add_argument("--recall_rescue_limit", type=int, default=3, help="Max number of adaptive recall boosts")
+    parser.add_argument("--threshold_target_miss", type=float, default=0.12, help="Preferred max miss-rate when sweeping thresholds")
+    parser.add_argument("--threshold_max_fpr", type=float, default=0.2, help="Optional FPR cap during threshold sweep")
+    parser.add_argument("--auto_sampler_ratio", type=float, default=0.35, help="Auto-enable sampler when abnormal ratio is below this")
+    parser.add_argument("--kd_pause_miss", type=float, default=0.35, help="Pause KD when miss-rate exceeds this")
+    parser.add_argument("--kd_resume_miss", type=float, default=0.2, help="Resume KD when miss-rate falls below this")
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument(
@@ -260,6 +265,7 @@ def parse_args() -> argparse.Namespace:
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
     _add_bool_arg(parser, "auto_train_teacher", default=True, help_text="auto teacher training when no checkpoint is provided")
     _add_bool_arg(parser, "use_weighted_sampler", default=False, help_text="weighted sampler to rebalance classes")
+    _add_bool_arg(parser, "auto_enable_sampler", default=True, help_text="auto enable sampler when imbalance is high")
 
     return parser.parse_args()
 
@@ -280,8 +286,16 @@ def main() -> None:
     tr_x, tr_y, va_x, va_y = split_dataset(train_x, train_y, val_ratio=0.2)
     print(f"Train: {len(tr_x)} | Val: {len(va_x)} | Generalization: {len(gen_x)}")
 
+    abnormal_ratio = float(np.mean(tr_y)) if len(tr_y) > 0 else 0.0
+    print(
+        f"Class ratio (abnormal): {abnormal_ratio:.3f} | counts -> normal: {(tr_y == 0).sum()} abnormal: {(tr_y == 1).sum()}"
+    )
+
     train_dataset = ECGBeatDataset(tr_x, tr_y)
     use_sampler = False  # start without sampler to avoid early collapse
+    plan_sampler = args.use_weighted_sampler or (
+        args.auto_enable_sampler and abnormal_ratio < args.auto_sampler_ratio
+    )
     current_sampler_boost = args.sampler_abnormal_boost
 
     def _build_train_loader(use_weighted: bool, boost: float) -> DataLoader:
@@ -405,7 +419,7 @@ def main() -> None:
                 print(
                     f"[WARMUP END] Enabled class weights {current_class_weights.tolist()} after {args.imbalance_warmup_epochs} epochs"
                 )
-            if args.use_weighted_sampler:
+            if plan_sampler:
                 use_sampler = True
                 train_loader = _build_train_loader(use_sampler, current_sampler_boost)
                 print(
@@ -452,7 +466,12 @@ def main() -> None:
             student, val_loader, device, return_probs=True
         )
 
-        best_thr_epoch, val_metrics = sweep_thresholds(val_true, val_probs)
+        best_thr_epoch, val_metrics = sweep_thresholds(
+            val_true,
+            val_probs,
+            miss_target=args.threshold_target_miss,
+            fpr_cap=args.threshold_max_fpr,
+        )
 
         if (
             args.enable_adaptive_reweight
@@ -480,6 +499,23 @@ def main() -> None:
                     f"[ADAPT] Enabled weighted sampler with abnormal boost {current_sampler_boost:.2f} to improve recall."
                 )
             recall_rescue_count += 1
+
+        if kd_active and val_metrics["miss_rate"] > args.kd_pause_miss:
+            kd_active = False
+            print(
+                f"[KD] Pausing distillation because miss_rate={val_metrics['miss_rate']:.3f} exceeds {args.kd_pause_miss:.3f}"
+            )
+        elif (
+            kd_enabled
+            and (not kd_active)
+            and epoch > args.kd_warmup_epochs
+            and val_metrics["miss_rate"] < args.kd_resume_miss
+            and teacher is not None
+        ):
+            kd_active = True
+            print(
+                f"[KD] Resuming distillation after miss_rate dropped below {args.kd_resume_miss:.3f}"
+            )
         if (
             not collapse_handled
             and val_argmax_metrics["fpr"] > 0.95
@@ -558,7 +594,12 @@ def main() -> None:
     val_loss, _, val_true, _, val_probs = evaluate(
         student, val_loader, device, return_probs=True
     )
-    best_threshold, val_metrics = sweep_thresholds(val_true, val_probs)
+    best_threshold, val_metrics = sweep_thresholds(
+        val_true,
+        val_probs,
+        miss_target=args.threshold_target_miss,
+        fpr_cap=args.threshold_max_fpr,
+    )
     val_pred = (np.array(val_probs) >= best_threshold).astype(int).tolist()
 
     gen_loss, _, gen_true, _, gen_probs = evaluate(
