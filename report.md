@@ -38,13 +38,26 @@
 
 ## 超参数与可配置项
 - 训练：`--batch_size`，`--lr=1e-3`，`--weight_decay=1e-4`，`--max_epochs`(默认 90)，`--patience=15`，`--min_epochs=20`，`--scheduler_patience=3`。
-- 类别不平衡：`compute_class_weights` 提供异常类权重提升（默认 1.3x）。
+- 类别不平衡：
+  - 类别权重：异常类默认 2.5x (`--class_weight_abnormal`)。
+  - 采样：默认开启加权采样 (`--use_weighted_sampler/--no-use-weighted-sampler`)，异常类采样增强倍率 `--sampler_abnormal_boost`（默认 2.0）。
 - 模型：`--num_mlp_layers`(≥2)、`--dropout_rate`、`--use_value_constraint`、`--use_tanh_activations`、`--constraint_scale`。
-- 蒸馏：`--use_kd`（默认开启，可用 `--no-use-kd` 关闭）、`--teacher_checkpoint`（若未提供且启用 KD，将自动轻量预训练一个 ResNet18 teacher 后用于蒸馏）、`--teacher_embedding_dim`、`--kd_temperature`、`--kd_d`、`--alpha/beta/gamma`。
+- 蒸馏：`--use_kd`（默认开启，可用 `--no-use-kd` 关闭）、`--teacher_checkpoint`（若未提供且启用 KD，将自动预训练 ResNet18 teacher）`--teacher_auto_train_epochs`（默认 15）、`--teacher_embedding_dim`、`--kd_temperature`、`--kd_d`、`--alpha/beta/gamma`、教师质量阈值 `--teacher_min_f1`、`--teacher_min_sensitivity`，若教师低于阈值会自动禁用 KD 以保护召回率。
 
 ## 代码接口与输出
 - 前向接口：Student/Teacher 输入 `(batch,1,360)`，Student 输出 `(logits, h_pool)`，Teacher 输出 `(logits_T, feat_T)`。
 - 训练脚本保存学生模型到 `saved_models/student_model.pth`，包含 CLI 配置；训练曲线、ROC（验证/泛化）与混淆矩阵 PNG 自动写入 `./artifacts`。
+
+## v1_debug 结果分析与改进
+- **现象（用户日志）**：`Val F1≈0.57，miss≈29%`，泛化 miss≈45%，FPR 约 4%。miss 居高，说明正类召回不足。
+- **原因分析**：
+  1. **类别不平衡**：当前训练集未做重采样，异常类占比低，单靠较小权重提升（原默认 1.3x）不足以提升正类召回。
+  2. **教师质量不足**：自动教师仅预训练 5 个 epoch，可能精度/召回偏低，蒸馏信号会“拉低”学生的正类预测倾向，导致 miss 居高。
+  3. **采样分布**：无加权采样时，小批次中异常样本稀疏，梯度对正类的强化不足。
+- **代码修正**：
+  - 提升异常类权重默认值至 2.5，默认启用加权采样并提供 `--sampler_abnormal_boost`（默认 2.0）以放大异常样本出现频次。
+  - 自动教师预训练轮数提升至 15，并新增教师质量守卫（F1/TPR 低于阈值则禁用 KD），避免弱教师蒸馏拖低学生召回。
+  - 保持早停最低训练轮数与组合指标，配合上述平衡手段，优先降低 miss rate。
 
 ## 需求符合性检查
 - 分段卷积 + 8 token 池化 + photonic MLP + 均值池化分类流水线已实现并可配置（`models/student.py`）。

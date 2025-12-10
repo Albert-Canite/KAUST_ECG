@@ -7,9 +7,10 @@ from typing import Dict, List, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.utils.data import WeightedRandomSampler
 
 
-def compute_class_weights(labels: np.ndarray, abnormal_boost: float = 1.2) -> torch.Tensor:
+def compute_class_weights(labels: np.ndarray, abnormal_boost: float = 2.5) -> torch.Tensor:
     counter = Counter(labels.tolist())
     total = len(labels)
     weights: List[float] = []
@@ -60,3 +61,27 @@ def kd_logit_loss(student_logits: torch.Tensor, teacher_logits: torch.Tensor, te
 
 def l2_normalize(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return x / (x.norm(p=2, dim=1, keepdim=True) + eps)
+
+
+def make_weighted_sampler(labels: np.ndarray, abnormal_boost: float = 1.0) -> WeightedRandomSampler:
+    """Create a weighted sampler to upsample minority/abnormal beats.
+
+    Args:
+        labels: Array of integer labels.
+        abnormal_boost: Multiplicative boost for the abnormal class (label==1).
+
+    Returns:
+        WeightedRandomSampler configured with per-sample weights.
+    """
+
+    label_list = labels.tolist()
+    counts = Counter(label_list)
+    num_samples = len(label_list)
+    class_weights: Dict[int, float] = {}
+    for cls, cnt in counts.items():
+        # inverse frequency weighting
+        class_weights[cls] = num_samples / (len(counts) * cnt)
+    if 1 in class_weights:
+        class_weights[1] *= abnormal_boost
+    sample_weights = [class_weights[y] for y in label_list]
+    return WeightedRandomSampler(sample_weights, num_samples=num_samples, replacement=True)

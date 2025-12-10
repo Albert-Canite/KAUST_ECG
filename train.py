@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from matplotlib import pyplot as plt
 from sklearn.metrics import auc, confusion_matrix, roc_curve
@@ -19,7 +19,13 @@ from constraints import ConstrainedLinear, scale_to_unit
 from data import BEAT_LABEL_MAP, ECGBeatDataset, load_records, set_seed, split_dataset
 from models.student import SegmentAwareStudent
 from models.teacher import ResNet18_1D
-from utils import compute_class_weights, confusion_metrics, kd_logit_loss, l2_normalize
+from utils import (
+    compute_class_weights,
+    confusion_metrics,
+    kd_logit_loss,
+    l2_normalize,
+    make_weighted_sampler,
+)
 
 
 TRAIN_RECORDS = [
@@ -204,7 +210,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler_patience", type=int, default=3)
     parser.add_argument("--dropout_rate", type=float, default=0.0)
     parser.add_argument("--num_mlp_layers", type=int, default=2)
-    parser.add_argument("--class_weight_abnormal", type=float, default=1.3)
+    parser.add_argument("--class_weight_abnormal", type=float, default=2.5)
     parser.add_argument("--teacher_checkpoint", type=str, default=None)
     parser.add_argument("--teacher_embedding_dim", type=int, default=128)
     parser.add_argument("--kd_temperature", type=float, default=2.0)
@@ -213,13 +219,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--gamma", type=float, default=1.0)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
-    parser.add_argument("--teacher_auto_train_epochs", type=int, default=5)
+    parser.add_argument("--teacher_auto_train_epochs", type=int, default=15)
+    parser.add_argument("--teacher_min_f1", type=float, default=0.6, help="Minimum teacher F1 to keep KD enabled")
+    parser.add_argument("--teacher_min_sensitivity", type=float, default=0.7, help="Minimum teacher TPR to keep KD enabled")
     parser.add_argument("--seed", type=int, default=42)
+
+    parser.add_argument(
+        "--sampler_abnormal_boost",
+        type=float,
+        default=2.0,
+        help="Boost factor for abnormal beats in weighted sampler",
+    )
 
     _add_bool_arg(parser, "use_kd", default=True, help_text="knowledge distillation")
     _add_bool_arg(parser, "use_value_constraint", default=False, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
     _add_bool_arg(parser, "auto_train_teacher", default=True, help_text="auto teacher training when no checkpoint is provided")
+    _add_bool_arg(parser, "use_weighted_sampler", default=True, help_text="weighted sampler to rebalance classes")
 
     return parser.parse_args()
 
@@ -240,7 +256,12 @@ def main() -> None:
     tr_x, tr_y, va_x, va_y = split_dataset(train_x, train_y, val_ratio=0.2)
     print(f"Train: {len(tr_x)} | Val: {len(va_x)} | Generalization: {len(gen_x)}")
 
-    train_loader = DataLoader(ECGBeatDataset(tr_x, tr_y), batch_size=args.batch_size, shuffle=True)
+    train_dataset = ECGBeatDataset(tr_x, tr_y)
+    if args.use_weighted_sampler:
+        sampler = make_weighted_sampler(tr_y, abnormal_boost=args.sampler_abnormal_boost)
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=sampler)
+    else:
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
 
@@ -298,6 +319,19 @@ def main() -> None:
             print(f"[INFO] Auto-trained teacher saved to {auto_teacher_path}")
         else:
             print("[WARNING] KD enabled but no teacher available. Distillation will be disabled.")
+            kd_enabled = False
+
+    if kd_enabled and teacher is not None:
+        # sanity check teacher quality to avoid propagating a weak distillation signal
+        t_val_loss, t_val_metrics, _, _, _ = evaluate(teacher, val_loader, device)
+        if (
+            t_val_metrics["f1"] < args.teacher_min_f1
+            or t_val_metrics["sensitivity"] < args.teacher_min_sensitivity
+        ):
+            print(
+                f"[WARN] Teacher underperforms (F1={t_val_metrics['f1']:.3f}, "
+                f"TPR={t_val_metrics['sensitivity']:.3f}). Disabling KD to avoid harming recall."
+            )
             kd_enabled = False
 
     if kd_enabled and teacher is not None:

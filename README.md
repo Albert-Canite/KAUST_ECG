@@ -3,7 +3,7 @@
 This project provides a fully configurable training pipeline for single-lead beat classification on the MIT-BIH Arrhythmia Database using a lightweight segment-aware student model and an optional ResNet18-based teacher for knowledge distillation. Value-constrained layers and activation scaling are available to bound weights/activations for deployment in limited numeric domains.
 
 ## Repository Layout
-- `train.py` – Training entrypoint with argument-parsable hyperparameters, early stopping, LR scheduling, class weighting, and optional distillation.
+- `train.py` – Training entrypoint with argument-parsable hyperparameters, early stopping, LR scheduling, class weighting, class-rebalancing sampler, and optional distillation with teacher quality checks.
 - `data.py` – MIT-BIH loading, per-beat preprocessing (mean removal + max-abs scaling to `[-1, 1]`), and dataset split utilities.
 - `models/student.py` – Segment-aware student encoder that slices beats into P/QRS/T/Global windows, produces eight 4-D tokens, feeds a configurable photonic MLP, and classifies beats.
 - `models/teacher.py` – 1D ResNet18 teacher producing logits and an intermediate embedding for distillation.
@@ -23,7 +23,7 @@ Download the MIT-BIH Arrhythmia Database and set `--data_path` to the folder con
 
 ## Training
 ### One-click / default run
-Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`). By default, the student trains **with knowledge distillation enabled**. If no teacher checkpoint is provided, a compact ResNet18-1D teacher is auto-trained for a few epochs and reused for distillation. Checkpoints and the auto-trained teacher are saved under `saved_models/`.
+Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`). By default, the student trains **with knowledge distillation enabled**. If no teacher checkpoint is provided, a compact ResNet18-1D teacher is auto-trained (15 epochs by default), validated, and only used for KD if it meets minimal F1/TPR thresholds; otherwise KD is disabled to avoid harming recall. Checkpoints and the auto-trained teacher are saved under `saved_models/`.
 
 ### Command-line customization
 - Basic student-only training:
@@ -46,6 +46,8 @@ Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`)
 
 Early stopping monitors a composite score (`F1 - miss_rate - FPR`) with configurable patience (`--patience`, default 15) and a minimum epoch guard (`--min_epochs`, default 20). Learning-rate scheduling uses `ReduceLROnPlateau` on the validation loss (`--scheduler_patience`, default 3, `factor=0.5`). Gradients are clipped to `max_norm=1.0`.
 
+**Class imbalance handling**: the training loader defaults to a weighted sampler (`--use_weighted_sampler/--no-use-weighted-sampler`) that upsamples abnormal beats (boost configurable via `--sampler_abnormal_boost`, default 2.0) and class weights with an abnormal boost (`--class_weight_abnormal`, default 2.5).
+
 ## Segment-Aware Student Overview
 - Inputs: `(batch_size, 1, 360)`
 - Four Conv1d encoders (P/QRS/T/Global): `Conv1d(1, 4, kernel_size=4, stride=1, padding=0)`
@@ -58,6 +60,7 @@ Early stopping monitors a composite score (`F1 - miss_rate - FPR`) with configur
 - Student: logits + pooled feature (`h_pool`).
 - Loss: `alpha * CE` + `beta * KL(softmax(z_T/T) || softmax(z_S/T))` + `gamma * MSE(norm(proj_T(feat_T)), norm(proj_S(h_pool)))`.
 - Projections: `proj_T: Linear(embedding_dim, kd_d)`, `proj_S: Linear(4, kd_d)` (constrained if `--use_value_constraint`).
+- Teacher quality guard: KD is automatically disabled if the teacher validation F1 or sensitivity drops below `--teacher_min_f1/--teacher_min_sensitivity`.
 
 ## Value Constraints & Normalization
 - Constrained layers use tanh-reparameterized weights (and optional bias) scaled by `constraint_scale` to keep weights in `[-scale, scale]`.
