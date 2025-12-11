@@ -24,7 +24,7 @@ from utils import (
     compute_class_weights,
     confusion_metrics,
     make_weighted_sampler,
-    sweep_thresholds_adaptive,
+    sweep_thresholds_blended,
 )
 
 
@@ -149,6 +149,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout_rate", type=float, default=0.2)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
+    parser.add_argument("--class_weight_abnormal", type=float, default=1.35)
+    parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
+    parser.add_argument("--generalization_score_weight", type=float, default=0.35)
+    parser.add_argument("--threshold_target_miss", type=float, default=0.14)
+    parser.add_argument("--threshold_max_fpr", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
@@ -209,7 +214,11 @@ def main() -> None:
 
     # Mitigate collapse to the majority class by balancing cross-entropy with class weights
     class_counts = np.bincount(tr_y, minlength=2)
-    class_weights_np = compute_class_weights(tr_y, abnormal_boost=1.3, max_ratio=2.5)
+    class_weights_np = compute_class_weights(
+        tr_y,
+        abnormal_boost=args.class_weight_abnormal,
+        max_ratio=args.class_weight_max_ratio,
+    )
     class_weights = class_weights_np.to(device)
     base_weights = class_weights.clone()
 
@@ -291,21 +300,15 @@ def main() -> None:
             student, gen_loader, device, return_probs=True
         )
 
-        best_thr_epoch, _ = sweep_thresholds_adaptive(
+        best_thr_epoch, val_metrics, gen_metrics = sweep_thresholds_blended(
             val_true,
             val_probs,
-            miss_target=0.15,
-            fpr_cap=0.15,
-            recall_gain=1.0 + miss_ema * 1.8,
-            threshold_center=0.5,
-            threshold_reg=0.08,
+            gen_true,
+            gen_probs,
+            gen_weight=args.generalization_score_weight,
+            miss_target=args.threshold_target_miss,
+            fpr_cap=args.threshold_max_fpr,
         )
-
-        # Use the swept threshold to report and track metrics instead of argmax-only scores
-        val_preds = (np.array(val_probs) >= best_thr_epoch).astype(int).tolist()
-        gen_preds = (np.array(gen_probs) >= best_thr_epoch).astype(int).tolist()
-        val_metrics = confusion_metrics(val_true, val_preds)
-        gen_metrics = confusion_metrics(gen_true, gen_preds)
 
         miss_ema = 0.8 * miss_ema + 0.2 * val_metrics["miss_rate"]
 
@@ -383,16 +386,15 @@ def main() -> None:
         student, gen_loader, device, return_probs=True
     )
 
-    best_threshold, val_metrics = sweep_thresholds_adaptive(
+    best_threshold, val_metrics, gen_metrics = sweep_thresholds_blended(
         val_true,
         val_probs,
-        miss_target=0.15,
-        fpr_cap=0.15,
-        recall_gain=1.0 + miss_ema * 1.8,
-        threshold_center=0.5,
-        threshold_reg=0.08,
+        gen_true,
+        gen_probs,
+        gen_weight=args.generalization_score_weight,
+        miss_target=args.threshold_target_miss,
+        fpr_cap=args.threshold_max_fpr,
     )
-    gen_metrics = confusion_metrics(gen_true, (np.array(gen_probs) >= best_threshold).astype(int).tolist())
     val_pred = (np.array(val_probs) >= best_threshold).astype(int).tolist()
     gen_pred = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
 
@@ -419,6 +421,12 @@ def main() -> None:
             "gen_fpr": gen_metrics["fpr"],
         }
     )
+
+    # Persist probabilities for offline threshold resweeps and diagnostics
+    np.save(os.path.join("artifacts", "val_probs.npy"), np.array(val_probs))
+    np.save(os.path.join("artifacts", "gen_probs.npy"), np.array(gen_probs))
+    np.save(os.path.join("artifacts", "val_labels.npy"), np.array(val_true))
+    np.save(os.path.join("artifacts", "gen_labels.npy"), np.array(gen_true))
 
     os.makedirs("saved_models", exist_ok=True)
     save_path = os.path.join("saved_models", "student_model.pth")

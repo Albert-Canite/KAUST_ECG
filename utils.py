@@ -12,8 +12,8 @@ from torch.utils.data import Sampler, WeightedRandomSampler
 
 def compute_class_weights(
     labels: np.ndarray,
-    abnormal_boost: float = 1.5,
-    max_ratio: float = 3.0,
+    abnormal_boost: float = 1.35,
+    max_ratio: float = 2.0,
 ) -> torch.Tensor:
     """Inverse-frequency class weights with optional abnormal boost and ratio clamp."""
 
