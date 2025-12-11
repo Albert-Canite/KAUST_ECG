@@ -196,9 +196,27 @@
   1. **验证导向的早停与阈值**：早停完全由验证 Score 决定，泛化集未参与评分，阈值也仅基于验证扫得，导致决策边界偏向验证分布，泛化 miss 拉高。
   2. **重平衡+KD 同步切换导致迁移不稳**：第 5 轮同时开启类权重/采样/KD，泛化分布下模型尚未稳态，KD 可能拉低异常召回，采样权重 ramp 在泛化上未充分适配。
   3. **召回救火只看验证**：自适应权重/采样的触发逻辑只依赖验证 miss/FPR，泛化 miss 高时没有反馈回训练循环。
-- **修复措施（本轮新增）**：
+  - **修复措施（本轮新增）**：
   - **引入泛化参与的早停评分**：新增 `--use_generalization_score/--no-use_generalization_score`（默认开）和 `--generalization_score_weight`（默认 0.3），每个 epoch 以验证最优阈值在泛化集上评估 `Score=f1+sensitivity-0.5*FPR`，与验证 Score 按权重线性融合驱动早停与最佳模型保存，降低验证过拟合。
+
+## v4.2_debug KD 代码审计与现象复盘（最新日志：KD 开启后 Val F1≈0.35、miss≈8.8%、FPR≈20%；关闭 KD 时更佳）
+- **现象与疑问**：用户反馈默认开启 KD 后整体性能下降（F1 下滑、泛化 miss/FPR 上升），怀疑 KD 逻辑或实现存在问题。
+- **代码核查发现**：
+  1. **教师=学生 EMA，缺乏“更强教师”信号**：教师由 `build_teacher` 直接调用 `build_student` 构建，并在第一个 KD epoch 前仅复制学生权重，然后以 EMA 方式从学生更新（`update_teacher`），没有外部预训练或更大容量，等价于对学生自身做时间平均约束。【F:train.py†L77-L119】【F:train.py†L359-L400】
+  2. **KD 在学生尚未稳定时介入**：默认 `kd_start_epoch=5`、`kd_warmup_epochs=10`，第 5 轮即开始在每个 batch 计算 KD loss 与 EMA 更新教师，即便此时学生仍在大幅收敛阶段；教师由早期噪声梯度累积得到，可能将学生拉向“旧参数”导致收敛变慢或停留在次优解。【F:train.py†L247-L400】
+  3. **KD 权重全局常数，未与教师质量或指标联动**：`kd_alpha_schedule` 仅按 epoch 线性上升到固定 `kd_alpha`，缺少基于验证 miss/FPR 的暂停或门控（现有 KD 仅可手动关闭）。在 miss 明显升高时仍继续约束学生贴合 EMA 教师，可能压制 CE 对异常类的学习。【F:train.py†L108-L124】【F:train.py†L247-L400】
+  4. **KL 方向为 student→teacher（标准 KD 形式），非致命但需知悉**：当前实现用 `kl_div(log_softmax(student/T), softmax(teacher/T))`，梯度作用于学生，数学上是 KL(student‖teacher)。虽然符合常见 KD 公式，但与初版需求“KL(teacher‖student)”方向相反，EMA 教师若高熵会鼓励学生输出更平滑分布，可能降低决策置信度。【F:train.py†L108-L113】
+  5. **日志能观测 KD 量但未暴露教师质量**：训练日志记录了 CE/KD/总损失及有效 alpha，但没有评估或存储教师性能，难以判断 KD 信号是否优于学生。若教师劣于学生，EMA 蒸馏可能持续拖拽性能。
+- **改进建议**：
+  - 推迟或自适应启用 KD：基于验证 miss/FPR 设定启停阈值（如 miss<0.25 且 FPR<0.15 后再开启），或将 `kd_start_epoch` 调高并缩短 warmup，确保教师已稳定。
+  - 引入教师质量守卫：按验证 F1/召回评估 EMA 教师，低于学生时自动降低/关闭 KD，防止“弱教师”蒸馏。
+  - 缩小默认 KD 权重：将 `kd_alpha` 下调（如 0.05）并允许在训练中动态调节，避免对不成熟教师过拟合。
+  - 如需保持自蒸馏，可增加梯度停滞期或 EMA 冻结步，让教师滞后更长窗口，使其成为“更平滑的历史平均”，再对比是否优于纯 CE。
   - **训练曲线增加泛化轨迹**：训练曲线图中加入 Gen F1/Miss/FPR 轨迹，便于直观看到验证-泛化的分布差距与收敛状态。
+- **本轮改动（结合最新日志的参数再调优）**：
+  - **KD 更晚、更弱、更平滑**：默认 `kd_start_epoch` 改为 20、`kd_warmup_epochs`=30、`kd_alpha`=0.01、`kd_temperature`=4.5、`ema_decay`=0.999，进一步减少早期蒸馏并放大温度平滑。【F:train.py†L225-L283】
+  - **置信度与损失比更严的门控**：`kd_confidence_floor` 提升到 0.90、`kd_confidence_power`=4.0，低于门槛直接跳过 KD；`kd_balance_kd_to_ce` 改为 0.5，使 KD 权重至多按 CE/KD 比例折半，避免 KD 盖过 CE。【F:train.py†L79-L158】【F:train.py†L356-L416】【F:train.py†L432-L471】
+  - **预期效果**：仅在教师输出高置信且损失规模温和时才少量蒸馏，默认行为更接近纯 CE，避免 KD 将学生拉回过平滑的历史参数。
 - **后续建议**：
   - 若泛化 miss 仍高，可提高 `--generalization_score_weight` 到 0.4–0.5，使早停更重视泛化；或在阈值搜索时调低 `--threshold_target_miss`（如 0.10）以压漏诊。
   - 在重平衡阶段进一步平滑：可延长 `--imbalance_ramp_epochs` 到 8–10，或将 `--sampler_abnormal_boost` 调低到 1.0–1.1，待泛化 miss 下行后再逐步提升。
