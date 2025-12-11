@@ -108,6 +108,8 @@ class KDConfig:
     confidence_floor_warmup: int
     confidence_power: float
     balance_ratio: float
+    confidence_floor_min: float
+    inactive_patience: int
 
 
 def kd_logit_loss(logits_student: torch.Tensor, logits_teacher: torch.Tensor, temperature: float) -> torch.Tensor:
@@ -288,6 +290,18 @@ def parse_args() -> argparse.Namespace:
             "Clamp factor for scaling KD alpha by ce/kd loss ratio (1.0 keeps KD <= CE; 0 disables ratio scaling)"
         ),
     )
+    parser.add_argument(
+        "--kd_confidence_floor_min",
+        type=float,
+        default=0.25,
+        help="Lower bound the confidence floor can auto-relax to when KD is repeatedly skipped",
+    )
+    parser.add_argument(
+        "--kd_inactive_patience",
+        type=int,
+        default=3,
+        help="Number of consecutive KD-inactive epochs before relaxing the confidence floor",
+    )
 
     return parser.parse_args()
 
@@ -308,6 +322,8 @@ def main() -> None:
         confidence_floor_warmup=args.kd_confidence_floor_warmup,
         confidence_power=args.kd_confidence_power,
         balance_ratio=args.kd_balance_kd_to_ce,
+        confidence_floor_min=args.kd_confidence_floor_min,
+        inactive_patience=args.kd_inactive_patience,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -406,6 +422,8 @@ def main() -> None:
     best_state = None
     best_threshold = 0.5
     patience_counter = 0
+    kd_inactive_epochs = 0
+    kd_floor_dynamic = kd_config.confidence_floor
 
     history: List[Dict[str, float]] = []
 
@@ -416,13 +434,14 @@ def main() -> None:
             kd_config.alpha, epoch, kd_config.start_epoch, kd_config.warmup_epochs
         )
         kd_active_epoch = kd_config.use_kd and epoch >= kd_config.start_epoch
-        kd_floor_epoch = kd_confidence_floor_schedule(
+        kd_floor_scheduled = kd_confidence_floor_schedule(
             kd_config.confidence_floor,
             kd_config.confidence_floor_final,
             epoch,
             kd_config.start_epoch,
             kd_config.confidence_floor_warmup,
         )
+        kd_floor_epoch = max(kd_config.confidence_floor_min, min(kd_floor_dynamic, kd_floor_scheduled))
         avg_kd_alpha = 0.0
         kd_active_batches = 0
         kd_skipped_low_conf = 0
@@ -536,6 +555,8 @@ def main() -> None:
                 "train_kd_loss": train_kd_loss,
                 "kd_alpha_effective": epoch_avg_kd_alpha if kd_active_epoch else 0.0,
                 "kd_confidence_floor": kd_floor_epoch if kd_active_epoch else 0.0,
+                "kd_confidence_floor_scheduled": kd_floor_scheduled if kd_active_epoch else 0.0,
+                "kd_inactive_epochs": kd_inactive_epochs if kd_active_epoch else 0,
                 "kd_active_batches": kd_active_batches,
                 "kd_skipped_low_conf": kd_skipped_low_conf,
                 "val_loss": val_loss,
@@ -558,6 +579,8 @@ def main() -> None:
                 "train_kd_loss": train_kd_loss,
                 "kd_alpha_effective": epoch_avg_kd_alpha if kd_active_epoch else 0.0,
                 "kd_confidence_floor": kd_floor_epoch if kd_active_epoch else 0.0,
+                "kd_confidence_floor_scheduled": kd_floor_scheduled if kd_active_epoch else 0.0,
+                "kd_inactive_epochs": kd_inactive_epochs if kd_active_epoch else 0,
                 "kd_active_batches": kd_active_batches,
                 "kd_skipped_low_conf": kd_skipped_low_conf,
                 "val_loss": val_loss,
@@ -570,6 +593,16 @@ def main() -> None:
                 "threshold": best_thr_epoch,
             }
         )
+
+        if kd_active_epoch:
+            if kd_active_batches == 0:
+                kd_inactive_epochs += 1
+            else:
+                kd_inactive_epochs = 0
+
+            if kd_inactive_epochs >= kd_config.inactive_patience:
+                kd_floor_dynamic = max(kd_config.confidence_floor_min, kd_floor_dynamic * 0.5)
+                kd_inactive_epochs = 0
 
         if val_metrics["f1"] > best_val_f1:
             best_val_f1 = val_metrics["f1"]

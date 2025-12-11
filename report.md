@@ -218,6 +218,7 @@
   - **置信度与损失比更严的门控**：`kd_confidence_floor` 提升到 0.90、`kd_confidence_power`=4.0，低于门槛直接跳过 KD；`kd_balance_kd_to_ce` 改为 0.5，使 KD 权重至多按 CE/KD 比例折半，避免 KD 盖过 CE。【F:train.py†L79-L158】【F:train.py†L356-L416】【F:train.py†L432-L471】
   - **预期效果**：仅在教师输出高置信且损失规模温和时才少量蒸馏，默认行为更接近纯 CE，避免 KD 将学生拉回过平滑的历史参数。
   - **追加：置信度下限随 epoch 逐步放宽并记录触发率**：新增 `--kd_confidence_floor_final` 与 `--kd_confidence_floor_warmup`，在 KD 启动后按线性插值将门槛从高值缓慢放宽；同时日志记录本 epoch KD 启用的样本数与因置信度跳过的样本数，便于判断 KD 长期被关停或过强。【F:train.py†L79-L164】【F:train.py†L399-L471】
+  - **再追加：KD 长期不触发时自动下调门槛**：增加 `--kd_confidence_floor_min` 与 `--kd_inactive_patience`，若连续若干 epoch KD 因置信度被全跳过，则将门槛按 0.5 递减至下限，确保蒸馏至少在模型后期被小幅激活，并在日志中记录动态门槛与跳过计数，方便诊断蒸馏“长期闲置”问题。【F:train.py†L79-L168】【F:train.py†L421-L494】【F:train.py†L522-L556】
 - **后续建议**：
   - 若泛化 miss 仍高，可提高 `--generalization_score_weight` 到 0.4–0.5，使早停更重视泛化；或在阈值搜索时调低 `--threshold_target_miss`（如 0.10）以压漏诊。
   - 在重平衡阶段进一步平滑：可延长 `--imbalance_ramp_epochs` 到 8–10，或将 `--sampler_abnormal_boost` 调低到 1.0–1.1，待泛化 miss 下行后再逐步提升。
