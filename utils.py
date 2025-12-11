@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import WeightedRandomSampler
+from torch.utils.data import Sampler, WeightedRandomSampler
 
 
 def compute_class_weights(
@@ -132,6 +132,61 @@ def sweep_thresholds(
     return best_thr, best_metrics
 
 
+def sweep_thresholds_adaptive(
+    y_true: List[int],
+    probs: List[float],
+    miss_target: float | None = None,
+    fpr_cap: float | None = None,
+    recall_gain: float = 1.0,
+    threshold_center: float = 0.5,
+    threshold_reg: float = 0.05,
+    thresholds: List[float] | None = None,
+) -> Tuple[float, Dict[str, float]]:
+    """Threshold sweep with recall emphasis and a bias toward moderate thresholds."""
+
+    if thresholds is None:
+        dense = np.linspace(0.05, 0.95, num=25)
+        quantiles = np.quantile(probs, q=np.linspace(0.05, 0.95, num=13))
+        thresholds = np.unique(np.concatenate([dense, quantiles])).tolist()
+
+    y_true_arr = np.array(y_true)
+    probs_arr = np.array(probs)
+
+    def _score(metrics: Dict[str, float], thr: float) -> float:
+        proximity_penalty = threshold_reg * abs(thr - threshold_center)
+        return metrics["f1"] + recall_gain * metrics["sensitivity"] - metrics["fpr"] - proximity_penalty
+
+    best_score = -float("inf")
+    best_thr = threshold_center
+    best_metrics: Dict[str, float] = {}
+
+    for thr in thresholds:
+        preds = (probs_arr >= thr).astype(int).tolist()
+        metrics = confusion_metrics(y_true_arr.tolist(), preds)
+        if miss_target is not None and metrics["miss_rate"] > miss_target:
+            continue
+        if fpr_cap is not None and metrics["fpr"] > fpr_cap:
+            continue
+        score = _score(metrics, float(thr))
+        if score > best_score:
+            best_score = score
+            best_thr = float(thr)
+            best_metrics = metrics
+
+    # fallback to unconstrained best
+    if not best_metrics:
+        for thr in thresholds:
+            preds = (probs_arr >= thr).astype(int).tolist()
+            metrics = confusion_metrics(y_true_arr.tolist(), preds)
+            score = _score(metrics, float(thr))
+            if score > best_score:
+                best_score = score
+                best_thr = float(thr)
+                best_metrics = metrics
+
+    return best_thr, best_metrics
+
+
 def sweep_thresholds_blended(
     val_true: List[int],
     val_probs: List[float],
@@ -242,3 +297,55 @@ def make_weighted_sampler(labels: np.ndarray, abnormal_boost: float = 1.0) -> We
         class_weights[1] *= abnormal_boost
     sample_weights = [class_weights[y] for y in label_list]
     return WeightedRandomSampler(sample_weights, num_samples=num_samples, replacement=True)
+
+
+class BalancedBatchSampler(Sampler[List[int]]):
+    """Yield approximately balanced batches (normal/abnormal) with replacement.
+
+    This sampler cycles minority/majority indices independently to avoid batch-level
+    collapse without exhausting either pool. It is designed for binary labels 0/1
+    and keeps per-batch composition close to 50/50 when possible.
+    """
+
+    def __init__(
+        self,
+        labels: np.ndarray,
+        batch_size: int,
+        minority_label: int = 1,
+        majority_label: int = 0,
+    ) -> None:
+        self.batch_size = batch_size
+        self.minority_label = minority_label
+        self.majority_label = majority_label
+
+        idx_minor = np.where(labels == minority_label)[0].tolist()
+        idx_major = np.where(labels == majority_label)[0].tolist()
+
+        if len(idx_minor) == 0 or len(idx_major) == 0:
+            raise ValueError("BalancedBatchSampler requires both classes to be present")
+
+        self.idx_minor = idx_minor
+        self.idx_major = idx_major
+
+        self.num_batches = int(np.ceil(len(labels) / batch_size))
+
+    def __iter__(self) -> Iterable[List[int]]:  # type: ignore[override]
+        minor_cycle = iter(np.resize(self.idx_minor, self.num_batches * (self.batch_size // 2)))
+        major_cycle = iter(np.resize(self.idx_major, self.num_batches * (self.batch_size // 2)))
+
+        for _ in range(self.num_batches):
+            batch: List[int] = []
+            half = max(1, self.batch_size // 2)
+            for _ in range(half):
+                batch.append(next(minor_cycle))
+                batch.append(next(major_cycle))
+            # If batch_size is odd, pad with a majority sample to avoid over-duplicating minority
+            if len(batch) < self.batch_size:
+                try:
+                    batch.append(next(major_cycle))
+                except StopIteration:
+                    batch.append(self.idx_major[-1])
+            yield batch
+
+    def __len__(self) -> int:  # type: ignore[override]
+        return self.num_batches

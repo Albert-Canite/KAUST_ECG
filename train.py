@@ -19,7 +19,13 @@ from sklearn.metrics import auc, confusion_matrix, roc_curve
 
 from data import BEAT_LABEL_MAP, ECGBeatDataset, load_records, set_seed, split_dataset
 from models.student import SegmentAwareStudent
-from utils import confusion_metrics, make_weighted_sampler, sweep_thresholds
+from utils import (
+    BalancedBatchSampler,
+    compute_class_weights,
+    confusion_metrics,
+    make_weighted_sampler,
+    sweep_thresholds_adaptive,
+)
 
 
 TRAIN_RECORDS = [
@@ -144,7 +150,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
-    _add_bool_arg(parser, "use_value_constraint", default=False, help_text="value-constrained weights/activations")
+    _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
 
     return parser.parse_args()
@@ -174,6 +180,7 @@ def main() -> None:
     train_dataset = ECGBeatDataset(tr_x, tr_y)
 
     sampler = None
+    batch_sampler = None
     sampler_boost = 1.2
     if abnormal_ratio < 0.35:
         sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
@@ -181,22 +188,32 @@ def main() -> None:
             "Enabling mild abnormal oversampling: "
             f"boost={sampler_boost:.2f}, expected abnormal frac≈{min(0.5, abnormal_ratio * sampler_boost):.2f}"
         )
+    if abnormal_ratio < 0.45:
+        try:
+            batch_sampler = BalancedBatchSampler(tr_y, batch_size=args.batch_size)
+            print("Using balanced batch sampler to keep per-batch class mix stable")
+        except ValueError:
+            batch_sampler = None
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=sampler is None,
-        sampler=sampler,
-    )
+    if batch_sampler is not None:
+        train_loader = DataLoader(train_dataset, batch_sampler=batch_sampler)
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=sampler is None,
+            sampler=sampler,
+        )
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
 
     # Mitigate collapse to the majority class by balancing cross-entropy with class weights
     class_counts = np.bincount(tr_y, minlength=2)
-    class_weights = class_counts.sum() / (2.0 * np.maximum(class_counts, 1))
-    class_weights = torch.tensor(class_weights, dtype=torch.float32, device=device)
-    mean_w = class_weights.mean()
-    class_weights = class_weights.clamp(min=mean_w * 0.5, max=mean_w * 2.0)
+    class_weights_np = compute_class_weights(tr_y, abnormal_boost=1.3, max_ratio=2.5)
+    class_weights = class_weights_np.to(device)
+    base_weights = class_weights.clone()
+
+    miss_ema = 0.25
 
     os.makedirs("artifacts", exist_ok=True)
     log_path = os.path.join(
@@ -205,7 +222,6 @@ def main() -> None:
     )
 
     student = build_student(args, device)
-    ce_loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
     optimizer = Adam(student.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=args.scheduler_patience, verbose=True)
@@ -215,6 +231,9 @@ def main() -> None:
             json.dump(entry, f, ensure_ascii=False)
             f.write("\n")
 
+    data_min = float(np.min(train_dataset.data)) if len(train_dataset) > 0 else 0.0
+    data_max = float(np.max(train_dataset.data)) if len(train_dataset) > 0 else 0.0
+
     _write_log(
         {
             "event": "start",
@@ -222,8 +241,11 @@ def main() -> None:
             "config": vars(args),
             "class_counts": class_counts.tolist(),
             "class_weights": class_weights.detach().cpu().tolist(),
+            "data_range": [data_min, data_max],
         }
     )
+
+    print(f"Preprocessed input range: [{data_min:.3f}, {data_max:.3f}] (expected within [-1, 1])")
 
     best_val_f1 = -float("inf")
     best_state = None
@@ -236,6 +258,15 @@ def main() -> None:
         student.train()
         running_loss = 0.0
         total = 0
+
+        adaptive_pos_boost = 1.0 + miss_ema * 0.8
+        epoch_weights = base_weights.clone()
+        epoch_weights[1] = torch.clamp(
+            base_weights[1] * adaptive_pos_boost,
+            min=base_weights.min() * 0.8,
+            max=base_weights.max() * 2.0,
+        )
+        ce_loss_fn = nn.CrossEntropyLoss(weight=epoch_weights)
 
         for signals, labels in train_loader:
             signals, labels = signals.to(device), labels.to(device)
@@ -260,11 +291,14 @@ def main() -> None:
             student, gen_loader, device, return_probs=True
         )
 
-        best_thr_epoch, _ = sweep_thresholds(
+        best_thr_epoch, _ = sweep_thresholds_adaptive(
             val_true,
             val_probs,
             miss_target=0.15,
             fpr_cap=0.15,
+            recall_gain=1.0 + miss_ema * 1.8,
+            threshold_center=0.5,
+            threshold_reg=0.08,
         )
 
         # Use the swept threshold to report and track metrics instead of argmax-only scores
@@ -272,6 +306,8 @@ def main() -> None:
         gen_preds = (np.array(gen_probs) >= best_thr_epoch).astype(int).tolist()
         val_metrics = confusion_metrics(val_true, val_preds)
         gen_metrics = confusion_metrics(gen_true, gen_preds)
+
+        miss_ema = 0.8 * miss_ema + 0.2 * val_metrics["miss_rate"]
 
         scheduler.step(val_loss)
 
@@ -347,11 +383,14 @@ def main() -> None:
         student, gen_loader, device, return_probs=True
     )
 
-    best_threshold, val_metrics = sweep_thresholds(
+    best_threshold, val_metrics = sweep_thresholds_adaptive(
         val_true,
         val_probs,
         miss_target=0.15,
         fpr_cap=0.15,
+        recall_gain=1.0 + miss_ema * 1.8,
+        threshold_center=0.5,
+        threshold_reg=0.08,
     )
     gen_metrics = confusion_metrics(gen_true, (np.array(gen_probs) >= best_threshold).astype(int).tolist())
     val_pred = (np.array(val_probs) >= best_threshold).astype(int).tolist()
