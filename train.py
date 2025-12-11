@@ -273,6 +273,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--auto_sampler_ratio", type=float, default=0.35, help="Auto-enable sampler when abnormal ratio is below this")
     parser.add_argument("--kd_pause_miss", type=float, default=0.35, help="Pause KD when miss-rate exceeds this")
     parser.add_argument("--kd_resume_miss", type=float, default=0.2, help="Resume KD when miss-rate falls below this")
+    parser.add_argument(
+        "--stable_mode",
+        action="store_true",
+        help="Disable adaptive reweighting/KD and use gentler class weights for a stable baseline",
+    )
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument(
@@ -314,6 +319,20 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    # Stable mode: turn off aggressive adaptive knobs and KD to avoid collapse
+    if args.stable_mode:
+        args.use_kd = False
+        args.enable_adaptive_reweight = False
+        args.use_weighted_sampler = False
+        args.auto_enable_sampler = False
+        args.class_weight_abnormal = min(args.class_weight_abnormal, 1.2)
+        args.max_class_weight_ratio = min(args.max_class_weight_ratio, 1.5)
+        args.imbalance_warmup_epochs = max(args.imbalance_warmup_epochs, 8)
+        args.kd_warmup_epochs = max(args.kd_warmup_epochs, 12)
+        args.collapse_cooldown_epochs = max(args.collapse_cooldown_epochs, 8)
+        print(
+            "[STABLE] Enabled stable mode: KD disabled, adaptive reweight/sampler off, gentler class weights, longer warmup."
+        )
     set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -614,7 +633,8 @@ def main() -> None:
                 f"[KD] Resuming distillation after miss_rate dropped below {args.kd_resume_miss:.3f}"
             )
         if (
-            not collapse_handled
+            not args.stable_mode
+            and not collapse_handled
             and val_argmax_metrics["fpr"] > 0.95
             and val_argmax_metrics["miss_rate"] < 0.05
         ):
@@ -638,7 +658,8 @@ def main() -> None:
             ramp_start_epoch = epoch + reweight_cooldown
 
         if (
-            recall_rescue_count < args.recall_rescue_limit
+            not args.stable_mode
+            and recall_rescue_count < args.recall_rescue_limit
             and val_argmax_metrics["miss_rate"] > 0.95
             and val_argmax_metrics["fpr"] < 0.05
             and epoch > args.imbalance_warmup_epochs
