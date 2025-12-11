@@ -264,6 +264,12 @@ def parse_args() -> argparse.Namespace:
         default=0.3,
         help="Weight for generalization metrics when blending thresholds (0-1)",
     )
+    parser.add_argument(
+        "--collapse_cooldown_epochs",
+        type=int,
+        default=5,
+        help="Epochs to disable reweighting/sampler after a collapse event before ramping again",
+    )
     parser.add_argument("--auto_sampler_ratio", type=float, default=0.35, help="Auto-enable sampler when abnormal ratio is below this")
     parser.add_argument("--kd_pause_miss", type=float, default=0.35, help="Pause KD when miss-rate exceeds this")
     parser.add_argument("--kd_resume_miss", type=float, default=0.2, help="Resume KD when miss-rate falls below this")
@@ -450,13 +456,19 @@ def main() -> None:
     imbalance_active = False
     ramp_den = max(1, args.imbalance_ramp_epochs)
     weight_ones = torch.ones_like(base_class_weights) if base_class_weights is not None else None
+    reweight_cooldown = 0
+    ramp_start_epoch = args.imbalance_warmup_epochs
 
     for epoch in range(1, args.max_epochs + 1):
+        collapse_handled = False
+        if reweight_cooldown > 0:
+            reweight_cooldown -= 1
+
         ramp_factor = 0.0
-        if epoch > args.imbalance_warmup_epochs:
-            ramp_factor = min(1.0, (epoch - args.imbalance_warmup_epochs) / ramp_den)
-        # Gradually enable imbalance handling and KD after warmup
-        if (not imbalance_active) and epoch > args.imbalance_warmup_epochs:
+        if epoch > ramp_start_epoch and reweight_cooldown == 0:
+            ramp_factor = min(1.0, (epoch - ramp_start_epoch) / ramp_den)
+        # Gradually enable imbalance handling and KD after warmup when not in cooldown
+        if (not imbalance_active) and epoch > args.imbalance_warmup_epochs and reweight_cooldown == 0:
             if args.use_class_weights and base_class_weights is not None:
                 current_class_weights = base_class_weights.clone()
                 ce_loss_fn = nn.CrossEntropyLoss(weight=current_class_weights)
@@ -479,7 +491,10 @@ def main() -> None:
         running_loss = 0.0
         total = 0
 
-        if args.use_class_weights and base_class_weights is not None:
+        if reweight_cooldown > 0:
+            current_class_weights = None
+            ce_loss_fn = nn.CrossEntropyLoss(weight=current_class_weights)
+        elif args.use_class_weights and base_class_weights is not None:
             scaled_weights = base_class_weights.clone()
             if weight_ones is not None:
                 scaled_weights = weight_ones + (base_class_weights - weight_ones) * (ramp_factor * class_weight_scale)
@@ -489,7 +504,7 @@ def main() -> None:
             current_class_weights = scaled_weights
             ce_loss_fn = nn.CrossEntropyLoss(weight=current_class_weights)
 
-        if use_sampler:
+        if use_sampler and reweight_cooldown == 0:
             effective_boost = 1.0 + (target_sampler_boost - 1.0) * ramp_factor
             if last_sampler_boost_used is None or abs(effective_boost - last_sampler_boost_used) > 1e-3:
                 train_loader = _build_train_loader(use_sampler, effective_boost)
@@ -618,6 +633,9 @@ def main() -> None:
             kd_active = False
             patience_counter = 0
             collapse_handled = True
+            reweight_cooldown = args.collapse_cooldown_epochs
+            imbalance_active = False
+            ramp_start_epoch = epoch + reweight_cooldown
 
         if (
             recall_rescue_count < args.recall_rescue_limit
@@ -638,6 +656,9 @@ def main() -> None:
             kd_active = False  # let CE recover before KD resumes
             collapse_handled = True
             recall_rescue_count += 1
+            reweight_cooldown = args.collapse_cooldown_epochs
+            imbalance_active = False
+            ramp_start_epoch = epoch + reweight_cooldown
         scheduler.step(val_loss)
 
         val_score = val_metrics["f1"] + val_metrics["sensitivity"] - 0.5 * val_metrics["fpr"]
