@@ -193,6 +193,8 @@ def sweep_thresholds_blended(
     gen_true: List[int],
     gen_probs: List[float],
     gen_weight: float = 0.3,
+    recall_gain: float = 1.5,
+    miss_penalty: float = 1.0,
     thresholds: List[float] | None = None,
     miss_target: float | None = None,
     fpr_cap: float | None = None,
@@ -206,6 +208,8 @@ def sweep_thresholds_blended(
         gen_probs: Generalization positive probabilities.
         gen_weight: Blend weight in [0,1] for generalization when scoring.
         thresholds: Optional threshold list; defaults to dense grid + quantiles.
+        recall_gain: Multiplicative weight on sensitivity to bias toward lower miss.
+        miss_penalty: Penalty weight on miss rate when computing blended score.
         miss_target: Optional miss-rate cap applied to the blended miss.
         fpr_cap: Optional FPR cap applied to the blended FPR.
 
@@ -220,7 +224,7 @@ def sweep_thresholds_blended(
         thresholds = np.unique(np.concatenate([dense, quantiles])).tolist()
 
     def _score(metrics: Dict[str, float]) -> float:
-        return metrics["f1"] + 1.5 * metrics["sensitivity"] - metrics["fpr"]
+        return metrics["f1"] + recall_gain * metrics["sensitivity"] - miss_penalty * metrics["miss_rate"] - metrics["fpr"]
 
     best_score = -float("inf")
     best_thr = 0.5
