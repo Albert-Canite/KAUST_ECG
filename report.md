@@ -214,9 +214,9 @@
   - 如需保持自蒸馏，可增加梯度停滞期或 EMA 冻结步，让教师滞后更长窗口，使其成为“更平滑的历史平均”，再对比是否优于纯 CE。
   - **训练曲线增加泛化轨迹**：训练曲线图中加入 Gen F1/Miss/FPR 轨迹，便于直观看到验证-泛化的分布差距与收敛状态。
 - **本轮改动（结合最新日志的参数调优）**：
-  - **降低 KD 强度并延后介入**：默认 `kd_start_epoch` 调至 10、`kd_warmup_epochs` 至 15、`kd_alpha` 至 0.05，EMA 衰减提升到 0.995、温度至 2.5，避免早期噪声教师拖拽学生收敛。【F:train.py†L225-L276】
-  - **按教师置信度自适应缩放 KD 权重**：新增 `kd_confidence_floor`（默认 0.55），仅当教师软输出平均最大概率高于该下限时才放大 KD 权重，并在日志写入 `kd_alpha_effective` 为批次平均值，便于观察实际蒸馏强度。【F:train.py†L79-L155】【F:train.py†L356-L407】【F:train.py†L430-L469】
-  - 预期效果：早期 CE 仍主导，KD 逐步介入且强度受教师置信度约束，匹配日志中“KD 提前介入、强度恒定导致 miss/FPR 上升”的问题。
+  - **进一步降低 KD 强度并延后介入**：默认 `kd_start_epoch` 调至 12、`kd_warmup_epochs` 至 20、`kd_alpha` 至 0.03，EMA 衰减提升到 0.997、温度至 3.0，进一步弱化早期蒸馏信号，优先让 CE 收敛。【F:train.py†L225-L283】
+  - **按教师置信度自适应缩放 KD 权重**：`kd_confidence_floor` 默认 0.70，并新增 `kd_confidence_power`（默认 2.0）让低置信度时 KD 权重按幂次更快衰减；日志仍写入 `kd_alpha_effective` 便于观察实际蒸馏强度。【F:train.py†L79-L158】【F:train.py†L356-L409】【F:train.py†L430-L469】
+  - 预期效果：CE 更长时间主导，KD 只有在教师输出高置信度且暖启动完成后才逐步放大，降低 miss/FPR 因弱教师蒸馏被拉高的风险。
 - **后续建议**：
   - 若泛化 miss 仍高，可提高 `--generalization_score_weight` 到 0.4–0.5，使早停更重视泛化；或在阈值搜索时调低 `--threshold_target_miss`（如 0.10）以压漏诊。
   - 在重平衡阶段进一步平滑：可延长 `--imbalance_ramp_epochs` 到 8–10，或将 `--sampler_abnormal_boost` 调低到 1.0–1.1，待泛化 miss 下行后再逐步提升。
