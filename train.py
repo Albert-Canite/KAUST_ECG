@@ -105,9 +105,9 @@ class KDConfig:
 
 
 def kd_logit_loss(logits_student: torch.Tensor, logits_teacher: torch.Tensor, temperature: float) -> torch.Tensor:
-    p_teacher = torch.log_softmax(logits_teacher / temperature, dim=1)
-    p_student = torch.softmax(logits_student / temperature, dim=1)
-    return F.kl_div(p_teacher, p_student, reduction="batchmean") * (temperature * temperature)
+    student_log_probs = torch.log_softmax(logits_student / temperature, dim=1)
+    teacher_probs = torch.softmax(logits_teacher / temperature, dim=1)
+    return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (temperature * temperature)
 
 
 def update_teacher(student: nn.Module, teacher: nn.Module, ema_decay: float) -> None:
@@ -215,7 +215,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
-    _add_bool_arg(parser, "use_kd", default=False, help_text="logit-level knowledge distillation with EMA teacher")
+    _add_bool_arg(parser, "use_kd", default=True, help_text="logit-level knowledge distillation with EMA teacher")
     parser.add_argument("--kd_start_epoch", type=int, default=5, help="Epoch to start KD and EMA teacher updates")
     parser.add_argument("--kd_alpha", type=float, default=0.1, help="Weight for KD loss blending")
     parser.add_argument("--kd_temperature", type=float, default=2.0, help="Temperature for KD softening")
