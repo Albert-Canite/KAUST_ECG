@@ -381,6 +381,13 @@ def main() -> None:
             student, gen_loader, device, return_probs=True
         )
 
+        teacher_val_metrics = None
+        if teacher is not None and epoch >= args.kd_start_epoch:
+            t_val_loss, t_val_metrics, _, _, _ = evaluate(
+                teacher, val_loader, device, return_probs=False
+            )
+            teacher_val_metrics = t_val_metrics
+
         best_thr_epoch, val_metrics, gen_metrics = sweep_thresholds_blended(
             val_true,
             val_probs,
