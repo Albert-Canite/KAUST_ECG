@@ -213,10 +213,10 @@
   - 缩小默认 KD 权重：将 `kd_alpha` 下调（如 0.05）并允许在训练中动态调节，避免对不成熟教师过拟合。
   - 如需保持自蒸馏，可增加梯度停滞期或 EMA 冻结步，让教师滞后更长窗口，使其成为“更平滑的历史平均”，再对比是否优于纯 CE。
   - **训练曲线增加泛化轨迹**：训练曲线图中加入 Gen F1/Miss/FPR 轨迹，便于直观看到验证-泛化的分布差距与收敛状态。
-- **本轮改动（结合最新日志的参数调优）**：
-  - **进一步降低 KD 强度并延后介入**：默认 `kd_start_epoch` 调至 16、`kd_warmup_epochs` 至 24、`kd_alpha` 至 0.02，EMA 衰减提升到 0.998、温度至 3.5，继续弱化早期蒸馏信号，让 CE 先充分收敛。【F:train.py†L225-L283】
-  - **按教师置信度与损失比自适应缩放 KD 权重**：`kd_confidence_floor` 默认 0.80、`kd_confidence_power` 默认 3.0，低置信度时快速衰减 KD；新增 `kd_balance_kd_to_ce`（默认 1.0）按 `ce/kd` 比例进一步下调 KD 权重，确保 KD 不会超过 CE 驱动。【F:train.py†L79-L158】【F:train.py†L356-L414】【F:train.py†L430-L469】
-  - 预期效果：KD 仅在教师足够稳定且损失规模合理时逐步介入，减少 EMA 教师噪声对召回/FPR 的负面拖拽。
+- **本轮改动（结合最新日志的参数再调优）**：
+  - **KD 更晚、更弱、更平滑**：默认 `kd_start_epoch` 改为 20、`kd_warmup_epochs`=30、`kd_alpha`=0.01、`kd_temperature`=4.5、`ema_decay`=0.999，进一步减少早期蒸馏并放大温度平滑。【F:train.py†L225-L283】
+  - **置信度与损失比更严的门控**：`kd_confidence_floor` 提升到 0.90、`kd_confidence_power`=4.0，低于门槛直接跳过 KD；`kd_balance_kd_to_ce` 改为 0.5，使 KD 权重至多按 CE/KD 比例折半，避免 KD 盖过 CE。【F:train.py†L79-L158】【F:train.py†L356-L416】【F:train.py†L432-L471】
+  - **预期效果**：仅在教师输出高置信且损失规模温和时才少量蒸馏，默认行为更接近纯 CE，避免 KD 将学生拉回过平滑的历史参数。
 - **后续建议**：
   - 若泛化 miss 仍高，可提高 `--generalization_score_weight` 到 0.4–0.5，使早停更重视泛化；或在阈值搜索时调低 `--threshold_target_miss`（如 0.10）以压漏诊。
   - 在重平衡阶段进一步平滑：可延长 `--imbalance_ramp_epochs` 到 8–10，或将 `--sampler_abnormal_boost` 调低到 1.0–1.1，待泛化 miss 下行后再逐步提升。

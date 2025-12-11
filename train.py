@@ -229,32 +229,32 @@ def parse_args() -> argparse.Namespace:
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
     _add_bool_arg(parser, "use_kd", default=True, help_text="logit-level knowledge distillation with EMA teacher")
-    parser.add_argument("--kd_start_epoch", type=int, default=16, help="Epoch to start KD and EMA teacher updates")
-    parser.add_argument("--kd_alpha", type=float, default=0.02, help="Weight for KD loss blending")
-    parser.add_argument("--kd_temperature", type=float, default=3.5, help="Temperature for KD softening")
-    parser.add_argument("--ema_decay", type=float, default=0.998, help="EMA decay for teacher parameter updates")
+    parser.add_argument("--kd_start_epoch", type=int, default=20, help="Epoch to start KD and EMA teacher updates")
+    parser.add_argument("--kd_alpha", type=float, default=0.01, help="Weight for KD loss blending")
+    parser.add_argument("--kd_temperature", type=float, default=4.5, help="Temperature for KD softening")
+    parser.add_argument("--ema_decay", type=float, default=0.999, help="EMA decay for teacher parameter updates")
     parser.add_argument(
         "--kd_warmup_epochs",
         type=int,
-        default=24,
+        default=30,
         help="Number of epochs to linearly ramp KD alpha after start_epoch",
     )
     parser.add_argument(
         "--kd_confidence_floor",
         type=float,
-        default=0.80,
+        default=0.90,
         help="Teacher confidence floor before applying KD weight (0 disables gating)",
     )
     parser.add_argument(
         "--kd_confidence_power",
         type=float,
-        default=3.0,
+        default=4.0,
         help="Exponent for confidence-based KD gating (higher=more selective)",
     )
     parser.add_argument(
         "--kd_balance_kd_to_ce",
         type=float,
-        default=1.0,
+        default=0.5,
         help=(
             "Clamp factor for scaling KD alpha by ce/kd loss ratio (1.0 keeps KD <= CE; 0 disables ratio scaling)"
         ),
@@ -413,23 +413,27 @@ def main() -> None:
             if kd_active_epoch:
                 with torch.no_grad():
                     logits_teacher, _ = teacher(signals)
-                kd_loss = kd_logit_loss(logits, logits_teacher, kd_config.temperature)
-                if kd_config.confidence_floor > 0.0:
                     teacher_probs = torch.softmax(logits_teacher / kd_config.temperature, dim=1)
                     teacher_conf = teacher_probs.max(dim=1).values.mean().item()
-                    confidence_scale = max(
-                        0.0,
-                        min(1.0, (teacher_conf - kd_config.confidence_floor) / (1.0 - kd_config.confidence_floor)),
-                    ) ** kd_config.confidence_power
-                    batch_kd_alpha = effective_alpha_epoch * confidence_scale
+
+                if kd_config.confidence_floor > 0.0 and teacher_conf <= kd_config.confidence_floor:
+                    batch_kd_alpha = 0.0
                 else:
-                    batch_kd_alpha = effective_alpha_epoch
+                    kd_loss = kd_logit_loss(logits, logits_teacher, kd_config.temperature)
+                    if kd_config.confidence_floor > 0.0:
+                        confidence_scale = max(
+                            0.0,
+                            min(1.0, (teacher_conf - kd_config.confidence_floor) / (1.0 - kd_config.confidence_floor)),
+                        ) ** kd_config.confidence_power
+                        batch_kd_alpha = effective_alpha_epoch * confidence_scale
+                    else:
+                        batch_kd_alpha = effective_alpha_epoch
 
-                if kd_config.balance_ratio > 0.0 and kd_loss.item() > 0.0:
-                    ratio = (ce_loss.detach() / (kd_loss.detach() + 1e-8)).clamp(max=kd_config.balance_ratio)
-                    batch_kd_alpha = batch_kd_alpha * ratio.item()
+                    if kd_config.balance_ratio > 0.0 and kd_loss.item() > 0.0:
+                        ratio = (ce_loss.detach() / (kd_loss.detach() + 1e-8)).clamp(max=kd_config.balance_ratio)
+                        batch_kd_alpha = batch_kd_alpha * ratio.item()
 
-                loss = (1.0 - batch_kd_alpha) * ce_loss + batch_kd_alpha * kd_loss
+                    loss = (1.0 - batch_kd_alpha) * ce_loss + batch_kd_alpha * kd_loss
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
