@@ -180,7 +180,12 @@ def parse_args() -> argparse.Namespace:
         help="Miss-rate penalty applied to generalization metrics during threshold sweeps",
     )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--enable_kd", action="store_true", help="Enable EMA self-distillation to stabilize recall")
+    _add_bool_arg(
+        parser,
+        "enable_kd",
+        default=True,
+        help_text="EMA self-distillation (teacher auto-initialized from student)",
+    )
     parser.add_argument("--kd_alpha", type=float, default=0.15, help="Weight for KD loss vs CE loss")
     parser.add_argument("--kd_temperature", type=float, default=2.5, help="Temperature for soft targets")
     parser.add_argument("--kd_ema_decay", type=float, default=0.995, help="EMA decay for teacher updates")
