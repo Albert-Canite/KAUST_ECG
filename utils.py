@@ -195,6 +195,8 @@ def sweep_thresholds_blended(
     gen_weight: float = 0.3,
     recall_gain: float = 1.5,
     miss_penalty: float = 1.0,
+    gen_recall_gain: float | None = None,
+    gen_miss_penalty: float | None = None,
     thresholds: List[float] | None = None,
     miss_target: float | None = None,
     fpr_cap: float | None = None,
@@ -210,6 +212,8 @@ def sweep_thresholds_blended(
         thresholds: Optional threshold list; defaults to dense grid + quantiles.
         recall_gain: Multiplicative weight on sensitivity to bias toward lower miss.
         miss_penalty: Penalty weight on miss rate when computing blended score.
+        gen_recall_gain: Optional override on recall gain for generalization metrics.
+        gen_miss_penalty: Optional override on miss penalty for generalization metrics.
         miss_target: Optional miss-rate cap applied to the blended miss.
         fpr_cap: Optional FPR cap applied to the blended FPR.
 
@@ -218,13 +222,17 @@ def sweep_thresholds_blended(
     """
 
     gen_weight = float(np.clip(gen_weight, 0.0, 1.0))
+    val_recall_gain = recall_gain
+    val_miss_penalty = miss_penalty
+    gen_recall_gain = recall_gain if gen_recall_gain is None else gen_recall_gain
+    gen_miss_penalty = miss_penalty if gen_miss_penalty is None else gen_miss_penalty
     if thresholds is None:
-        dense = np.linspace(0.05, 0.95, num=19)
+        dense = np.linspace(0.02, 0.98, num=21)
         quantiles = np.quantile(np.concatenate([val_probs, gen_probs]), q=np.linspace(0.05, 0.95, num=19))
         thresholds = np.unique(np.concatenate([dense, quantiles])).tolist()
 
-    def _score(metrics: Dict[str, float]) -> float:
-        return metrics["f1"] + recall_gain * metrics["sensitivity"] - miss_penalty * metrics["miss_rate"] - metrics["fpr"]
+    def _score(metrics: Dict[str, float], r_gain: float, m_penalty: float) -> float:
+        return metrics["f1"] + r_gain * metrics["sensitivity"] - m_penalty * metrics["miss_rate"] - metrics["fpr"]
 
     best_score = -float("inf")
     best_thr = 0.5
@@ -239,7 +247,9 @@ def sweep_thresholds_blended(
 
         blended_miss = (1 - gen_weight) * val_metrics["miss_rate"] + gen_weight * gen_metrics["miss_rate"]
         blended_fpr = (1 - gen_weight) * val_metrics["fpr"] + gen_weight * gen_metrics["fpr"]
-        blended_score = (1 - gen_weight) * _score(val_metrics) + gen_weight * _score(gen_metrics)
+        blended_score = (1 - gen_weight) * _score(val_metrics, val_recall_gain, val_miss_penalty) + gen_weight * _score(
+            gen_metrics, gen_recall_gain, gen_miss_penalty
+        )
 
         if miss_target is not None and blended_miss > miss_target:
             continue
@@ -259,7 +269,9 @@ def sweep_thresholds_blended(
             gen_preds = (np.array(gen_probs) >= thr).astype(int).tolist()
             val_metrics = confusion_metrics(val_true, val_preds)
             gen_metrics = confusion_metrics(gen_true, gen_preds)
-            blended_score = (1 - gen_weight) * _score(val_metrics) + gen_weight * _score(gen_metrics)
+            blended_score = (1 - gen_weight) * _score(val_metrics, val_recall_gain, val_miss_penalty) + gen_weight * _score(
+                gen_metrics, gen_recall_gain, gen_miss_penalty
+            )
             if blended_score > best_score:
                 best_score = blended_score
                 best_thr = float(thr)
