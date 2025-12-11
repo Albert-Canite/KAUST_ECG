@@ -152,9 +152,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--class_weight_abnormal", type=float, default=1.30)
     parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
     parser.add_argument("--generalization_score_weight", type=float, default=0.35)
-    parser.add_argument("--threshold_target_miss", type=float, default=0.14)
-    parser.add_argument("--threshold_max_fpr", type=float, default=0.15)
-    parser.add_argument("--threshold_fpr_penalty", type=float, default=1.2)
+    parser.add_argument("--threshold_target_miss", type=float, default=0.10)
+    parser.add_argument("--threshold_max_fpr", type=float, default=0.10)
+    parser.add_argument("--threshold_fpr_penalty", type=float, default=0.9)
+    parser.add_argument("--threshold_miss_violation_penalty", type=float, default=2.5)
     parser.add_argument("--threshold_center", type=float, default=0.78)
     parser.add_argument("--threshold_reg", type=float, default=0.02)
     parser.add_argument("--abnormal_sampler_boost", type=float, default=1.1)
@@ -314,6 +315,7 @@ def main() -> None:
             miss_target=args.threshold_target_miss,
             fpr_cap=args.threshold_max_fpr,
             fpr_penalty=args.threshold_fpr_penalty,
+            miss_violation_penalty=args.threshold_miss_violation_penalty,
             threshold_center=args.threshold_center,
             threshold_reg=args.threshold_reg,
         )
@@ -403,6 +405,7 @@ def main() -> None:
         miss_target=args.threshold_target_miss,
         fpr_cap=args.threshold_max_fpr,
         fpr_penalty=args.threshold_fpr_penalty,
+        miss_violation_penalty=args.threshold_miss_violation_penalty,
         threshold_center=args.threshold_center,
         threshold_reg=args.threshold_reg,
     )
