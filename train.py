@@ -104,6 +104,8 @@ class KDConfig:
     ema_decay: float
     warmup_epochs: int
     confidence_floor: float
+    confidence_floor_final: float
+    confidence_floor_warmup: int
     confidence_power: float
     balance_ratio: float
 
@@ -121,6 +123,21 @@ def kd_alpha_schedule(base_alpha: float, current_epoch: int, start_epoch: int, w
         return base_alpha
     progress = min(1.0, float(current_epoch - start_epoch + 1) / float(warmup_epochs))
     return base_alpha * progress
+
+
+def kd_confidence_floor_schedule(
+    start_floor: float, final_floor: float, current_epoch: int, start_epoch: int, warmup_epochs: int
+) -> float:
+    if start_floor <= 0.0:
+        return 0.0
+    if warmup_epochs <= 0 or current_epoch <= start_epoch:
+        return start_floor
+    progress = min(1.0, float(current_epoch - start_epoch) / float(warmup_epochs))
+    if final_floor > start_floor:
+        floor = start_floor + (final_floor - start_floor) * progress
+    else:
+        floor = start_floor - (start_floor - final_floor) * progress
+    return max(min(floor, max(start_floor, final_floor)), min(start_floor, final_floor))
 
 
 def update_teacher(student: nn.Module, teacher: nn.Module, ema_decay: float) -> None:
@@ -246,6 +263,18 @@ def parse_args() -> argparse.Namespace:
         help="Teacher confidence floor before applying KD weight (0 disables gating)",
     )
     parser.add_argument(
+        "--kd_confidence_floor_final",
+        type=float,
+        default=0.70,
+        help="Minimum confidence floor after warmup to gradually relax KD gating",
+    )
+    parser.add_argument(
+        "--kd_confidence_floor_warmup",
+        type=int,
+        default=15,
+        help="Epochs after KD start to interpolate confidence floor toward the final value",
+    )
+    parser.add_argument(
         "--kd_confidence_power",
         type=float,
         default=4.0,
@@ -275,6 +304,8 @@ def main() -> None:
         ema_decay=args.ema_decay,
         warmup_epochs=args.kd_warmup_epochs,
         confidence_floor=args.kd_confidence_floor,
+        confidence_floor_final=args.kd_confidence_floor_final,
+        confidence_floor_warmup=args.kd_confidence_floor_warmup,
         confidence_power=args.kd_confidence_power,
         balance_ratio=args.kd_balance_kd_to_ce,
     )
@@ -385,7 +416,16 @@ def main() -> None:
             kd_config.alpha, epoch, kd_config.start_epoch, kd_config.warmup_epochs
         )
         kd_active_epoch = kd_config.use_kd and epoch >= kd_config.start_epoch
+        kd_floor_epoch = kd_confidence_floor_schedule(
+            kd_config.confidence_floor,
+            kd_config.confidence_floor_final,
+            epoch,
+            kd_config.start_epoch,
+            kd_config.confidence_floor_warmup,
+        )
         avg_kd_alpha = 0.0
+        kd_active_batches = 0
+        kd_skipped_low_conf = 0
         running_ce_loss = 0.0
         running_kd_loss = 0.0
         running_total_loss = 0.0
@@ -416,14 +456,15 @@ def main() -> None:
                     teacher_probs = torch.softmax(logits_teacher / kd_config.temperature, dim=1)
                     teacher_conf = teacher_probs.max(dim=1).values.mean().item()
 
-                if kd_config.confidence_floor > 0.0 and teacher_conf <= kd_config.confidence_floor:
+                if kd_floor_epoch > 0.0 and teacher_conf <= kd_floor_epoch:
+                    kd_skipped_low_conf += labels.size(0)
                     batch_kd_alpha = 0.0
                 else:
                     kd_loss = kd_logit_loss(logits, logits_teacher, kd_config.temperature)
-                    if kd_config.confidence_floor > 0.0:
+                    if kd_floor_epoch > 0.0:
                         confidence_scale = max(
                             0.0,
-                            min(1.0, (teacher_conf - kd_config.confidence_floor) / (1.0 - kd_config.confidence_floor)),
+                            min(1.0, (teacher_conf - kd_floor_epoch) / (1.0 - kd_floor_epoch)),
                         ) ** kd_config.confidence_power
                         batch_kd_alpha = effective_alpha_epoch * confidence_scale
                     else:
@@ -434,6 +475,7 @@ def main() -> None:
                         batch_kd_alpha = batch_kd_alpha * ratio.item()
 
                     loss = (1.0 - batch_kd_alpha) * ce_loss + batch_kd_alpha * kd_loss
+                    kd_active_batches += labels.size(0)
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
@@ -493,6 +535,9 @@ def main() -> None:
                 "train_ce_loss": train_ce_loss,
                 "train_kd_loss": train_kd_loss,
                 "kd_alpha_effective": epoch_avg_kd_alpha if kd_active_epoch else 0.0,
+                "kd_confidence_floor": kd_floor_epoch if kd_active_epoch else 0.0,
+                "kd_active_batches": kd_active_batches,
+                "kd_skipped_low_conf": kd_skipped_low_conf,
                 "val_loss": val_loss,
                 "val_f1": val_metrics["f1"],
                 "val_miss": val_metrics["miss_rate"],
@@ -512,6 +557,9 @@ def main() -> None:
                 "train_ce_loss": train_ce_loss,
                 "train_kd_loss": train_kd_loss,
                 "kd_alpha_effective": epoch_avg_kd_alpha if kd_active_epoch else 0.0,
+                "kd_confidence_floor": kd_floor_epoch if kd_active_epoch else 0.0,
+                "kd_active_batches": kd_active_batches,
+                "kd_skipped_low_conf": kd_skipped_low_conf,
                 "val_loss": val_loss,
                 "val_f1": val_metrics["f1"],
                 "val_miss": val_metrics["miss_rate"],
