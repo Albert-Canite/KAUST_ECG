@@ -105,6 +105,7 @@ class KDConfig:
     warmup_epochs: int
     confidence_floor: float
     confidence_power: float
+    balance_ratio: float
 
 
 def kd_logit_loss(logits_student: torch.Tensor, logits_teacher: torch.Tensor, temperature: float) -> torch.Tensor:
@@ -228,27 +229,35 @@ def parse_args() -> argparse.Namespace:
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
     _add_bool_arg(parser, "use_kd", default=True, help_text="logit-level knowledge distillation with EMA teacher")
-    parser.add_argument("--kd_start_epoch", type=int, default=12, help="Epoch to start KD and EMA teacher updates")
-    parser.add_argument("--kd_alpha", type=float, default=0.03, help="Weight for KD loss blending")
-    parser.add_argument("--kd_temperature", type=float, default=3.0, help="Temperature for KD softening")
-    parser.add_argument("--ema_decay", type=float, default=0.997, help="EMA decay for teacher parameter updates")
+    parser.add_argument("--kd_start_epoch", type=int, default=16, help="Epoch to start KD and EMA teacher updates")
+    parser.add_argument("--kd_alpha", type=float, default=0.02, help="Weight for KD loss blending")
+    parser.add_argument("--kd_temperature", type=float, default=3.5, help="Temperature for KD softening")
+    parser.add_argument("--ema_decay", type=float, default=0.998, help="EMA decay for teacher parameter updates")
     parser.add_argument(
         "--kd_warmup_epochs",
         type=int,
-        default=20,
+        default=24,
         help="Number of epochs to linearly ramp KD alpha after start_epoch",
     )
     parser.add_argument(
         "--kd_confidence_floor",
         type=float,
-        default=0.70,
+        default=0.80,
         help="Teacher confidence floor before applying KD weight (0 disables gating)",
     )
     parser.add_argument(
         "--kd_confidence_power",
         type=float,
-        default=2.0,
+        default=3.0,
         help="Exponent for confidence-based KD gating (higher=more selective)",
+    )
+    parser.add_argument(
+        "--kd_balance_kd_to_ce",
+        type=float,
+        default=1.0,
+        help=(
+            "Clamp factor for scaling KD alpha by ce/kd loss ratio (1.0 keeps KD <= CE; 0 disables ratio scaling)"
+        ),
     )
 
     return parser.parse_args()
@@ -267,6 +276,7 @@ def main() -> None:
         warmup_epochs=args.kd_warmup_epochs,
         confidence_floor=args.kd_confidence_floor,
         confidence_power=args.kd_confidence_power,
+        balance_ratio=args.kd_balance_kd_to_ce,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -414,6 +424,11 @@ def main() -> None:
                     batch_kd_alpha = effective_alpha_epoch * confidence_scale
                 else:
                     batch_kd_alpha = effective_alpha_epoch
+
+                if kd_config.balance_ratio > 0.0 and kd_loss.item() > 0.0:
+                    ratio = (ce_loss.detach() / (kd_loss.detach() + 1e-8)).clamp(max=kd_config.balance_ratio)
+                    batch_kd_alpha = batch_kd_alpha * ratio.item()
+
                 loss = (1.0 - batch_kd_alpha) * ce_loss + batch_kd_alpha * kd_loss
 
             loss.backward()
