@@ -217,8 +217,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler_patience", type=int, default=3)
     parser.add_argument("--dropout_rate", type=float, default=0.2)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
-    parser.add_argument("--class_weight_abnormal", type=float, default=1.4)
-    parser.add_argument("--max_class_weight_ratio", type=float, default=2.0)
+    parser.add_argument("--class_weight_abnormal", type=float, default=1.2)
+    parser.add_argument("--max_class_weight_ratio", type=float, default=1.5)
     parser.add_argument("--teacher_checkpoint", type=str, default=None)
     parser.add_argument("--teacher_embedding_dim", type=int, default=128)
     parser.add_argument("--kd_temperature", type=float, default=2.0)
@@ -273,10 +273,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--auto_sampler_ratio", type=float, default=0.35, help="Auto-enable sampler when abnormal ratio is below this")
     parser.add_argument("--kd_pause_miss", type=float, default=0.35, help="Pause KD when miss-rate exceeds this")
     parser.add_argument("--kd_resume_miss", type=float, default=0.2, help="Resume KD when miss-rate falls below this")
-    parser.add_argument(
-        "--stable_mode",
-        action="store_true",
-        help="Disable adaptive reweighting/KD and use gentler class weights for a stable baseline",
+    _add_bool_arg(
+        parser,
+        "stable_mode",
+        default=True,
+        help_text="collapse-safe baseline (KD and adaptive reweighting off by default)",
     )
     parser.add_argument("--seed", type=int, default=42)
 
@@ -325,13 +326,14 @@ def main() -> None:
         args.enable_adaptive_reweight = False
         args.use_weighted_sampler = False
         args.auto_enable_sampler = False
+        args.use_class_weights = False
         args.class_weight_abnormal = min(args.class_weight_abnormal, 1.2)
         args.max_class_weight_ratio = min(args.max_class_weight_ratio, 1.5)
         args.imbalance_warmup_epochs = max(args.imbalance_warmup_epochs, 8)
         args.kd_warmup_epochs = max(args.kd_warmup_epochs, 12)
         args.collapse_cooldown_epochs = max(args.collapse_cooldown_epochs, 8)
         print(
-            "[STABLE] Enabled stable mode: KD disabled, adaptive reweight/sampler off, gentler class weights, longer warmup."
+            "[STABLE] Enabled stable mode: KD disabled, adaptive reweight/sampler off, class-weighting off, gentler caps, longer warmup."
         )
     set_seed(args.seed)
 
@@ -473,6 +475,7 @@ def main() -> None:
     recall_rescue_count = 0
     kd_active = False if kd_enabled else False
     imbalance_active = False
+    rebalance_locked = False
     ramp_den = max(1, args.imbalance_ramp_epochs)
     weight_ones = torch.ones_like(base_class_weights) if base_class_weights is not None else None
     reweight_cooldown = 0
@@ -487,7 +490,12 @@ def main() -> None:
         if epoch > ramp_start_epoch and reweight_cooldown == 0:
             ramp_factor = min(1.0, (epoch - ramp_start_epoch) / ramp_den)
         # Gradually enable imbalance handling and KD after warmup when not in cooldown
-        if (not imbalance_active) and epoch > args.imbalance_warmup_epochs and reweight_cooldown == 0:
+        if (
+            not imbalance_active
+            and (not rebalance_locked)
+            and epoch > args.imbalance_warmup_epochs
+            and reweight_cooldown == 0
+        ):
             if args.use_class_weights and base_class_weights is not None:
                 current_class_weights = base_class_weights.clone()
                 ce_loss_fn = nn.CrossEntropyLoss(weight=current_class_weights)
@@ -651,11 +659,14 @@ def main() -> None:
             ce_loss_fn = nn.CrossEntropyLoss(weight=current_class_weights)
             class_weight_scale = 1.0
             kd_active = False
+            kd_enabled = False
             patience_counter = 0
             collapse_handled = True
             reweight_cooldown = args.collapse_cooldown_epochs
             imbalance_active = False
             ramp_start_epoch = epoch + reweight_cooldown
+            rebalance_locked = True
+            plan_sampler = False
 
         if (
             not args.stable_mode
@@ -680,6 +691,9 @@ def main() -> None:
             reweight_cooldown = args.collapse_cooldown_epochs
             imbalance_active = False
             ramp_start_epoch = epoch + reweight_cooldown
+            rebalance_locked = True
+            plan_sampler = False
+            kd_enabled = False
         scheduler.step(val_loss)
 
         val_score = val_metrics["f1"] + val_metrics["sensitivity"] - 0.5 * val_metrics["fpr"]

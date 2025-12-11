@@ -39,8 +39,8 @@
 ## 超参数与可配置项
 - 训练：`--batch_size`，`--lr=1e-3`，`--weight_decay=1e-4`，`--max_epochs`(默认 90)，`--patience=25`，`--min_epochs=25`，`--scheduler_patience=3`。
 - 类别不平衡：
-  - 类别权重：默认关闭，若开启（`--use_class_weights`）异常类默认 1.0x，可调且受 `--max_class_weight_ratio`（默认 2.0）限制。
-  - 采样：默认关闭加权采样 (`--use_weighted_sampler/--no-use-weighted-sampler`)，异常类采样增强倍率 `--sampler_abnormal_boost`（默认 1.0，可调 >1）。
+  - 类别权重：稳定模式（默认开启）下关闭类权重；若手动开启（`--no-stable_mode --use_class_weights`），异常类默认 1.2x，受 `--max_class_weight_ratio`（默认 1.5）限制。
+  - 采样：默认关闭加权采样 (`--use_weighted_sampler/--no-use-weighted-sampler`)，异常类采样增强倍率 `--sampler_abnormal_boost`（默认 1.2，可调 >1）。
 - 模型：`--num_mlp_layers`(≥2)、`--dropout_rate`、`--use_value_constraint`、`--use_tanh_activations`、`--constraint_scale`。
 - 蒸馏：`--use_kd`（默认开启，可用 `--no-use-kd` 关闭）、`--teacher_checkpoint`（若未提供且启用 KD，将自动预训练 ResNet18 teacher）`--teacher_auto_train_epochs`（默认 15）、`--teacher_embedding_dim`、`--kd_temperature`、`--kd_d`、`--alpha/beta/gamma`、教师质量阈值 `--teacher_min_f1`、`--teacher_min_sensitivity`，若教师低于阈值会自动禁用 KD 以保护召回率。
 
@@ -269,3 +269,18 @@
   - 先以 `--stable_mode --no-use-kd --no-use_weighted_sampler` 跑一轮基准，观察 miss/FPR 收敛情况；若 miss 高但 FPR 低，再逐步提高 `class_weight_abnormal`（1.2→1.4）或手动开启采样。
   - 若稳定模式下仍 miss 高，可小幅增加容量（`num_mlp_layers 3→4`）或保留当前 0.2 dropout；必要时将 `imbalance_warmup_epochs` 保持在 8–10，避免早启 reweight。
   - KD 仅在学生已稳定且教师质量达标时再开启，先将 `beta/gamma` 降到 0.5/0.25，对照观察召回是否改善。
+
+## v14_debug 问题分析（最新日志：启用 reweight 后反复 FPR=100%/miss=0% 崩溃）
+- **新现象**：第 5 轮启用类权重/采样/KD 后，连续触发“正崩溃/负崩溃”警告，训练 loss 飙升到 3.x 并停留，Val/Gen 全预测异常或全正常，F1=0.11/0.27。
+- **根因定位**：
+  1. **重平衡策略过早/过强复位**：崩溃后短暂冷却又重新开启类权重与采样，导致模型在尚未恢复的情况下再次被推向单侧。
+  2. **KD 重复介入**：崩溃后 KD 自动恢复，与重新加权叠加，进一步放大梯度偏移。
+  3. **默认“进阶模式”过激**：即便未显式开启，用户直接运行 `python train.py` 仍会加载自适应 reweight/KD，容易复现崩溃轨迹。
+- **本轮修改**：
+  - **稳定模式默认开启**：将 `--stable_mode` 改为默认值“开启”，直接关闭 KD、类权重、自适应 reweight 与加权采样，仅用 CE 基线训练，避免崩溃。从 CLI 可用 `--no-stable_mode` 手动切回进阶模式。
+  - **温和权重默认值**：进一步下调默认 `class_weight_abnormal=1.2`、`max_class_weight_ratio=1.5`，即便用户手动关闭稳定模式也能保持更温和的重平衡强度。
+  - **崩溃锁定**：新增 rebalance 锁定标志，检测到正/负崩溃后永久关闭 reweight/采样计划并禁用 KD，防止冷却结束后再次自动启动导致循环崩溃。
+- **建议验证路径**：
+  1. 直接运行 `python train.py`（稳定模式）观察基线收敛；若 miss 仍偏高，可先提升容量（`num_mlp_layers=3/4` 已默认 3，必要时 `--dropout_rate 0.1–0.2`）或小幅调高阈值 sweep 的 recall 权重。
+  2. 若需对比重平衡/蒸馏，先用 `--no-stable_mode --no-use_kd --no-enable_adaptive_reweight --no-use_weighted_sampler` 跑一版仅类权重的轻量模式，再逐步开启采样与 KD，监控是否重新出现崩溃。
+  3. 一旦观察到 FPR>95% 或 miss>95%，可手动提高 `collapse_cooldown_epochs` 或维持 rebalance 锁定，优先让 CE 恢复正常预测分布。
