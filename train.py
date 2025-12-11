@@ -4,12 +4,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
@@ -91,6 +93,51 @@ def build_student(args: argparse.Namespace, device: torch.device) -> nn.Module:
         constraint_scale=args.constraint_scale,
     ).to(device)
     return student
+
+
+@dataclass
+class KDConfig:
+    use_kd: bool
+    start_epoch: int
+    alpha: float
+    temperature: float
+    ema_decay: float
+    warmup_epochs: int
+    confidence_floor: float
+    confidence_power: float
+    balance_ratio: float
+
+
+def kd_logit_loss(logits_student: torch.Tensor, logits_teacher: torch.Tensor, temperature: float) -> torch.Tensor:
+    student_log_probs = torch.log_softmax(logits_student / temperature, dim=1)
+    teacher_probs = torch.softmax(logits_teacher / temperature, dim=1)
+    return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (temperature * temperature)
+
+
+def kd_alpha_schedule(base_alpha: float, current_epoch: int, start_epoch: int, warmup_epochs: int) -> float:
+    if current_epoch < start_epoch:
+        return 0.0
+    if warmup_epochs <= 0:
+        return base_alpha
+    progress = min(1.0, float(current_epoch - start_epoch + 1) / float(warmup_epochs))
+    return base_alpha * progress
+
+
+def update_teacher(student: nn.Module, teacher: nn.Module, ema_decay: float) -> None:
+    with torch.no_grad():
+        for p_t, p_s in zip(teacher.parameters(), student.parameters()):
+            p_t.data.mul_(ema_decay).add_(p_s.data, alpha=1.0 - ema_decay)
+        for b_t, b_s in zip(teacher.buffers(), student.buffers()):
+            b_t.copy_(b_s)
+
+
+def build_teacher(args: argparse.Namespace, device: torch.device, student: nn.Module) -> nn.Module:
+    teacher = build_student(args, device)
+    teacher.load_state_dict(student.state_dict())
+    teacher.eval()
+    for param in teacher.parameters():
+        param.requires_grad_(False)
+    return teacher
 
 
 def evaluate(
@@ -181,6 +228,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
+    _add_bool_arg(parser, "use_kd", default=True, help_text="logit-level knowledge distillation with EMA teacher")
+    parser.add_argument("--kd_start_epoch", type=int, default=16, help="Epoch to start KD and EMA teacher updates")
+    parser.add_argument("--kd_alpha", type=float, default=0.02, help="Weight for KD loss blending")
+    parser.add_argument("--kd_temperature", type=float, default=3.5, help="Temperature for KD softening")
+    parser.add_argument("--ema_decay", type=float, default=0.998, help="EMA decay for teacher parameter updates")
+    parser.add_argument(
+        "--kd_warmup_epochs",
+        type=int,
+        default=24,
+        help="Number of epochs to linearly ramp KD alpha after start_epoch",
+    )
+    parser.add_argument(
+        "--kd_confidence_floor",
+        type=float,
+        default=0.80,
+        help="Teacher confidence floor before applying KD weight (0 disables gating)",
+    )
+    parser.add_argument(
+        "--kd_confidence_power",
+        type=float,
+        default=3.0,
+        help="Exponent for confidence-based KD gating (higher=more selective)",
+    )
+    parser.add_argument(
+        "--kd_balance_kd_to_ce",
+        type=float,
+        default=1.0,
+        help=(
+            "Clamp factor for scaling KD alpha by ce/kd loss ratio (1.0 keeps KD <= CE; 0 disables ratio scaling)"
+        ),
+    )
 
     return parser.parse_args()
 
@@ -188,6 +266,18 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     set_seed(args.seed)
+
+    kd_config = KDConfig(
+        use_kd=args.use_kd,
+        start_epoch=args.kd_start_epoch,
+        alpha=args.kd_alpha,
+        temperature=args.kd_temperature,
+        ema_decay=args.ema_decay,
+        warmup_epochs=args.kd_warmup_epochs,
+        confidence_floor=args.kd_confidence_floor,
+        confidence_power=args.kd_confidence_power,
+        balance_ratio=args.kd_balance_kd_to_ce,
+    )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -255,6 +345,7 @@ def main() -> None:
     )
 
     student = build_student(args, device)
+    teacher = build_teacher(args, device, student)
 
     optimizer = Adam(student.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=args.scheduler_patience, verbose=True)
@@ -289,7 +380,15 @@ def main() -> None:
 
     for epoch in range(1, args.max_epochs + 1):
         student.train()
-        running_loss = 0.0
+        teacher.eval()
+        effective_alpha_epoch = kd_alpha_schedule(
+            kd_config.alpha, epoch, kd_config.start_epoch, kd_config.warmup_epochs
+        )
+        kd_active_epoch = kd_config.use_kd and epoch >= kd_config.start_epoch
+        avg_kd_alpha = 0.0
+        running_ce_loss = 0.0
+        running_kd_loss = 0.0
+        running_total_loss = 0.0
         total = 0
 
         adaptive_pos_boost = 1.0 + miss_ema * 0.8
@@ -306,16 +405,50 @@ def main() -> None:
             optimizer.zero_grad()
 
             logits, _ = student(signals)
-            loss = ce_loss_fn(logits, labels)
+            ce_loss = ce_loss_fn(logits, labels)
+            kd_loss = torch.tensor(0.0, device=device)
+            loss = ce_loss
+            batch_kd_alpha = 0.0
+
+            if kd_active_epoch:
+                with torch.no_grad():
+                    logits_teacher, _ = teacher(signals)
+                kd_loss = kd_logit_loss(logits, logits_teacher, kd_config.temperature)
+                if kd_config.confidence_floor > 0.0:
+                    teacher_probs = torch.softmax(logits_teacher / kd_config.temperature, dim=1)
+                    teacher_conf = teacher_probs.max(dim=1).values.mean().item()
+                    confidence_scale = max(
+                        0.0,
+                        min(1.0, (teacher_conf - kd_config.confidence_floor) / (1.0 - kd_config.confidence_floor)),
+                    ) ** kd_config.confidence_power
+                    batch_kd_alpha = effective_alpha_epoch * confidence_scale
+                else:
+                    batch_kd_alpha = effective_alpha_epoch
+
+                if kd_config.balance_ratio > 0.0 and kd_loss.item() > 0.0:
+                    ratio = (ce_loss.detach() / (kd_loss.detach() + 1e-8)).clamp(max=kd_config.balance_ratio)
+                    batch_kd_alpha = batch_kd_alpha * ratio.item()
+
+                loss = (1.0 - batch_kd_alpha) * ce_loss + batch_kd_alpha * kd_loss
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
             optimizer.step()
 
-            running_loss += loss.item() * labels.size(0)
-            total += labels.size(0)
+            if kd_active_epoch:
+                update_teacher(student, teacher, kd_config.ema_decay)
 
-        train_loss = running_loss / max(total, 1)
+            batch_size = labels.size(0)
+            running_ce_loss += ce_loss.item() * batch_size
+            running_kd_loss += kd_loss.item() * batch_size
+            running_total_loss += loss.item() * batch_size
+            total += labels.size(0)
+            avg_kd_alpha += batch_kd_alpha * batch_size
+
+        train_loss = running_total_loss / max(total, 1)
+        train_ce_loss = running_ce_loss / max(total, 1)
+        train_kd_loss = running_kd_loss / max(total, 1)
+        epoch_avg_kd_alpha = avg_kd_alpha / max(total, 1)
 
         val_loss, _, val_true, _, val_probs = evaluate(
             student, val_loader, device, return_probs=True
@@ -343,7 +476,8 @@ def main() -> None:
         scheduler.step(val_loss)
 
         print(
-            f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
+            f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} (CE {train_ce_loss:.4f}, KD {train_kd_loss:.4f}) | "
+            f"ValLoss {val_loss:.4f} | "
             f"Val F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}% | "
             f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}% | Thr {best_thr_epoch:.2f}"
         )
@@ -352,6 +486,9 @@ def main() -> None:
             {
                 "epoch": epoch,
                 "train_loss": train_loss,
+                "train_ce_loss": train_ce_loss,
+                "train_kd_loss": train_kd_loss,
+                "kd_alpha_effective": epoch_avg_kd_alpha if kd_active_epoch else 0.0,
                 "val_loss": val_loss,
                 "val_f1": val_metrics["f1"],
                 "val_miss": val_metrics["miss_rate"],
@@ -368,6 +505,9 @@ def main() -> None:
                 "event": "epoch",
                 "epoch": epoch,
                 "train_loss": train_loss,
+                "train_ce_loss": train_ce_loss,
+                "train_kd_loss": train_kd_loss,
+                "kd_alpha_effective": epoch_avg_kd_alpha if kd_active_epoch else 0.0,
                 "val_loss": val_loss,
                 "val_f1": val_metrics["f1"],
                 "val_miss": val_metrics["miss_rate"],
@@ -462,14 +602,14 @@ def main() -> None:
 
     os.makedirs("saved_models", exist_ok=True)
     save_path = os.path.join("saved_models", "student_model.pth")
-    torch.save(
-        {
-            "student_state_dict": student.state_dict(),
-            "config": vars(args),
-            "best_threshold": best_threshold,
-        },
-        save_path,
-    )
+    checkpoint = {
+        "student_state_dict": student.state_dict(),
+        "config": vars(args),
+        "best_threshold": best_threshold,
+    }
+    if kd_config.use_kd:
+        checkpoint["teacher_state_dict"] = teacher.state_dict()
+    torch.save(checkpoint, save_path)
     print(f"Saved student checkpoint to {save_path}")
 
     # Visualization and artifact saving
