@@ -196,6 +196,9 @@ def sweep_thresholds_blended(
     thresholds: List[float] | None = None,
     miss_target: float | None = None,
     fpr_cap: float | None = None,
+    fpr_penalty: float = 1.5,
+    threshold_center: float = 0.5,
+    threshold_reg: float = 0.0,
 ) -> Tuple[float, Dict[str, float], Dict[str, float]]:
     """Jointly sweep thresholds on val/generalization splits with blended scoring.
 
@@ -219,8 +222,13 @@ def sweep_thresholds_blended(
         quantiles = np.quantile(np.concatenate([val_probs, gen_probs]), q=np.linspace(0.05, 0.95, num=19))
         thresholds = np.unique(np.concatenate([dense, quantiles])).tolist()
 
-    def _score(metrics: Dict[str, float]) -> float:
-        return metrics["f1"] + 1.5 * metrics["sensitivity"] - metrics["fpr"]
+    def _score(metrics: Dict[str, float], thr: float) -> float:
+        return (
+            metrics["f1"]
+            + 1.5 * metrics["sensitivity"]
+            - fpr_penalty * metrics["fpr"]
+            - threshold_reg * abs(thr - threshold_center)
+        )
 
     best_score = -float("inf")
     best_thr = 0.5
@@ -235,7 +243,7 @@ def sweep_thresholds_blended(
 
         blended_miss = (1 - gen_weight) * val_metrics["miss_rate"] + gen_weight * gen_metrics["miss_rate"]
         blended_fpr = (1 - gen_weight) * val_metrics["fpr"] + gen_weight * gen_metrics["fpr"]
-        blended_score = (1 - gen_weight) * _score(val_metrics) + gen_weight * _score(gen_metrics)
+        blended_score = (1 - gen_weight) * _score(val_metrics, thr) + gen_weight * _score(gen_metrics, thr)
 
         if miss_target is not None and blended_miss > miss_target:
             continue
@@ -255,7 +263,7 @@ def sweep_thresholds_blended(
             gen_preds = (np.array(gen_probs) >= thr).astype(int).tolist()
             val_metrics = confusion_metrics(val_true, val_preds)
             gen_metrics = confusion_metrics(gen_true, gen_preds)
-            blended_score = (1 - gen_weight) * _score(val_metrics) + gen_weight * _score(gen_metrics)
+            blended_score = (1 - gen_weight) * _score(val_metrics, thr) + gen_weight * _score(gen_metrics, thr)
             if blended_score > best_score:
                 best_score = blended_score
                 best_thr = float(thr)
