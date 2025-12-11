@@ -210,8 +210,8 @@ def sweep_thresholds_blended(
         gen_probs: Generalization positive probabilities.
         gen_weight: Blend weight in [0,1] for generalization when scoring.
         thresholds: Optional threshold list; defaults to dense grid + quantiles.
-        miss_target: Optional miss-rate cap applied to the blended miss.
-        fpr_cap: Optional FPR cap applied to the blended FPR.
+        miss_target: Optional miss-rate cap applied to both splits (val & gen).
+        fpr_cap: Optional FPR cap applied to both splits (val & gen).
         fpr_penalty: Weight for FPR in both the blended score and constraint fallback.
         miss_violation_penalty: Penalty factor when the miss target is exceeded.
         threshold_center: Preferred threshold center when applying regularization.
@@ -240,13 +240,15 @@ def sweep_thresholds_blended(
     best_val: Dict[str, float] = {}
     best_gen: Dict[str, float] = {}
 
-    # Track the least-constraining-violating candidate as a safer fallback to
-    # avoid pathological thresholds (e.g., predicting全正类) when no candidate
-    # satisfies miss/FPR caps.
-    fallback_score = -float("inf")
+    # Track candidates that satisfy both splits, only the generalization split,
+    # and a final fallback with the lowest generalization miss to bias toward
+    # recall even when caps are violated.
+    candidates_all: List[Tuple[float, Dict[str, float], Dict[str, float]]] = []
+    candidates_gen: List[Tuple[float, Dict[str, float], Dict[str, float]]] = []
     fallback_thr = 0.5
     fallback_val: Dict[str, float] = {}
     fallback_gen: Dict[str, float] = {}
+    lowest_gen_miss = float("inf")
 
     for thr in thresholds:
         val_preds = (np.array(val_probs) >= thr).astype(int).tolist()
@@ -258,47 +260,53 @@ def sweep_thresholds_blended(
         blended_fpr = (1 - gen_weight) * val_metrics["fpr"] + gen_weight * gen_metrics["fpr"]
         blended_score = (1 - gen_weight) * _score(val_metrics, thr) + gen_weight * _score(gen_metrics, thr)
 
-        miss_ok = miss_target is None or blended_miss <= miss_target
-        fpr_ok = fpr_cap is None or blended_fpr <= fpr_cap
+        miss_ok_val = miss_target is None or val_metrics["miss_rate"] <= miss_target
+        miss_ok_gen = miss_target is None or gen_metrics["miss_rate"] <= miss_target
+        fpr_ok_val = fpr_cap is None or val_metrics["fpr"] <= fpr_cap
+        fpr_ok_gen = fpr_cap is None or gen_metrics["fpr"] <= fpr_cap
 
-        if miss_ok and fpr_ok:
+        if miss_ok_val and miss_ok_gen and fpr_ok_val and fpr_ok_gen:
+            candidates_all.append((float(thr), val_metrics, gen_metrics))
+        elif miss_ok_gen and fpr_ok_gen:
+            candidates_gen.append((float(thr), val_metrics, gen_metrics))
+        else:
+            if gen_metrics["miss_rate"] < lowest_gen_miss or (
+                np.isclose(gen_metrics["miss_rate"], lowest_gen_miss)
+                and (fpr_cap is None or gen_metrics["fpr"] <= fpr_cap)
+            ):
+                lowest_gen_miss = gen_metrics["miss_rate"]
+                fallback_thr = float(thr)
+                fallback_val = val_metrics
+                fallback_gen = gen_metrics
+
+    def _pick_best(candidates: List[Tuple[float, Dict[str, float], Dict[str, float]]]) -> Tuple[float, Dict[str, float], Dict[str, float]]:
+        best = max(
+            candidates,
+            key=lambda x: (1 - gen_weight) * _score(x[1], x[0]) + gen_weight * _score(x[2], x[0]),
+        )
+        return best
+
+    if candidates_all:
+        best_thr, best_val, best_gen = _pick_best(candidates_all)
+    elif candidates_gen:
+        best_thr, best_val, best_gen = _pick_best(candidates_gen)
+    elif fallback_val and fallback_gen:
+        best_thr = fallback_thr
+        best_val = fallback_val
+        best_gen = fallback_gen
+    else:
+        # Last resort: choose the threshold with the highest blended score.
+        for thr in thresholds:
+            val_preds = (np.array(val_probs) >= thr).astype(int).tolist()
+            gen_preds = (np.array(gen_probs) >= thr).astype(int).tolist()
+            val_metrics = confusion_metrics(val_true, val_preds)
+            gen_metrics = confusion_metrics(gen_true, gen_preds)
+            blended_score = (1 - gen_weight) * _score(val_metrics, thr) + gen_weight * _score(gen_metrics, thr)
             if blended_score > best_score:
                 best_score = blended_score
                 best_thr = float(thr)
                 best_val = val_metrics
                 best_gen = gen_metrics
-        else:
-            # Penalize constraint violations to prefer the least-bad candidate
-            miss_violation = max(0.0, blended_miss - (miss_target or 0.0))
-            fpr_violation = max(0.0, blended_fpr - (fpr_cap or 0.0))
-            violation_penalty = miss_violation_penalty * miss_violation + fpr_penalty * fpr_violation
-            penalized_score = blended_score - violation_penalty
-            if penalized_score > fallback_score:
-                fallback_score = penalized_score
-                fallback_thr = float(thr)
-                fallback_val = val_metrics
-                fallback_gen = gen_metrics
-
-    # Fallback to the least-violating candidate to avoid extreme thresholds
-    # (e.g., thr→0 leading to FPR≈100%) when constraints filter out all options.
-    if best_val == {} or best_gen == {}:
-        if fallback_val and fallback_gen:
-            best_thr = fallback_thr
-            best_val = fallback_val
-            best_gen = fallback_gen
-        else:
-            # Last resort: choose the threshold with the highest blended score.
-            for thr in thresholds:
-                val_preds = (np.array(val_probs) >= thr).astype(int).tolist()
-                gen_preds = (np.array(gen_probs) >= thr).astype(int).tolist()
-                val_metrics = confusion_metrics(val_true, val_preds)
-                gen_metrics = confusion_metrics(gen_true, gen_preds)
-                blended_score = (1 - gen_weight) * _score(val_metrics, thr) + gen_weight * _score(gen_metrics, thr)
-                if blended_score > best_score:
-                    best_score = blended_score
-                    best_thr = float(thr)
-                    best_val = val_metrics
-                    best_gen = gen_metrics
 
     return best_thr, best_val, best_gen
 
