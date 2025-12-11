@@ -19,7 +19,7 @@ from sklearn.metrics import auc, confusion_matrix, roc_curve
 
 from data import BEAT_LABEL_MAP, ECGBeatDataset, load_records, set_seed, split_dataset
 from models.student import SegmentAwareStudent
-from utils import confusion_metrics, sweep_thresholds
+from utils import confusion_metrics, make_weighted_sampler, sweep_thresholds
 
 
 TRAIN_RECORDS = [
@@ -172,7 +172,22 @@ def main() -> None:
     )
 
     train_dataset = ECGBeatDataset(tr_x, tr_y)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+
+    sampler = None
+    sampler_boost = 1.2
+    if abnormal_ratio < 0.35:
+        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
+        print(
+            "Enabling mild abnormal oversampling: "
+            f"boost={sampler_boost:.2f}, expected abnormal frac≈{min(0.5, abnormal_ratio * sampler_boost):.2f}"
+        )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=sampler is None,
+        sampler=sampler,
+    )
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
 
@@ -180,6 +195,8 @@ def main() -> None:
     class_counts = np.bincount(tr_y, minlength=2)
     class_weights = class_counts.sum() / (2.0 * np.maximum(class_counts, 1))
     class_weights = torch.tensor(class_weights, dtype=torch.float32, device=device)
+    mean_w = class_weights.mean()
+    class_weights = class_weights.clamp(min=mean_w * 0.5, max=mean_w * 2.0)
 
     os.makedirs("artifacts", exist_ok=True)
     log_path = os.path.join(
@@ -246,8 +263,8 @@ def main() -> None:
         best_thr_epoch, _ = sweep_thresholds(
             val_true,
             val_probs,
-            miss_target=None,
-            fpr_cap=None,
+            miss_target=0.15,
+            fpr_cap=0.15,
         )
 
         # Use the swept threshold to report and track metrics instead of argmax-only scores
@@ -333,6 +350,8 @@ def main() -> None:
     best_threshold, val_metrics = sweep_thresholds(
         val_true,
         val_probs,
+        miss_target=0.15,
+        fpr_cap=0.15,
     )
     gen_metrics = confusion_metrics(gen_true, (np.array(gen_probs) >= best_threshold).astype(int).tolist())
     val_pred = (np.array(val_probs) >= best_threshold).astype(int).tolist()
