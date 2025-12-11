@@ -402,6 +402,13 @@ def main() -> None:
             fpr_cap=args.threshold_max_fpr,
         )
 
+        teacher_val_metrics = None
+        if teacher is not None and epoch >= args.kd_start_epoch:
+            _, t_val_metrics, _, _, _ = evaluate(
+                teacher, val_loader, device, return_probs=False, threshold=best_thr_epoch
+            )
+            teacher_val_metrics = t_val_metrics
+
         miss_ema = 0.8 * miss_ema + 0.2 * val_metrics["miss_rate"]
 
         if teacher_val_metrics is not None:
