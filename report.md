@@ -220,3 +220,21 @@
   - 在当前泛化 miss 仍高的情况下，可开启 `--use_blended_thresholds --threshold_generalization_weight 0.4`，并保持 `--use_generalization_rescue`，让阈值与重平衡都对泛化失衡敏感。
   - 若 KD 仍压制异常召回，可将 `--beta`/`--gamma` 下调到 0.5/0.25 或暂时 `--no-use-kd`，并把 `--imbalance_ramp_epochs` 缩短到 3–4 轮使重平衡更快达稳态；若 FPR 上升则适度调低采样 boost。
   - 如需进一步提升容量，可尝试 `--num_mlp_layers 3` 与 `--dropout_rate 0.1` 做对照，但需关注 4 通道受限设计下的过拟合迹象。
+
+## v11_debug 问题分析（最新日志：Val@thr≈0.45 F1≈0.38，miss≈11.2%，FPR≈16.8%；泛化 F1≈0.59，miss≈30.6%，FPR≈12.5%）
+- **现象回顾**：
+  - 验证集长期停在 F1≈0.38、miss≈11% 左右，FPR≈17%；泛化 miss 仍在 ~30% 且未随训练下探，泛化 F1≈0.59。
+  - 训练曲线在第 6–8 轮后进入平台，阈值固定在 0.45 左右，后续 30+ 轮基本无实质改善，说明容量/正则或重平衡策略可能已卡住。
+  - KD 未显示明显收益：开启后 miss/FPR 曲线仍主要由重平衡驱动，泛化漏诊未改善，暗示教师信号或学生容量不足。
+- **可能根因**：
+  1. **学生容量偏低**：4 维 token + 2 层 MLP 深度有限，复杂异常模式难以充分分离，导致召回受限且阈值难以优化。
+  2. **正则不足导致泛化漏诊**：当前默认无 dropout，训练后期可能轻度过拟合正常模式，泛化时异常召回偏低。
+  3. **基础重平衡力度偏弱**：初始异常权重 1.2 在占比低场景可能不足，后续自适应虽提升，但早期召回拉升速度慢，阈值早早锁定在保守区间。
+- **本轮代码修改**：
+  - **提高学生容量**：将 `num_mlp_layers` 默认提升到 3，并在每层后增加 token 级 dropout（与 `--dropout_rate` 共享），增强表达同时抑制过拟合。
+  - **默认启用正则化**：`--dropout_rate` 默认 0.2（作用于 token MLP 与 `h_pool`），缓解泛化漏诊；需要关闭时可显式 `--dropout_rate 0`。
+  - **加强基础重平衡**：`--class_weight_abnormal` 默认上调至 1.4，在 ramp 期即可更快提升异常侧梯度，配合已有 ramp/自适应逻辑减少早期漏诊。
+- **后续建议与验证**：
+  - 若泛化漏诊仍高，可再把 `num_mlp_layers` 提升到 4 或小幅增大 dropout（0.25–0.3）对照，观察 FPR 变化；同时可调低 `threshold_target_miss` 到 0.10 强化阈值对漏诊的约束。
+  - 如 KD 仍无益，可暂时 `--no-use-kd` 对照，或提高教师门槛（`teacher_min_f1`、`teacher_min_sensitivity`）以确保 distillation 仅在教师高召回时生效。
+  - 若训练仍长时间平台，可适度缩短 `imbalance_warmup_epochs`（如 3）让重平衡更早介入，或增大 `sampler_abnormal_boost` 至 1.4–1.6，但需监控 FPR。

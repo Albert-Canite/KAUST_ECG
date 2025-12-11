@@ -16,8 +16,8 @@ class SegmentAwareStudent(nn.Module):
     def __init__(
         self,
         num_classes: int = 2,
-        num_mlp_layers: int = 2,
-        dropout_rate: float = 0.0,
+        num_mlp_layers: int = 3,
+        dropout_rate: float = 0.2,
         use_value_constraint: bool = True,
         use_tanh_activations: bool = False,
         constraint_scale: float = 1.0,
@@ -44,6 +44,7 @@ class SegmentAwareStudent(nn.Module):
             self.mlp_layers.append(linear_cls(4, 4, **layer_kwargs))
 
         self.dropout = nn.Dropout(dropout_rate) if dropout_rate > 0 else nn.Identity()
+        self.token_dropout = nn.Dropout(dropout_rate) if dropout_rate > 0 else nn.Identity()
         self.classifier = nn.Linear(4, num_classes)
 
     def _activate(self, x: torch.Tensor) -> torch.Tensor:
@@ -86,6 +87,7 @@ class SegmentAwareStudent(nn.Module):
             h = self._scale_if_needed(h)
             h = layer(h)
             h = self._activate(h)
+            h = self.token_dropout(h)
 
         h_pool = h.mean(dim=1)
         h_pool = self.dropout(h_pool)
