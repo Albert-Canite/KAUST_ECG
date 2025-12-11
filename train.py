@@ -149,7 +149,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout_rate", type=float, default=0.2)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
-    parser.add_argument("--class_weight_abnormal", type=float, default=1.30)
+    parser.add_argument("--class_weight_abnormal", type=float, default=1.35)
     parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
     parser.add_argument("--generalization_score_weight", type=float, default=0.35)
     parser.add_argument("--threshold_target_miss", type=float, default=0.10)
@@ -192,14 +192,14 @@ def main() -> None:
 
     sampler = None
     batch_sampler = None
-    sampler_boost = args.abnormal_sampler_boost
-    if abnormal_ratio < 0.35 or sampler_boost > 1.0:
+    sampler_boost = 1.2
+    if abnormal_ratio < 0.35:
         sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
         print(
             "Enabling mild abnormal oversampling: "
             f"boost={sampler_boost:.2f}, expected abnormal frac≈{min(0.5, abnormal_ratio * sampler_boost):.2f}"
         )
-    if abnormal_ratio < 0.45 or args.force_balanced_batches:
+    if abnormal_ratio < 0.45:
         try:
             batch_sampler = BalancedBatchSampler(tr_y, batch_size=args.batch_size)
             print("Using balanced batch sampler to keep per-batch class mix stable")
