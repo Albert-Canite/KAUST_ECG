@@ -419,44 +419,44 @@ def main() -> None:
             f"KD w={kd_weight:.3f}{' (off: teacher lag)' if teacher_val_metrics is not None and not kd_guard_allow else ''}"
         )
 
-            history.append(
-                {
-                    "epoch": epoch,
-                    "train_loss": train_loss,
-                    "val_loss": val_loss,
-                    "val_f1": val_metrics["f1"],
-                    "val_miss": val_metrics["miss_rate"],
-                    "val_fpr": val_metrics["fpr"],
-                    "gen_f1": gen_metrics["f1"],
-                    "gen_miss": gen_metrics["miss_rate"],
-                    "gen_fpr": gen_metrics["fpr"],
-                    "threshold": best_thr_epoch,
-                    "kd_weight": kd_weight,
-                    "kd_guard_allow": kd_guard_allow,
-                    "teacher_val_miss": None if teacher_val_metrics is None else teacher_val_metrics["miss_rate"],
-                    "teacher_val_fpr": None if teacher_val_metrics is None else teacher_val_metrics["fpr"],
-                }
-            )
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "val_f1": val_metrics["f1"],
+                "val_miss": val_metrics["miss_rate"],
+                "val_fpr": val_metrics["fpr"],
+                "gen_f1": gen_metrics["f1"],
+                "gen_miss": gen_metrics["miss_rate"],
+                "gen_fpr": gen_metrics["fpr"],
+                "threshold": best_thr_epoch,
+                "kd_weight": kd_weight,
+                "kd_guard_allow": kd_guard_allow,
+                "teacher_val_miss": None if teacher_val_metrics is None else teacher_val_metrics["miss_rate"],
+                "teacher_val_fpr": None if teacher_val_metrics is None else teacher_val_metrics["fpr"],
+            }
+        )
 
-            _write_log(
-                {
-                    "event": "epoch",
-                    "epoch": epoch,
-                    "train_loss": train_loss,
-                    "val_loss": val_loss,
-                    "val_f1": val_metrics["f1"],
-                    "val_miss": val_metrics["miss_rate"],
-                    "val_fpr": val_metrics["fpr"],
-                    "gen_f1": gen_metrics["f1"],
-                    "gen_miss": gen_metrics["miss_rate"],
-                    "gen_fpr": gen_metrics["fpr"],
-                    "threshold": best_thr_epoch,
-                    "kd_weight": kd_weight,
-                    "kd_guard_allow": kd_guard_allow,
-                    "teacher_val_miss": None if teacher_val_metrics is None else teacher_val_metrics["miss_rate"],
-                    "teacher_val_fpr": None if teacher_val_metrics is None else teacher_val_metrics["fpr"],
-                }
-            )
+        _write_log(
+            {
+                "event": "epoch",
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "val_f1": val_metrics["f1"],
+                "val_miss": val_metrics["miss_rate"],
+                "val_fpr": val_metrics["fpr"],
+                "gen_f1": gen_metrics["f1"],
+                "gen_miss": gen_metrics["miss_rate"],
+                "gen_fpr": gen_metrics["fpr"],
+                "threshold": best_thr_epoch,
+                "kd_weight": kd_weight,
+                "kd_guard_allow": kd_guard_allow,
+                "teacher_val_miss": None if teacher_val_metrics is None else teacher_val_metrics["miss_rate"],
+                "teacher_val_fpr": None if teacher_val_metrics is None else teacher_val_metrics["fpr"],
+            }
+        )
 
         if val_metrics["f1"] > best_val_f1:
             best_val_f1 = val_metrics["f1"]
