@@ -23,6 +23,7 @@ from utils import (
     BalancedBatchSampler,
     compute_class_weights,
     confusion_metrics,
+    kd_logit_loss,
     make_weighted_sampler,
     sweep_thresholds_blended,
 )
@@ -179,6 +180,11 @@ def parse_args() -> argparse.Namespace:
         help="Miss-rate penalty applied to generalization metrics during threshold sweeps",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--enable_kd", action="store_true", help="Enable EMA self-distillation to stabilize recall")
+    parser.add_argument("--kd_alpha", type=float, default=0.15, help="Weight for KD loss vs CE loss")
+    parser.add_argument("--kd_temperature", type=float, default=2.5, help="Temperature for soft targets")
+    parser.add_argument("--kd_ema_decay", type=float, default=0.995, help="EMA decay for teacher updates")
+    parser.add_argument("--kd_start_epoch", type=int, default=5, help="Epoch to start applying KD loss")
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
 
@@ -187,6 +193,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.kd_alpha = float(np.clip(args.kd_alpha, 0.0, 1.0))
     set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -255,6 +262,16 @@ def main() -> None:
     )
 
     student = build_student(args, device)
+    teacher = None
+    if args.enable_kd:
+        teacher = build_student(args, device)
+        teacher.load_state_dict(student.state_dict())
+        for p in teacher.parameters():
+            p.requires_grad = False
+        print(
+            f"Enabling EMA self-distillation: alpha={args.kd_alpha:.3f}, temp={args.kd_temperature:.2f}, "
+            f"ema_decay={args.kd_ema_decay:.4f}, start_epoch={args.kd_start_epoch}"
+        )
 
     optimizer = Adam(student.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=args.scheduler_patience, verbose=True)
@@ -289,6 +306,8 @@ def main() -> None:
 
     for epoch in range(1, args.max_epochs + 1):
         student.train()
+        if teacher is not None:
+            teacher.eval()
         running_loss = 0.0
         total = 0
 
@@ -307,10 +326,22 @@ def main() -> None:
 
             logits, _ = student(signals)
             loss = ce_loss_fn(logits, labels)
+            if teacher is not None and epoch >= args.kd_start_epoch:
+                with torch.no_grad():
+                    teacher_logits, _ = teacher(signals)
+                kd_loss = kd_logit_loss(logits, teacher_logits, temperature=args.kd_temperature)
+                loss = (1 - args.kd_alpha) * loss + args.kd_alpha * kd_loss
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
             optimizer.step()
+
+            if teacher is not None:
+                with torch.no_grad():
+                    for param_t, param_s in zip(teacher.parameters(), student.parameters()):
+                        param_t.data.mul_(args.kd_ema_decay).add_((1 - args.kd_ema_decay) * param_s.data)
+                    for buf_t, buf_s in zip(teacher.buffers(), student.buffers()):
+                        buf_t.copy_(buf_s)
 
             running_loss += loss.item() * labels.size(0)
             total += labels.size(0)
