@@ -23,7 +23,6 @@ from utils import (
     BalancedBatchSampler,
     compute_class_weights,
     confusion_metrics,
-    kd_logit_loss,
     make_weighted_sampler,
     sweep_thresholds_blended,
 )
@@ -180,29 +179,6 @@ def parse_args() -> argparse.Namespace:
         help="Miss-rate penalty applied to generalization metrics during threshold sweeps",
     )
     parser.add_argument("--seed", type=int, default=42)
-    _add_bool_arg(
-        parser,
-        "enable_kd",
-        default=True,
-        help_text="EMA self-distillation (teacher auto-initialized from student)",
-    )
-    parser.add_argument("--kd_alpha", type=float, default=0.1, help="Weight for KD loss vs CE loss")
-    parser.add_argument("--kd_temperature", type=float, default=2.5, help="Temperature for soft targets")
-    parser.add_argument("--kd_ema_decay", type=float, default=0.995, help="EMA decay for teacher updates")
-    parser.add_argument("--kd_start_epoch", type=int, default=5, help="Epoch to start applying KD loss")
-    parser.add_argument("--kd_ramp_epochs", type=int, default=5, help="Epochs to linearly ramp KD weight after start")
-    parser.add_argument(
-        "--kd_guard_miss_margin",
-        type=float,
-        default=0.02,
-        help="Only keep KD on when teacher miss rate is within this margin of student",
-    )
-    parser.add_argument(
-        "--kd_guard_fpr_margin",
-        type=float,
-        default=0.03,
-        help="Only keep KD on when teacher FPR is within this margin of student",
-    )
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
 
@@ -211,7 +187,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    args.kd_alpha = float(np.clip(args.kd_alpha, 0.0, 1.0))
     set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -272,9 +247,6 @@ def main() -> None:
     base_weights = class_weights.clone()
 
     miss_ema = 0.25
-    kd_guard_allow = True
-    kd_weight = 0.0
-    teacher_val_metrics: Dict[str, float] | None = None
 
     os.makedirs("artifacts", exist_ok=True)
     log_path = os.path.join(
@@ -283,16 +255,6 @@ def main() -> None:
     )
 
     student = build_student(args, device)
-    teacher = None
-    if args.enable_kd:
-        teacher = build_student(args, device)
-        teacher.load_state_dict(student.state_dict())
-        for p in teacher.parameters():
-            p.requires_grad = False
-        print(
-            f"Enabling EMA self-distillation: alpha={args.kd_alpha:.3f}, temp={args.kd_temperature:.2f}, "
-            f"ema_decay={args.kd_ema_decay:.4f}, start_epoch={args.kd_start_epoch}"
-        )
 
     optimizer = Adam(student.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=args.scheduler_patience, verbose=True)
@@ -327,13 +289,6 @@ def main() -> None:
 
     for epoch in range(1, args.max_epochs + 1):
         student.train()
-        if teacher is not None:
-            teacher.eval()
-
-        ramp_progress = max(0, epoch - args.kd_start_epoch + 1) / max(1, args.kd_ramp_epochs)
-        kd_weight = 0.0
-        if teacher is not None and epoch >= args.kd_start_epoch and kd_guard_allow:
-            kd_weight = args.kd_alpha * float(np.clip(ramp_progress, 0.0, 1.0))
         running_loss = 0.0
         total = 0
 
@@ -352,22 +307,10 @@ def main() -> None:
 
             logits, _ = student(signals)
             loss = ce_loss_fn(logits, labels)
-            if teacher is not None and kd_weight > 0:
-                with torch.no_grad():
-                    teacher_logits, _ = teacher(signals)
-                kd_loss = kd_logit_loss(logits, teacher_logits, temperature=args.kd_temperature)
-                loss = (1 - kd_weight) * loss + kd_weight * kd_loss
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
             optimizer.step()
-
-            if teacher is not None and epoch >= args.kd_start_epoch:
-                with torch.no_grad():
-                    for param_t, param_s in zip(teacher.parameters(), student.parameters()):
-                        param_t.data.mul_(args.kd_ema_decay).add_((1 - args.kd_ema_decay) * param_s.data)
-                    for buf_t, buf_s in zip(teacher.buffers(), student.buffers()):
-                        buf_t.copy_(buf_s)
 
             running_loss += loss.item() * labels.size(0)
             total += labels.size(0)
@@ -380,13 +323,6 @@ def main() -> None:
         gen_loss, _, gen_true, _, gen_probs = evaluate(
             student, gen_loader, device, return_probs=True
         )
-
-        teacher_val_metrics = None
-        if teacher is not None and epoch >= args.kd_start_epoch:
-            t_val_loss, t_val_metrics, _, _, _ = evaluate(
-                teacher, val_loader, device, return_probs=False
-            )
-            teacher_val_metrics = t_val_metrics
 
         best_thr_epoch, val_metrics, gen_metrics = sweep_thresholds_blended(
             val_true,
@@ -402,28 +338,14 @@ def main() -> None:
             fpr_cap=args.threshold_max_fpr,
         )
 
-        teacher_val_metrics = None
-        if teacher is not None and epoch >= args.kd_start_epoch:
-            _, t_val_metrics, _, _, _ = evaluate(
-                teacher, val_loader, device, return_probs=False, threshold=best_thr_epoch
-            )
-            teacher_val_metrics = t_val_metrics
-
         miss_ema = 0.8 * miss_ema + 0.2 * val_metrics["miss_rate"]
-
-        if teacher_val_metrics is not None:
-            kd_guard_allow = (
-                teacher_val_metrics["miss_rate"] <= val_metrics["miss_rate"] + args.kd_guard_miss_margin
-                and teacher_val_metrics["fpr"] <= val_metrics["fpr"] + args.kd_guard_fpr_margin
-            )
 
         scheduler.step(val_loss)
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
             f"Val F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}% | "
-            f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}% | Thr {best_thr_epoch:.2f} | "
-            f"KD w={kd_weight:.3f}{' (off: teacher lag)' if teacher_val_metrics is not None and not kd_guard_allow else ''}"
+            f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}% | Thr {best_thr_epoch:.2f}"
         )
 
         history.append(
@@ -438,10 +360,6 @@ def main() -> None:
                 "gen_miss": gen_metrics["miss_rate"],
                 "gen_fpr": gen_metrics["fpr"],
                 "threshold": best_thr_epoch,
-                "kd_weight": kd_weight,
-                "kd_guard_allow": kd_guard_allow,
-                "teacher_val_miss": None if teacher_val_metrics is None else teacher_val_metrics["miss_rate"],
-                "teacher_val_fpr": None if teacher_val_metrics is None else teacher_val_metrics["fpr"],
             }
         )
 
@@ -458,10 +376,6 @@ def main() -> None:
                 "gen_miss": gen_metrics["miss_rate"],
                 "gen_fpr": gen_metrics["fpr"],
                 "threshold": best_thr_epoch,
-                "kd_weight": kd_weight,
-                "kd_guard_allow": kd_guard_allow,
-                "teacher_val_miss": None if teacher_val_metrics is None else teacher_val_metrics["miss_rate"],
-                "teacher_val_fpr": None if teacher_val_metrics is None else teacher_val_metrics["fpr"],
             }
         )
 
