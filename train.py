@@ -149,16 +149,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout_rate", type=float, default=0.2)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
-    parser.add_argument("--class_weight_abnormal", type=float, default=1.30)
+    parser.add_argument("--class_weight_abnormal", type=float, default=1.35)
     parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
     parser.add_argument("--generalization_score_weight", type=float, default=0.35)
     parser.add_argument("--threshold_target_miss", type=float, default=0.14)
     parser.add_argument("--threshold_max_fpr", type=float, default=0.15)
-    parser.add_argument("--threshold_fpr_penalty", type=float, default=1.2)
-    parser.add_argument("--threshold_center", type=float, default=0.78)
-    parser.add_argument("--threshold_reg", type=float, default=0.02)
-    parser.add_argument("--abnormal_sampler_boost", type=float, default=1.1)
-    _add_bool_arg(parser, "force_balanced_batches", default=False, help_text="balanced batch sampler regardless of ratio")
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
@@ -191,14 +186,14 @@ def main() -> None:
 
     sampler = None
     batch_sampler = None
-    sampler_boost = args.abnormal_sampler_boost
-    if abnormal_ratio < 0.35 or sampler_boost > 1.0:
+    sampler_boost = 1.2
+    if abnormal_ratio < 0.35:
         sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
         print(
             "Enabling mild abnormal oversampling: "
             f"boost={sampler_boost:.2f}, expected abnormal frac≈{min(0.5, abnormal_ratio * sampler_boost):.2f}"
         )
-    if abnormal_ratio < 0.45 or args.force_balanced_batches:
+    if abnormal_ratio < 0.45:
         try:
             batch_sampler = BalancedBatchSampler(tr_y, batch_size=args.batch_size)
             print("Using balanced batch sampler to keep per-batch class mix stable")
@@ -313,9 +308,6 @@ def main() -> None:
             gen_weight=args.generalization_score_weight,
             miss_target=args.threshold_target_miss,
             fpr_cap=args.threshold_max_fpr,
-            fpr_penalty=args.threshold_fpr_penalty,
-            threshold_center=args.threshold_center,
-            threshold_reg=args.threshold_reg,
         )
 
         miss_ema = 0.8 * miss_ema + 0.2 * val_metrics["miss_rate"]
@@ -402,9 +394,6 @@ def main() -> None:
         gen_weight=args.generalization_score_weight,
         miss_target=args.threshold_target_miss,
         fpr_cap=args.threshold_max_fpr,
-        fpr_penalty=args.threshold_fpr_penalty,
-        threshold_center=args.threshold_center,
-        threshold_reg=args.threshold_reg,
     )
     val_pred = (np.array(val_probs) >= best_threshold).astype(int).tolist()
     gen_pred = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
