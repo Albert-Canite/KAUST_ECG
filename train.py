@@ -26,6 +26,7 @@ from utils import (
     l2_normalize,
     make_weighted_sampler,
     sweep_thresholds,
+    sweep_thresholds_blended,
 )
 
 
@@ -252,6 +253,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recall_rescue_limit", type=int, default=3, help="Max number of adaptive recall boosts")
     parser.add_argument("--threshold_target_miss", type=float, default=0.12, help="Preferred max miss-rate when sweeping thresholds")
     parser.add_argument("--threshold_max_fpr", type=float, default=0.2, help="Optional FPR cap during threshold sweep")
+    parser.add_argument(
+        "--use_blended_thresholds",
+        action="store_true",
+        help="When set, sweep thresholds jointly on val+generalization with blended scoring",
+    )
+    parser.add_argument(
+        "--threshold_generalization_weight",
+        type=float,
+        default=0.3,
+        help="Weight for generalization metrics when blending thresholds (0-1)",
+    )
     parser.add_argument("--auto_sampler_ratio", type=float, default=0.35, help="Auto-enable sampler when abnormal ratio is below this")
     parser.add_argument("--kd_pause_miss", type=float, default=0.35, help="Pause KD when miss-rate exceeds this")
     parser.add_argument("--kd_resume_miss", type=float, default=0.2, help="Resume KD when miss-rate falls below this")
@@ -277,6 +289,12 @@ def parse_args() -> argparse.Namespace:
         "use_generalization_score",
         default=True,
         help_text="blend validation and generalization scores for early stopping",
+    )
+    _add_bool_arg(
+        parser,
+        "use_generalization_rescue",
+        default=True,
+        help_text="allow recall rescue to trigger on generalization metrics as well as validation",
     )
     parser.add_argument(
         "--generalization_score_weight",
@@ -509,7 +527,7 @@ def main() -> None:
             student, val_loader, device, return_probs=True
         )
 
-        best_thr_epoch, val_metrics = sweep_thresholds(
+        best_thr_val, val_metrics = sweep_thresholds(
             val_true,
             val_probs,
             miss_target=args.threshold_target_miss,
@@ -517,16 +535,35 @@ def main() -> None:
         )
 
         gen_loss, gen_argmax_metrics, gen_true, _, gen_probs = evaluate(
-            student, gen_loader, device, return_probs=True, threshold=best_thr_epoch
+            student, gen_loader, device, return_probs=True
         )
-        gen_metrics = confusion_metrics(gen_true, (np.array(gen_probs) >= best_thr_epoch).astype(int).tolist())
 
+        if args.use_blended_thresholds:
+            best_thr_epoch, val_metrics, gen_metrics = sweep_thresholds_blended(
+                val_true,
+                val_probs,
+                gen_true,
+                gen_probs,
+                gen_weight=args.threshold_generalization_weight,
+                miss_target=args.threshold_target_miss,
+                fpr_cap=args.threshold_max_fpr,
+            )
+        else:
+            best_thr_epoch = best_thr_val
+            val_metrics = confusion_metrics(val_true, (np.array(val_probs) >= best_thr_epoch).astype(int).tolist())
+            gen_metrics = confusion_metrics(gen_true, (np.array(gen_probs) >= best_thr_epoch).astype(int).tolist())
+
+        val_rescue = val_metrics["miss_rate"] > args.recall_target_miss and val_metrics["fpr"] < args.adaptive_fpr_cap
+        gen_rescue = (
+            args.use_generalization_rescue
+            and gen_metrics["miss_rate"] > args.recall_target_miss
+            and gen_metrics["fpr"] < args.adaptive_fpr_cap
+        )
         if (
             args.enable_adaptive_reweight
             and imbalance_active
             and recall_rescue_count < args.recall_rescue_limit
-            and val_metrics["miss_rate"] > args.recall_target_miss
-            and val_metrics["fpr"] < args.adaptive_fpr_cap
+            and (val_rescue or gen_rescue)
         ):
             if args.use_class_weights and current_class_weights is not None and current_class_weights.numel() > 1:
                 class_weight_scale = min(
@@ -650,19 +687,30 @@ def main() -> None:
     val_loss, _, val_true, _, val_probs = evaluate(
         student, val_loader, device, return_probs=True
     )
-    best_threshold, val_metrics = sweep_thresholds(
-        val_true,
-        val_probs,
-        miss_target=args.threshold_target_miss,
-        fpr_cap=args.threshold_max_fpr,
-    )
-    val_pred = (np.array(val_probs) >= best_threshold).astype(int).tolist()
-
     gen_loss, _, gen_true, _, gen_probs = evaluate(
         student, gen_loader, device, return_probs=True
     )
+
+    if args.use_blended_thresholds:
+        best_threshold, val_metrics, gen_metrics = sweep_thresholds_blended(
+            val_true,
+            val_probs,
+            gen_true,
+            gen_probs,
+            gen_weight=args.threshold_generalization_weight,
+            miss_target=args.threshold_target_miss,
+            fpr_cap=args.threshold_max_fpr,
+        )
+    else:
+        best_threshold, val_metrics = sweep_thresholds(
+            val_true,
+            val_probs,
+            miss_target=args.threshold_target_miss,
+            fpr_cap=args.threshold_max_fpr,
+        )
+        gen_metrics = confusion_metrics(gen_true, (np.array(gen_probs) >= best_threshold).astype(int).tolist())
+    val_pred = (np.array(val_probs) >= best_threshold).astype(int).tolist()
     gen_pred = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
-    gen_metrics = confusion_metrics(gen_true, gen_pred)
 
     print(
         f"Final Val@thr={best_threshold:.2f}: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, "

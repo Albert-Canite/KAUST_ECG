@@ -132,6 +132,84 @@ def sweep_thresholds(
     return best_thr, best_metrics
 
 
+def sweep_thresholds_blended(
+    val_true: List[int],
+    val_probs: List[float],
+    gen_true: List[int],
+    gen_probs: List[float],
+    gen_weight: float = 0.3,
+    thresholds: List[float] | None = None,
+    miss_target: float | None = None,
+    fpr_cap: float | None = None,
+) -> Tuple[float, Dict[str, float], Dict[str, float]]:
+    """Jointly sweep thresholds on val/generalization splits with blended scoring.
+
+    Args:
+        val_true: Validation labels.
+        val_probs: Validation positive probabilities.
+        gen_true: Generalization labels.
+        gen_probs: Generalization positive probabilities.
+        gen_weight: Blend weight in [0,1] for generalization when scoring.
+        thresholds: Optional threshold list; defaults to dense grid + quantiles.
+        miss_target: Optional miss-rate cap applied to the blended miss.
+        fpr_cap: Optional FPR cap applied to the blended FPR.
+
+    Returns:
+        best_threshold, val_metrics_at_threshold, gen_metrics_at_threshold
+    """
+
+    gen_weight = float(np.clip(gen_weight, 0.0, 1.0))
+    if thresholds is None:
+        dense = np.linspace(0.05, 0.95, num=19)
+        quantiles = np.quantile(np.concatenate([val_probs, gen_probs]), q=np.linspace(0.05, 0.95, num=19))
+        thresholds = np.unique(np.concatenate([dense, quantiles])).tolist()
+
+    def _score(metrics: Dict[str, float]) -> float:
+        return metrics["f1"] + 1.5 * metrics["sensitivity"] - metrics["fpr"]
+
+    best_score = -float("inf")
+    best_thr = 0.5
+    best_val: Dict[str, float] = {}
+    best_gen: Dict[str, float] = {}
+
+    for thr in thresholds:
+        val_preds = (np.array(val_probs) >= thr).astype(int).tolist()
+        gen_preds = (np.array(gen_probs) >= thr).astype(int).tolist()
+        val_metrics = confusion_metrics(val_true, val_preds)
+        gen_metrics = confusion_metrics(gen_true, gen_preds)
+
+        blended_miss = (1 - gen_weight) * val_metrics["miss_rate"] + gen_weight * gen_metrics["miss_rate"]
+        blended_fpr = (1 - gen_weight) * val_metrics["fpr"] + gen_weight * gen_metrics["fpr"]
+        blended_score = (1 - gen_weight) * _score(val_metrics) + gen_weight * _score(gen_metrics)
+
+        if miss_target is not None and blended_miss > miss_target:
+            continue
+        if fpr_cap is not None and blended_fpr > fpr_cap:
+            continue
+
+        if blended_score > best_score:
+            best_score = blended_score
+            best_thr = float(thr)
+            best_val = val_metrics
+            best_gen = gen_metrics
+
+    # Fallback to the best unconstrained threshold if no candidate met constraints
+    if best_val == {} or best_gen == {}:
+        for thr in thresholds:
+            val_preds = (np.array(val_probs) >= thr).astype(int).tolist()
+            gen_preds = (np.array(gen_probs) >= thr).astype(int).tolist()
+            val_metrics = confusion_metrics(val_true, val_preds)
+            gen_metrics = confusion_metrics(gen_true, gen_preds)
+            blended_score = (1 - gen_weight) * _score(val_metrics) + gen_weight * _score(gen_metrics)
+            if blended_score > best_score:
+                best_score = blended_score
+                best_thr = float(thr)
+                best_val = val_metrics
+                best_gen = gen_metrics
+
+    return best_thr, best_val, best_gen
+
+
 def kd_logit_loss(student_logits: torch.Tensor, teacher_logits: torch.Tensor, temperature: float) -> torch.Tensor:
     log_p_s = F.log_softmax(student_logits / temperature, dim=1)
     p_t = F.softmax(teacher_logits.detach() / temperature, dim=1)
