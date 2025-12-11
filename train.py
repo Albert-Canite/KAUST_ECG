@@ -110,6 +110,8 @@ class KDConfig:
     balance_ratio: float
     confidence_floor_min: float
     inactive_patience: int
+    disable_patience: int
+    disable_delta: float
 
 
 def kd_logit_loss(logits_student: torch.Tensor, logits_teacher: torch.Tensor, temperature: float) -> torch.Tensor:
@@ -302,6 +304,18 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="Number of consecutive KD-inactive epochs before relaxing the confidence floor",
     )
+    parser.add_argument(
+        "--kd_disable_patience",
+        type=int,
+        default=5,
+        help="Disable KD after this many KD-active epochs without beating the pre-KD best F1",
+    )
+    parser.add_argument(
+        "--kd_disable_delta",
+        type=float,
+        default=0.0,
+        help="Minimum F1 improvement over the pre-KD best required to keep KD enabled",
+    )
 
     return parser.parse_args()
 
@@ -324,6 +338,8 @@ def main() -> None:
         balance_ratio=args.kd_balance_kd_to_ce,
         confidence_floor_min=args.kd_confidence_floor_min,
         inactive_patience=args.kd_inactive_patience,
+        disable_patience=args.kd_disable_patience,
+        disable_delta=args.kd_disable_delta,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -419,11 +435,13 @@ def main() -> None:
     print(f"Preprocessed input range: [{data_min:.3f}, {data_max:.3f}] (expected within [-1, 1])")
 
     best_val_f1 = -float("inf")
+    best_val_f1_pre_kd = -float("inf")
     best_state = None
     best_threshold = 0.5
     patience_counter = 0
     kd_inactive_epochs = 0
     kd_floor_dynamic = kd_config.confidence_floor
+    kd_no_gain_epochs = 0
 
     history: List[Dict[str, float]] = []
 
@@ -559,6 +577,7 @@ def main() -> None:
                 "kd_inactive_epochs": kd_inactive_epochs if kd_active_epoch else 0,
                 "kd_active_batches": kd_active_batches,
                 "kd_skipped_low_conf": kd_skipped_low_conf,
+                "kd_active_epoch": int(kd_active_epoch),
                 "val_loss": val_loss,
                 "val_f1": val_metrics["f1"],
                 "val_miss": val_metrics["miss_rate"],
@@ -583,6 +602,7 @@ def main() -> None:
                 "kd_inactive_epochs": kd_inactive_epochs if kd_active_epoch else 0,
                 "kd_active_batches": kd_active_batches,
                 "kd_skipped_low_conf": kd_skipped_low_conf,
+                "kd_active_epoch": int(kd_active_epoch),
                 "val_loss": val_loss,
                 "val_f1": val_metrics["f1"],
                 "val_miss": val_metrics["miss_rate"],
@@ -603,6 +623,31 @@ def main() -> None:
             if kd_inactive_epochs >= kd_config.inactive_patience:
                 kd_floor_dynamic = max(kd_config.confidence_floor_min, kd_floor_dynamic * 0.5)
                 kd_inactive_epochs = 0
+
+            baseline_f1 = best_val_f1_pre_kd if best_val_f1_pre_kd > -float("inf") else best_val_f1
+            if baseline_f1 > -float("inf"):
+                if val_metrics["f1"] <= baseline_f1 + kd_config.disable_delta:
+                    kd_no_gain_epochs += 1
+                else:
+                    kd_no_gain_epochs = 0
+                if kd_no_gain_epochs >= kd_config.disable_patience:
+                    kd_config.use_kd = False
+                    kd_active_epoch = False
+                    print(
+                        "KD已自动关闭：连续多轮未超过无KD基线F1，后续训练仅使用CE。"
+                    )
+                    _write_log(
+                        {
+                            "event": "kd_disabled",
+                            "epoch": epoch,
+                            "baseline_f1": baseline_f1,
+                            "val_f1": val_metrics["f1"],
+                            "disable_patience": kd_config.disable_patience,
+                        }
+                    )
+        
+        if not kd_active_epoch:
+            best_val_f1_pre_kd = max(best_val_f1_pre_kd, val_metrics["f1"])
 
         if val_metrics["f1"] > best_val_f1:
             best_val_f1 = val_metrics["f1"]
