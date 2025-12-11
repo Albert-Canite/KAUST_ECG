@@ -16,8 +16,8 @@ class SegmentAwareStudent(nn.Module):
     def __init__(
         self,
         num_classes: int = 2,
-        num_mlp_layers: int = 3,
-        dropout_rate: float = 0.2,
+        num_mlp_layers: int = 2,
+        dropout_rate: float = 0.1,
         use_value_constraint: bool = True,
         use_tanh_activations: bool = False,
         constraint_scale: float = 1.0,
