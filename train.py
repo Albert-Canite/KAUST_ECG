@@ -174,8 +174,13 @@ def main() -> None:
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
 
+    # Mitigate collapse to the majority class by balancing cross-entropy with class weights
+    class_counts = np.bincount(tr_y, minlength=2)
+    class_weights = class_counts.sum() / (2.0 * np.maximum(class_counts, 1))
+    class_weights = torch.tensor(class_weights, dtype=torch.float32, device=device)
+
     student = build_student(args, device)
-    ce_loss_fn = nn.CrossEntropyLoss()
+    ce_loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
     optimizer = Adam(student.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=args.scheduler_patience, verbose=True)
@@ -208,10 +213,10 @@ def main() -> None:
 
         train_loss = running_loss / max(total, 1)
 
-        val_loss, val_metrics, val_true, _, val_probs = evaluate(
+        val_loss, _, val_true, _, val_probs = evaluate(
             student, val_loader, device, return_probs=True
         )
-        gen_loss, gen_metrics, gen_true, _, gen_probs = evaluate(
+        gen_loss, _, gen_true, _, gen_probs = evaluate(
             student, gen_loader, device, return_probs=True
         )
 
@@ -222,12 +227,18 @@ def main() -> None:
             fpr_cap=None,
         )
 
+        # Use the swept threshold to report and track metrics instead of argmax-only scores
+        val_preds = (np.array(val_probs) >= best_thr_epoch).astype(int).tolist()
+        gen_preds = (np.array(gen_probs) >= best_thr_epoch).astype(int).tolist()
+        val_metrics = confusion_metrics(val_true, val_preds)
+        gen_metrics = confusion_metrics(gen_true, gen_preds)
+
         scheduler.step(val_loss)
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
             f"Val F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}% | "
-            f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}%"
+            f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}% | Thr {best_thr_epoch:.2f}"
         )
 
         history.append(
