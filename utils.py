@@ -197,6 +197,7 @@ def sweep_thresholds_blended(
     miss_target: float | None = None,
     fpr_cap: float | None = None,
     fpr_penalty: float = 1.5,
+    miss_violation_penalty: float = 2.0,
     threshold_center: float = 0.5,
     threshold_reg: float = 0.0,
 ) -> Tuple[float, Dict[str, float], Dict[str, float]]:
@@ -211,6 +212,10 @@ def sweep_thresholds_blended(
         thresholds: Optional threshold list; defaults to dense grid + quantiles.
         miss_target: Optional miss-rate cap applied to the blended miss.
         fpr_cap: Optional FPR cap applied to the blended FPR.
+        fpr_penalty: Weight for FPR in both the blended score and constraint fallback.
+        miss_violation_penalty: Penalty factor when the miss target is exceeded.
+        threshold_center: Preferred threshold center when applying regularization.
+        threshold_reg: L1 penalty weight on distance from ``threshold_center``.
 
     Returns:
         best_threshold, val_metrics_at_threshold, gen_metrics_at_threshold
@@ -225,7 +230,7 @@ def sweep_thresholds_blended(
     def _score(metrics: Dict[str, float], thr: float) -> float:
         return (
             metrics["f1"]
-            + 1.5 * metrics["sensitivity"]
+            + 1.8 * metrics["sensitivity"]
             - fpr_penalty * metrics["fpr"]
             - threshold_reg * abs(thr - threshold_center)
         )
@@ -266,7 +271,7 @@ def sweep_thresholds_blended(
             # Penalize constraint violations to prefer the least-bad candidate
             miss_violation = max(0.0, blended_miss - (miss_target or 0.0))
             fpr_violation = max(0.0, blended_fpr - (fpr_cap or 0.0))
-            violation_penalty = 2.0 * miss_violation + 1.5 * fpr_violation
+            violation_penalty = miss_violation_penalty * miss_violation + fpr_penalty * fpr_violation
             penalized_score = blended_score - violation_penalty
             if penalized_score > fallback_score:
                 fallback_score = penalized_score
