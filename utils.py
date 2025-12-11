@@ -194,12 +194,12 @@ def sweep_thresholds_blended(
     gen_probs: List[float],
     gen_weight: float = 0.3,
     thresholds: List[float] | None = None,
-    miss_target: float | None = None,
-    fpr_cap: float | None = None,
-    fpr_penalty: float = 1.5,
-    miss_violation_penalty: float = 2.0,
-    threshold_center: float = 0.5,
-    threshold_reg: float = 0.0,
+    miss_target: float | None = 0.10,
+    fpr_cap: float | None = 0.10,
+    fpr_penalty: float = 0.9,
+    miss_violation_penalty: float = 2.5,
+    threshold_center: float = 0.78,
+    threshold_reg: float = 0.02,
 ) -> Tuple[float, Dict[str, float], Dict[str, float]]:
     """Jointly sweep thresholds on val/generalization splits with blended scoring.
 
