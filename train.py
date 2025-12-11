@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -17,7 +19,7 @@ from sklearn.metrics import auc, confusion_matrix, roc_curve
 
 from data import BEAT_LABEL_MAP, ECGBeatDataset, load_records, set_seed, split_dataset
 from models.student import SegmentAwareStudent
-from utils import confusion_metrics, sweep_thresholds
+from utils import confusion_metrics, make_weighted_sampler, sweep_thresholds
 
 
 TRAIN_RECORDS = [
@@ -170,7 +172,22 @@ def main() -> None:
     )
 
     train_dataset = ECGBeatDataset(tr_x, tr_y)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+
+    sampler = None
+    sampler_boost = 1.2
+    if abnormal_ratio < 0.35:
+        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
+        print(
+            "Enabling mild abnormal oversampling: "
+            f"boost={sampler_boost:.2f}, expected abnormal frac≈{min(0.5, abnormal_ratio * sampler_boost):.2f}"
+        )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=sampler is None,
+        sampler=sampler,
+    )
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
 
@@ -178,12 +195,35 @@ def main() -> None:
     class_counts = np.bincount(tr_y, minlength=2)
     class_weights = class_counts.sum() / (2.0 * np.maximum(class_counts, 1))
     class_weights = torch.tensor(class_weights, dtype=torch.float32, device=device)
+    mean_w = class_weights.mean()
+    class_weights = class_weights.clamp(min=mean_w * 0.5, max=mean_w * 2.0)
+
+    os.makedirs("artifacts", exist_ok=True)
+    log_path = os.path.join(
+        "artifacts",
+        f"training_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl",
+    )
 
     student = build_student(args, device)
     ce_loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
     optimizer = Adam(student.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=args.scheduler_patience, verbose=True)
+
+    def _write_log(entry: Dict[str, object]) -> None:
+        with open(log_path, "a", encoding="utf-8") as f:
+            json.dump(entry, f, ensure_ascii=False)
+            f.write("\n")
+
+    _write_log(
+        {
+            "event": "start",
+            "timestamp": datetime.now().isoformat(),
+            "config": vars(args),
+            "class_counts": class_counts.tolist(),
+            "class_weights": class_weights.detach().cpu().tolist(),
+        }
+    )
 
     best_val_f1 = -float("inf")
     best_state = None
@@ -223,8 +263,8 @@ def main() -> None:
         best_thr_epoch, _ = sweep_thresholds(
             val_true,
             val_probs,
-            miss_target=None,
-            fpr_cap=None,
+            miss_target=0.15,
+            fpr_cap=0.15,
         )
 
         # Use the swept threshold to report and track metrics instead of argmax-only scores
@@ -252,6 +292,23 @@ def main() -> None:
                 "gen_f1": gen_metrics["f1"],
                 "gen_miss": gen_metrics["miss_rate"],
                 "gen_fpr": gen_metrics["fpr"],
+                "threshold": best_thr_epoch,
+            }
+        )
+
+        _write_log(
+            {
+                "event": "epoch",
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "val_f1": val_metrics["f1"],
+                "val_miss": val_metrics["miss_rate"],
+                "val_fpr": val_metrics["fpr"],
+                "gen_f1": gen_metrics["f1"],
+                "gen_miss": gen_metrics["miss_rate"],
+                "gen_fpr": gen_metrics["fpr"],
+                "threshold": best_thr_epoch,
             }
         )
 
@@ -261,6 +318,19 @@ def main() -> None:
             best_threshold = best_thr_epoch
             patience_counter = 0
             print("  -> New best model saved.")
+            _write_log(
+                {
+                    "event": "best",
+                    "epoch": epoch,
+                    "val_f1": val_metrics["f1"],
+                    "val_miss": val_metrics["miss_rate"],
+                    "val_fpr": val_metrics["fpr"],
+                    "gen_f1": gen_metrics["f1"],
+                    "gen_miss": gen_metrics["miss_rate"],
+                    "gen_fpr": gen_metrics["fpr"],
+                    "threshold": best_thr_epoch,
+                }
+            )
         else:
             patience_counter += 1
             if patience_counter >= args.patience and epoch >= args.min_epochs:
@@ -280,6 +350,8 @@ def main() -> None:
     best_threshold, val_metrics = sweep_thresholds(
         val_true,
         val_probs,
+        miss_target=0.15,
+        fpr_cap=0.15,
     )
     gen_metrics = confusion_metrics(gen_true, (np.array(gen_probs) >= best_threshold).astype(int).tolist())
     val_pred = (np.array(val_probs) >= best_threshold).astype(int).tolist()
@@ -292,6 +364,21 @@ def main() -> None:
     print(
         f"Generalization@thr={best_threshold:.2f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, "
         f"miss={gen_metrics['miss_rate'] * 100:.2f}%, fpr={gen_metrics['fpr'] * 100:.2f}%"
+    )
+
+    _write_log(
+        {
+            "event": "final",
+            "best_threshold": best_threshold,
+            "val_loss": val_loss,
+            "val_f1": val_metrics["f1"],
+            "val_miss": val_metrics["miss_rate"],
+            "val_fpr": val_metrics["fpr"],
+            "gen_loss": gen_loss,
+            "gen_f1": gen_metrics["f1"],
+            "gen_miss": gen_metrics["miss_rate"],
+            "gen_fpr": gen_metrics["fpr"],
+        }
     )
 
     os.makedirs("saved_models", exist_ok=True)
@@ -368,6 +455,7 @@ def main() -> None:
     _save_confusion(val_true, val_pred, "Val")
     _save_confusion(gen_true, gen_pred, "Generalization")
     print("Saved training curves, ROC curves, and confusion matrices to ./artifacts")
+    print(f"Training log saved to {log_path}")
 
 
 if __name__ == "__main__":
