@@ -102,12 +102,22 @@ class KDConfig:
     alpha: float
     temperature: float
     ema_decay: float
+    warmup_epochs: int
 
 
 def kd_logit_loss(logits_student: torch.Tensor, logits_teacher: torch.Tensor, temperature: float) -> torch.Tensor:
     student_log_probs = torch.log_softmax(logits_student / temperature, dim=1)
     teacher_probs = torch.softmax(logits_teacher / temperature, dim=1)
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (temperature * temperature)
+
+
+def kd_alpha_schedule(base_alpha: float, current_epoch: int, start_epoch: int, warmup_epochs: int) -> float:
+    if current_epoch < start_epoch:
+        return 0.0
+    if warmup_epochs <= 0:
+        return base_alpha
+    progress = min(1.0, float(current_epoch - start_epoch + 1) / float(warmup_epochs))
+    return base_alpha * progress
 
 
 def update_teacher(student: nn.Module, teacher: nn.Module, ema_decay: float) -> None:
@@ -220,6 +230,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kd_alpha", type=float, default=0.1, help="Weight for KD loss blending")
     parser.add_argument("--kd_temperature", type=float, default=2.0, help="Temperature for KD softening")
     parser.add_argument("--ema_decay", type=float, default=0.99, help="EMA decay for teacher parameter updates")
+    parser.add_argument(
+        "--kd_warmup_epochs",
+        type=int,
+        default=10,
+        help="Number of epochs to linearly ramp KD alpha after start_epoch",
+    )
 
     return parser.parse_args()
 
@@ -234,6 +250,7 @@ def main() -> None:
         alpha=args.kd_alpha,
         temperature=args.kd_temperature,
         ema_decay=args.ema_decay,
+        warmup_epochs=args.kd_warmup_epochs,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -338,6 +355,10 @@ def main() -> None:
     for epoch in range(1, args.max_epochs + 1):
         student.train()
         teacher.eval()
+        effective_alpha_epoch = kd_alpha_schedule(
+            kd_config.alpha, epoch, kd_config.start_epoch, kd_config.warmup_epochs
+        )
+        kd_active_epoch = kd_config.use_kd and epoch >= kd_config.start_epoch
         running_ce_loss = 0.0
         running_kd_loss = 0.0
         running_total_loss = 0.0
@@ -361,18 +382,17 @@ def main() -> None:
             kd_loss = torch.tensor(0.0, device=device)
             loss = ce_loss
 
-            kd_active = kd_config.use_kd and epoch >= kd_config.start_epoch
-            if kd_active:
+            if kd_active_epoch:
                 with torch.no_grad():
                     logits_teacher, _ = teacher(signals)
                 kd_loss = kd_logit_loss(logits, logits_teacher, kd_config.temperature)
-                loss = (1.0 - kd_config.alpha) * ce_loss + kd_config.alpha * kd_loss
+                loss = (1.0 - effective_alpha_epoch) * ce_loss + effective_alpha_epoch * kd_loss
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
             optimizer.step()
 
-            if kd_active:
+            if kd_active_epoch:
                 update_teacher(student, teacher, kd_config.ema_decay)
 
             batch_size = labels.size(0)
@@ -423,6 +443,7 @@ def main() -> None:
                 "train_loss": train_loss,
                 "train_ce_loss": train_ce_loss,
                 "train_kd_loss": train_kd_loss,
+                "kd_alpha_effective": effective_alpha_epoch if kd_active_epoch else 0.0,
                 "val_loss": val_loss,
                 "val_f1": val_metrics["f1"],
                 "val_miss": val_metrics["miss_rate"],
@@ -441,6 +462,7 @@ def main() -> None:
                 "train_loss": train_loss,
                 "train_ce_loss": train_ce_loss,
                 "train_kd_loss": train_kd_loss,
+                "kd_alpha_effective": effective_alpha_epoch if kd_active_epoch else 0.0,
                 "val_loss": val_loss,
                 "val_f1": val_metrics["f1"],
                 "val_miss": val_metrics["miss_rate"],
