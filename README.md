@@ -23,17 +23,17 @@ Download the MIT-BIH Arrhythmia Database and set `--data_path` to the folder con
 
 ## Training
 ### One-click / default run
-Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`). By default, the student trains **with knowledge distillation enabled**, but KD stays off for the first few epochs (`--kd_warmup_epochs`, default 5) until the student stabilizes. If no teacher checkpoint is provided, a compact ResNet18-1D teacher is auto-trained (15 epochs by default), validated, and only used for KD if it meets minimal F1/TPR thresholds; otherwise KD is disabled to avoid harming recall. Checkpoints and the auto-trained teacher are saved under `saved_models/`.
+Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`). The default **`strategy_preset=stable`** keeps KD, adaptive reweighting, and weighted sampling **off** to avoid collapse; you can switch to `balanced` (mild class weights + sampler) or `full` (KD + adaptive reweighting) via `--strategy_preset`. If no teacher checkpoint is provided and a preset with KD is selected, a compact ResNet18-1D teacher is auto-trained (15 epochs by default), validated, and only used for KD if it meets minimal F1/TPR thresholds; otherwise KD is disabled to avoid harming recall. Checkpoints and the auto-trained teacher are saved under `saved_models/`.
 
 ### Command-line customization
 - Basic student-only training:
   ```bash
-  python train.py --data_path /path/to/mit-bih --max_epochs 90 --no-use-kd
+  python train.py --data_path /path/to/mit-bih --max_epochs 90 --strategy_preset stable
   ```
 
 - Knowledge distillation with an existing teacher:
   ```bash
-  python train.py --data_path /path/to/mit-bih --use-kd \
+  python train.py --data_path /path/to/mit-bih --strategy_preset full \
     --teacher_checkpoint /path/to/teacher.pth --teacher_embedding_dim 128 \
     --kd_temperature 2.0 --kd_d 16 --alpha 1.0 --beta 1.0 --gamma 1.0
   ```
@@ -50,7 +50,7 @@ Early stopping monitors a recall-biased score (`F1 + 1.5*sensitivity - FPR`) wit
 
 **Class imbalance handling**: training begins with **no class weights and no weighted sampler** for a short warmup (`--imbalance_warmup_epochs`, default 5) to avoid early collapse, then linearly ramps to mild reweighting over `--imbalance_ramp_epochs` (default 5) (abnormal weight `--class_weight_abnormal=1.2`, ratio clamp `--max_class_weight_ratio=1.5`). Weighted sampling is auto-enabled after warmup when the abnormal ratio is below `--auto_sampler_ratio` (default 0.35) or when `--use_weighted_sampler` is set, using a ramped boost up to `--sampler_abnormal_boost` (default 1.2). Adaptive recall rescue triggers when miss exceeds `--recall_target_miss` (default 0.15) under an FPR cap (`--adaptive_fpr_cap`, default 0.25) and can fire up to `--recall_rescue_limit` times (default 3), increasing abnormal emphasis and enabling the sampler; with `--use_generalization_rescue` the same logic can be driven by generalization metrics when validation looks good but out-of-domain recall lags. Dual collapse detectors pause KD and drop rebalancing if the model predicts nearly all abnormal (`FPR>95% & miss<5%`) or nearly all normal (`miss>95% & FPR<5%`); after any collapse rebalancing is locked and a cooldown (`--collapse_cooldown_epochs`, default 5) prevents the ramp from restarting until explicitly requested.
 
-**Stable mode is now the default** (`--stable_mode/--no-stable_mode`), turning off KD, class-weighting, adaptive reweighting, and weighted sampling unless you explicitly re-enable them. This conservative baseline avoids the collapse loops seen in recent runs; pass `--no-stable_mode` if you want to experiment with KD and rebalancing.
+**Strategy presets and strength sweeps**: use `--strategy_preset {stable,balanced,full}` to toggle whole bundles of knobs; `--strategy_strength` scales class-weight strength, sampler boost, and KD beta/gamma to make sweeping easier (e.g., `--strategy_strength 0.6` for gentle reweighting, `1.5` for a stronger setting). `--stable_mode/--no-stable_mode` remains available for backward compatibility; setting a preset automatically aligns the stable flag.
 
 ## Segment-Aware Student Overview
 - Inputs: `(batch_size, 1, 360)`

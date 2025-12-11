@@ -207,6 +207,21 @@ def _add_bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, hel
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MIT-BIH ECG training with KD and constraints")
+    parser.add_argument(
+        "--strategy_preset",
+        choices=["stable", "balanced", "full"],
+        default="stable",
+        help=(
+            "High-level strategy switch: stable (no KD/reweight), balanced (mild weights + sampler), "
+            "full (KD + adaptive reweight)."
+        ),
+    )
+    parser.add_argument(
+        "--strategy_strength",
+        type=float,
+        default=1.0,
+        help="Global multiplier for class-weight, sampler boost, and KD strength for sweeps.",
+    )
     parser.add_argument("--data_path", type=str, default="E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/")
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -320,6 +335,19 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    # Preset handling: strategy_preset overrides stable_mode unless explicitly disabled
+    if args.strategy_preset != "stable":
+        args.stable_mode = False
+    elif not args.stable_mode:
+        args.strategy_preset = "balanced"
+
+    # Strategy-wide strength scaling for sweep experiments
+    strength = max(args.strategy_strength, 0.0)
+    args.class_weight_abnormal *= strength
+    args.max_class_weight_ratio = 1.0 + (args.max_class_weight_ratio - 1.0) * strength
+    args.sampler_abnormal_boost = 1.0 + (args.sampler_abnormal_boost - 1.0) * strength
+    args.beta *= strength
+    args.gamma *= strength
     # Stable mode: turn off aggressive adaptive knobs and KD to avoid collapse
     if args.stable_mode:
         args.use_kd = False
@@ -335,6 +363,19 @@ def main() -> None:
         print(
             "[STABLE] Enabled stable mode: KD disabled, adaptive reweight/sampler off, class-weighting off, gentler caps, longer warmup."
         )
+    elif args.strategy_preset == "balanced":
+        # Mild rebalance only, KD off by default
+        args.use_kd = False
+        args.enable_adaptive_reweight = False
+        args.use_weighted_sampler = True
+        args.auto_enable_sampler = True
+        args.imbalance_warmup_epochs = max(args.imbalance_warmup_epochs, 6)
+    else:
+        # Full: KD + adaptive reweight and sampler
+        args.use_kd = True
+        args.enable_adaptive_reweight = True
+        args.use_weighted_sampler = True
+        args.auto_enable_sampler = True
     set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

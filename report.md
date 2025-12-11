@@ -284,3 +284,26 @@
   1. 直接运行 `python train.py`（稳定模式）观察基线收敛；若 miss 仍偏高，可先提升容量（`num_mlp_layers=3/4` 已默认 3，必要时 `--dropout_rate 0.1–0.2`）或小幅调高阈值 sweep 的 recall 权重。
   2. 若需对比重平衡/蒸馏，先用 `--no-stable_mode --no-use_kd --no-enable_adaptive_reweight --no-use_weighted_sampler` 跑一版仅类权重的轻量模式，再逐步开启采样与 KD，监控是否重新出现崩溃。
   3. 一旦观察到 FPR>95% 或 miss>95%，可手动提高 `collapse_cooldown_epochs` 或维持 rebalance 锁定，优先让 CE 恢复正常预测分布。
+
+## v15_debug 问题分析（最新日志：稳定模式可跑通但泛化 miss≈30%，启用重平衡/KD 易崩溃）
+- **用户关注点**：
+  1. 稳定模式下是否仍保持输入/受约束层权重在 [-1, 1]：每个 beat 预处理采用去均值+max-abs scaling 保证输入落在 [-1, 1]（`data.py`），受约束层在启用 `--use_value_constraint` 时通过 tanh 重参数保证权重/偏置在 `[-scale, scale]`，默认为 1.0；稳定模式本身不强制约束权重（仅关闭 KD/重平衡），需显式加 `--use_value_constraint`。
+  2. KD、类权重、自适应 reweight、加权采样都属于训练策略，可否一键开关并调强度：新增 `--strategy_preset {stable,balanced,full}`（默认 stable）和全局强度 `--strategy_strength`，可整体切换策略组合并统一放大/缩小类权重、采样提升、KD beta/gamma；同时保留老的单独开关以供微调。
+- **现象复盘**：
+  - 稳定模式下 Val miss≈11%、FPR≈17%，Gen miss≈30%，FPR≈12%，说明模型容量+阈值已能分出一部分异常，但召回仍偏低；切换到 aggressive 重平衡/KD 会再次引发 FPR=100% 的崩溃。
+- **原因研判**：
+  1. **策略耦合过强**：同时开启类权重、采样、KD、自适应 reweight，且权重/采样强度不易整体调节，容易把判决面推到单侧。
+  2. **容量仍偏紧**：三层 4×4 MLP + 0.2 dropout 容量有限，对 QRS 形态变化的判别边界不足，导致泛化召回下降。
+- **本轮修改**：
+  - 引入高层策略开关与强度控制：
+    - `--strategy_preset stable`（默认）：关闭 KD/自适应/采样/类权重，跑纯 CE 基线。
+    - `--strategy_preset balanced`：仅开启温和类权重+采样，KD 关闭，自适应 reweight 关闭，暖启动≥6 轮。
+    - `--strategy_preset full`：开启 KD+自适应 reweight+采样，供对比实验。
+    - `--strategy_strength x`：统一缩放类权重、采样 boost、KD beta/gamma（如 0.6 更温和，1.5 更激进），便于网格/贝叶斯 sweep。
+  - 与旧开关兼容：若需要精细微调仍可单独设置 `--no-use_kd`、`--no-enable_adaptive_reweight` 等；preset 会同步调整 `stable_mode`，避免冲突。
+- **后续验证路径**：
+  1. 保持 `--strategy_preset stable --use_value_constraint` 跑一个对照，确认基线召回/FPR；可尝试 `--num_mlp_layers 4 --dropout_rate 0.1` 提升容量并微调正则。
+  2. 以 sweep 方式逐步增加策略强度：
+     - 先 `--strategy_preset balanced --strategy_strength 0.6`（温和权重+采样、无 KD），观察 miss 是否下降且无崩溃；必要时调高到 0.8/1.0。
+     - 如基于 balanced 仍 miss 高且稳定，可再试 `--strategy_preset full --strategy_strength 0.6` 打开 KD，KD 权重随强度线性缩放，避免一次性过强。
+  3. 若再出现崩溃，可保持 stable 结果为基线，将 `collapse_cooldown_epochs` 设更长（8–10），或锁定 rebalance 仅用固定轻量权重/无采样，等待模型收敛后再小步调高强度。
