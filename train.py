@@ -152,8 +152,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--class_weight_abnormal", type=float, default=1.35)
     parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
     parser.add_argument("--generalization_score_weight", type=float, default=0.35)
-    parser.add_argument("--threshold_target_miss", type=float, default=0.14)
-    parser.add_argument("--threshold_max_fpr", type=float, default=0.15)
+    parser.add_argument("--threshold_target_miss", type=float, default=0.10)
+    parser.add_argument("--threshold_max_fpr", type=float, default=0.10)
+    parser.add_argument(
+        "--threshold_recall_gain",
+        type=float,
+        default=2.0,
+        help="Sensitivity gain when scoring thresholds to prefer lower miss rates",
+    )
+    parser.add_argument(
+        "--threshold_miss_penalty",
+        type=float,
+        default=1.25,
+        help="Penalty weight on miss rate during blended threshold scoring",
+    )
+    parser.add_argument(
+        "--threshold_gen_recall_gain",
+        type=float,
+        default=2.5,
+        help="Sensitivity gain applied to generalization metrics during threshold sweeps",
+    )
+    parser.add_argument(
+        "--threshold_gen_miss_penalty",
+        type=float,
+        default=1.35,
+        help="Miss-rate penalty applied to generalization metrics during threshold sweeps",
+    )
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
@@ -306,6 +330,10 @@ def main() -> None:
             gen_true,
             gen_probs,
             gen_weight=args.generalization_score_weight,
+            recall_gain=args.threshold_recall_gain,
+            miss_penalty=args.threshold_miss_penalty,
+            gen_recall_gain=args.threshold_gen_recall_gain,
+            gen_miss_penalty=args.threshold_gen_miss_penalty,
             miss_target=args.threshold_target_miss,
             fpr_cap=args.threshold_max_fpr,
         )
@@ -392,6 +420,10 @@ def main() -> None:
         gen_true,
         gen_probs,
         gen_weight=args.generalization_score_weight,
+        recall_gain=args.threshold_recall_gain,
+        miss_penalty=args.threshold_miss_penalty,
+        gen_recall_gain=args.threshold_gen_recall_gain,
+        gen_miss_penalty=args.threshold_gen_miss_penalty,
         miss_target=args.threshold_target_miss,
         fpr_cap=args.threshold_max_fpr,
     )
