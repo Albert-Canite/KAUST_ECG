@@ -235,6 +235,14 @@ def sweep_thresholds_blended(
     best_val: Dict[str, float] = {}
     best_gen: Dict[str, float] = {}
 
+    # Track the least-constraining-violating candidate as a safer fallback to
+    # avoid pathological thresholds (e.g., predicting全正类) when no candidate
+    # satisfies miss/FPR caps.
+    fallback_score = -float("inf")
+    fallback_thr = 0.5
+    fallback_val: Dict[str, float] = {}
+    fallback_gen: Dict[str, float] = {}
+
     for thr in thresholds:
         val_preds = (np.array(val_probs) >= thr).astype(int).tolist()
         gen_preds = (np.array(gen_probs) >= thr).astype(int).tolist()
@@ -245,30 +253,47 @@ def sweep_thresholds_blended(
         blended_fpr = (1 - gen_weight) * val_metrics["fpr"] + gen_weight * gen_metrics["fpr"]
         blended_score = (1 - gen_weight) * _score(val_metrics, thr) + gen_weight * _score(gen_metrics, thr)
 
-        if miss_target is not None and blended_miss > miss_target:
-            continue
-        if fpr_cap is not None and blended_fpr > fpr_cap:
-            continue
+        miss_ok = miss_target is None or blended_miss <= miss_target
+        fpr_ok = fpr_cap is None or blended_fpr <= fpr_cap
 
-        if blended_score > best_score:
-            best_score = blended_score
-            best_thr = float(thr)
-            best_val = val_metrics
-            best_gen = gen_metrics
-
-    # Fallback to the best unconstrained threshold if no candidate met constraints
-    if best_val == {} or best_gen == {}:
-        for thr in thresholds:
-            val_preds = (np.array(val_probs) >= thr).astype(int).tolist()
-            gen_preds = (np.array(gen_probs) >= thr).astype(int).tolist()
-            val_metrics = confusion_metrics(val_true, val_preds)
-            gen_metrics = confusion_metrics(gen_true, gen_preds)
-            blended_score = (1 - gen_weight) * _score(val_metrics, thr) + gen_weight * _score(gen_metrics, thr)
+        if miss_ok and fpr_ok:
             if blended_score > best_score:
                 best_score = blended_score
                 best_thr = float(thr)
                 best_val = val_metrics
                 best_gen = gen_metrics
+        else:
+            # Penalize constraint violations to prefer the least-bad candidate
+            miss_violation = max(0.0, blended_miss - (miss_target or 0.0))
+            fpr_violation = max(0.0, blended_fpr - (fpr_cap or 0.0))
+            violation_penalty = 2.0 * miss_violation + 1.5 * fpr_violation
+            penalized_score = blended_score - violation_penalty
+            if penalized_score > fallback_score:
+                fallback_score = penalized_score
+                fallback_thr = float(thr)
+                fallback_val = val_metrics
+                fallback_gen = gen_metrics
+
+    # Fallback to the least-violating candidate to avoid extreme thresholds
+    # (e.g., thr→0 leading to FPR≈100%) when constraints filter out all options.
+    if best_val == {} or best_gen == {}:
+        if fallback_val and fallback_gen:
+            best_thr = fallback_thr
+            best_val = fallback_val
+            best_gen = fallback_gen
+        else:
+            # Last resort: choose the threshold with the highest blended score.
+            for thr in thresholds:
+                val_preds = (np.array(val_probs) >= thr).astype(int).tolist()
+                gen_preds = (np.array(gen_probs) >= thr).astype(int).tolist()
+                val_metrics = confusion_metrics(val_true, val_preds)
+                gen_metrics = confusion_metrics(gen_true, gen_preds)
+                blended_score = (1 - gen_weight) * _score(val_metrics, thr) + gen_weight * _score(gen_metrics, thr)
+                if blended_score > best_score:
+                    best_score = blended_score
+                    best_thr = float(thr)
+                    best_val = val_metrics
+                    best_gen = gen_metrics
 
     return best_thr, best_val, best_gen
 
