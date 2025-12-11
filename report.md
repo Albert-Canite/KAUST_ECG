@@ -238,3 +238,17 @@
   - 若泛化漏诊仍高，可再把 `num_mlp_layers` 提升到 4 或小幅增大 dropout（0.25–0.3）对照，观察 FPR 变化；同时可调低 `threshold_target_miss` 到 0.10 强化阈值对漏诊的约束。
   - 如 KD 仍无益，可暂时 `--no-use-kd` 对照，或提高教师门槛（`teacher_min_f1`、`teacher_min_sensitivity`）以确保 distillation 仅在教师高召回时生效。
   - 若训练仍长时间平台，可适度缩短 `imbalance_warmup_epochs`（如 3）让重平衡更早介入，或增大 `sampler_abnormal_boost` 至 1.4–1.6，但需监控 FPR。
+
+## v12_debug 问题分析（最新日志：第 6 轮起 FPR≈100%，Miss≈0% 持续，训练爆炸）
+- **现象**：
+  - 前 5 轮未加权阶段，Val miss 20–45%、FPR 7–12%；第 6 轮开启权重/采样/KD 后立即出现 “all abnormal” 正崩溃：Val FPR≈100%、miss≈0%，随后 10 余轮均停留在崩溃状态。
+  - 训练 loss 飙升至 3.x，KD 虽被暂停但下一轮又被自动启用，类权重/采样也在下一轮重新生效，导致始终在崩溃—恢复—再次崩溃的循环中。
+- **定位**：
+  1. 崩溃后虽然当轮关闭了采样与权重，但下一轮会因 `use_class_weights=True` 再次自动启用，缺少“冷却期”导致同样的 reweight 方案反复触发崩溃。
+  2. KD 在 miss 高时被暂停，但下一轮 miss 依旧由崩溃状态主导，KD 仍会按暖启动条件重新打开，加剧不稳定。
+- **本轮修复**：
+  - 新增 `--collapse_cooldown_epochs`（默认 5）：一旦检测到正/负崩溃，立即关闭采样与类权重，并进入冷却期，冷却期间固定使用无权重/无采样 CE；冷却结束后重新以 0 起步的 ramp 重新拉升权重/采样，减少重复崩溃。
+  - 崩溃时重置 ramp 起点与 reweight 激活标志，防止在冷却期内再次强行启用 reweight；KD 也同步暂停，待 miss 降回阈值后再依据正常逻辑恢复。
+- **仍需关注**：
+  - 若冷却后再次触发崩溃，可延长 `collapse_cooldown_epochs`（如 8–10），或降低 `class_weight_abnormal`/`sampler_abnormal_boost` 起始值，使 ramp 斜率更平缓。
+  - 若崩溃由教师噪声触发，可临时关闭 KD（`--no-use-kd`）或提高教师门槛，先稳定 CE 学习，再逐步恢复蒸馏。
