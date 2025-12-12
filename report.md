@@ -198,6 +198,18 @@
   3. **召回救火只看验证**：自适应权重/采样的触发逻辑只依赖验证 miss/FPR，泛化 miss 高时没有反馈回训练循环。
 - **修复措施（本轮新增）**：
   - **引入泛化参与的早停评分**：新增 `--use_generalization_score/--no-use_generalization_score`（默认开）和 `--generalization_score_weight`（默认 0.3），每个 epoch 以验证最优阈值在泛化集上评估 `Score=f1+sensitivity-0.5*FPR`，与验证 Score 按权重线性融合驱动早停与最佳模型保存，降低验证过拟合。
+
+## KD V1 DEBUG（最新日志：Teacher Val miss≈3.4% / Gen miss≈9.8%；KD 学生 Val miss≈5.0% FPR≈12.6%，Gen miss≈7.1% FPR≈4.9%，阈值≈0.26）
+- **问题与假设**：
+  - 教师在验证集 miss 很低，但泛化 miss 提升 6%+，存在过拟合；直接蒸馏可能将“过保守”的阈值信号传递给学生，导致 FPR 上升。
+  - KD 训练仅使用训练集，未覆盖泛化分布，学生在泛化集 miss 改善有限，FPR 却增大。
+  - 损失函数缺少显式 miss 限制，KD logits 与特征对齐可能压制正类概率，提升漏诊。
+- **代码改动**：
+  1) **KD 训练混入泛化数据**：新增 `kd_loader`，按 `--kd_gen_mix_ratio`（默认 0.35）截取泛化样本加入训练，`kd_class_weights` 也基于混合分布计算，以减轻分布偏差导致的漏诊。
+  2) **教师过拟合自适应**：加载教师后同时评估验证/泛化 miss，若泛化 miss 比验证高超过 `KD_TEACHER_GAP_TOL`（5%），自动将 KD logits 权重减半，避免弱泛化教师拖低学生。
+  3) **显式 miss 惩罚**：在 KD 循环中对正类概率添加 margin 惩罚（目标 ≥0.6，权重 `KD_POS_PENALTY`），与 CE/KD/MSE 并行，优先拉升正类置信度、降低漏诊。
+  4) **选模兼顾 FPR**：最佳模型不再仅看 blended miss，改为 `miss + 0.35*FPR`，防止为压 miss 过度抬升误报；阈值依旧由验证/泛化混合扫描得到。
+  5) **日志补充**：教师泛化 gap、KD logits 实际权重将在控制台提示，便于快速判断是否触发降权。
   - **训练曲线增加泛化轨迹**：训练曲线图中加入 Gen F1/Miss/FPR 轨迹，便于直观看到验证-泛化的分布差距与收敛状态。
 - **后续建议**：
   - 若泛化 miss 仍高，可提高 `--generalization_score_weight` 到 0.4–0.5，使早停更重视泛化；或在阈值搜索时调低 `--threshold_target_miss`（如 0.10）以压漏诊。
