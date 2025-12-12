@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from data import BEAT_LABEL_MAP, ECGBeatDataset, load_records, set_seed, split_dataset
 from models.student import SegmentAwareStudent
 from train import GENERALIZATION_RECORDS, TRAIN_RECORDS, build_student
-from utils import BalancedBatchSampler, confusion_metrics, make_weighted_sampler
+from utils import BalancedBatchSampler, compute_class_weights, confusion_metrics, make_weighted_sampler, sweep_thresholds_blended
 
 # Distillation hyperparameters
 KD_TEMPERATURE = 3.0
@@ -29,6 +29,7 @@ KD_FEATURE_DIM = 32
 KD_LR = 5e-4
 KD_EPOCHS = 30
 KD_FREEZE_ENCODER = True
+KD_MISS_WEIGHT = 1.35  # extra weight on positives to curb miss rate
 
 
 def _add_bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
@@ -50,6 +51,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout_rate", type=float, default=0.2)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
+    parser.add_argument("--class_weight_abnormal", type=float, default=1.35)
+    parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
+    parser.add_argument("--generalization_score_weight", type=float, default=0.35)
+    parser.add_argument("--threshold_target_miss", type=float, default=0.10)
+    parser.add_argument("--threshold_max_fpr", type=float, default=0.12)
+    parser.add_argument("--threshold_recall_gain", type=float, default=2.0)
+    parser.add_argument("--threshold_miss_penalty", type=float, default=1.25)
+    parser.add_argument("--threshold_gen_recall_gain", type=float, default=2.5)
+    parser.add_argument("--threshold_gen_miss_penalty", type=float, default=1.35)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
     parser.add_argument("--teacher_path", type=str, default=os.path.join("saved_models", "teacher_model.pth"))
@@ -66,6 +76,7 @@ class DatasetBundle:
     gen_loader: DataLoader
     val_arrays: Tuple[np.ndarray, np.ndarray]
     gen_arrays: Tuple[np.ndarray, np.ndarray]
+    class_weights: torch.Tensor
 
 
 def build_dataloaders(args: argparse.Namespace, device: torch.device) -> DatasetBundle:
@@ -100,7 +111,10 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
         )
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
-    return DatasetBundle(train_loader, val_loader, gen_loader, (va_x, va_y), (gen_x, gen_y))
+    class_weights = compute_class_weights(tr_y, abnormal_boost=args.class_weight_abnormal, max_ratio=args.class_weight_max_ratio).to(
+        device
+    )
+    return DatasetBundle(train_loader, val_loader, gen_loader, (va_x, va_y), (gen_x, gen_y), class_weights)
 
 
 def hydrate_student_args(base_args: argparse.Namespace, student_config: argparse.Namespace) -> argparse.Namespace:
@@ -111,6 +125,15 @@ def hydrate_student_args(base_args: argparse.Namespace, student_config: argparse
         ("dropout_rate", base_args.dropout_rate),
         ("num_mlp_layers", base_args.num_mlp_layers),
         ("constraint_scale", base_args.constraint_scale),
+        ("class_weight_abnormal", base_args.class_weight_abnormal),
+        ("class_weight_max_ratio", base_args.class_weight_max_ratio),
+        ("generalization_score_weight", base_args.generalization_score_weight),
+        ("threshold_target_miss", base_args.threshold_target_miss),
+        ("threshold_max_fpr", base_args.threshold_max_fpr),
+        ("threshold_recall_gain", base_args.threshold_recall_gain),
+        ("threshold_miss_penalty", base_args.threshold_miss_penalty),
+        ("threshold_gen_recall_gain", base_args.threshold_gen_recall_gain),
+        ("threshold_gen_miss_penalty", base_args.threshold_gen_miss_penalty),
         ("use_value_constraint", True),
         ("use_tanh_activations", False),
     ]:
@@ -330,9 +353,15 @@ def distill_student(
     params = list(filter(lambda p: p.requires_grad, student.parameters())) + list(projector_s.parameters()) + list(projector_t.parameters())
     optimizer = Adam(params, lr=KD_LR)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3, verbose=True)
-    ce_loss = nn.CrossEntropyLoss()
+    class_weights = loaders.class_weights.clone()
+    if class_weights.numel() >= 2:
+        class_weights[1] = class_weights[1] * KD_MISS_WEIGHT
+    ce_loss = nn.CrossEntropyLoss(weight=class_weights)
 
     history: List[Dict[str, float]] = []
+    best_state = None
+    best_miss = float("inf")
+    best_threshold = 0.5
 
     for epoch in range(1, KD_EPOCHS + 1):
         student.train()
@@ -356,17 +385,56 @@ def distill_student(
             running_loss += loss.item() * labels.size(0)
             total += labels.size(0)
         train_loss = running_loss / max(total, 1)
-        val_loss, val_metrics, _, _ = evaluate_with_probs(student, loaders.val_loader, device)
-        scheduler.step(val_loss)
-        history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, **val_metrics})
-        print(
-            f"[KD] Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
-            f"ROC {val_metrics['roc_auc']:.3f} | Miss {val_metrics['miss_rate']*100:.2f}% | FPR {val_metrics['fpr']*100:.2f}%"
+        val_loss, val_metrics, val_true, val_probs = evaluate_with_probs(student, loaders.val_loader, device)
+        gen_loss, gen_metrics, gen_true, gen_probs = evaluate_with_probs(student, loaders.gen_loader, device)
+
+        thr, val_at_thr, gen_at_thr = sweep_thresholds_blended(
+            val_true,
+            val_probs,
+            gen_true,
+            gen_probs,
+            gen_weight=args.generalization_score_weight,
+            recall_gain=args.threshold_recall_gain,
+            miss_penalty=args.threshold_miss_penalty,
+            gen_recall_gain=args.threshold_gen_recall_gain,
+            gen_miss_penalty=args.threshold_gen_miss_penalty,
+            miss_target=args.threshold_target_miss,
+            fpr_cap=args.threshold_max_fpr,
         )
 
-    torch.save({"student_state_dict": student.state_dict()}, args.kd_output)
+        blended_miss = (1 - args.generalization_score_weight) * val_at_thr["miss_rate"] + args.generalization_score_weight * gen_at_thr["miss_rate"]
+        scheduler.step(val_loss)
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "val_f1": val_at_thr.get("f1", 0.0),
+                "val_miss": val_at_thr.get("miss_rate", 0.0),
+                "val_fpr": val_at_thr.get("fpr", 0.0),
+                "gen_f1": gen_at_thr.get("f1", 0.0),
+                "gen_miss": gen_at_thr.get("miss_rate", 0.0),
+                "gen_fpr": gen_at_thr.get("fpr", 0.0),
+                "threshold": thr,
+            }
+        )
+        print(
+            f"[KD] Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
+            f"Val F1 {val_at_thr['f1']:.3f} Miss {val_at_thr['miss_rate']*100:.2f}% FPR {val_at_thr['fpr']*100:.2f}% | "
+            f"Gen F1 {gen_at_thr['f1']:.3f} Miss {gen_at_thr['miss_rate']*100:.2f}% FPR {gen_at_thr['fpr']*100:.2f}% | Thr {thr:.2f}"
+        )
+
+        if blended_miss < best_miss:
+            best_miss = blended_miss
+            best_state = student.state_dict()
+            best_threshold = thr
+
+    if best_state is not None:
+        student.load_state_dict(best_state)
+
+    torch.save({"student_state_dict": student.state_dict(), "best_threshold": best_threshold}, args.kd_output)
     print(f"Saved distilled student to {args.kd_output}")
-    return student, {"history": history}
+    return student, {"history": history, "best_threshold": best_threshold}
 
 
 def collect_probs(model: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[List[int], List[float]]:
@@ -447,8 +515,9 @@ def main() -> None:
     print("Saved ROC comparison to ./figures/kd_roc_comparison.png")
 
     # Evaluate distilled student
-    kd_val_loss, kd_val_metrics, _, _ = evaluate_with_probs(kd_student, loaders.val_loader, device)
-    kd_gen_loss, kd_gen_metrics, _, _ = evaluate_with_probs(kd_student, loaders.gen_loader, device)
+    kd_threshold = kd_info.get("best_threshold", 0.5)
+    kd_val_loss, kd_val_metrics, _, _ = evaluate_with_probs(kd_student, loaders.val_loader, device, threshold=kd_threshold)
+    kd_gen_loss, kd_gen_metrics, _, _ = evaluate_with_probs(kd_student, loaders.gen_loader, device, threshold=kd_threshold)
 
     print("\nPerformance Summary (Val set):")
     print(
@@ -460,6 +529,7 @@ def main() -> None:
     )
     print(
         f"  Student (KD) -> Loss {kd_val_loss:.4f} Miss {kd_val_metrics['miss_rate']*100:.2f}% | FPR {kd_val_metrics['fpr']*100:.2f}%"
+        f" | Thr {kd_threshold:.2f}"
     )
 
     print("\nPerformance Summary (Generalization set):")
@@ -472,6 +542,7 @@ def main() -> None:
     )
     print(
         f"  Student (KD) -> Loss {kd_gen_loss:.4f} Miss {kd_gen_metrics['miss_rate']*100:.2f}% | FPR {kd_gen_metrics['fpr']*100:.2f}%"
+        f" | Thr {kd_threshold:.2f}"
     )
 
 
