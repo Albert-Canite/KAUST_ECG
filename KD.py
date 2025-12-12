@@ -390,10 +390,13 @@ def distill_student(
     device: torch.device,
     init_student: nn.Module,
     kd_alpha: float = KD_ALPHA,
+    kd_beta: float = KD_BETA,
+    use_kd: bool = True,
 ) -> Tuple[nn.Module, Dict[str, object]]:
-    teacher.eval()
-    for p in teacher.parameters():
-        p.requires_grad = False
+    if teacher is not None:
+        teacher.eval()
+        for p in teacher.parameters():
+            p.requires_grad = False
 
     student = build_student(args, device)
     student.load_state_dict(init_student.state_dict())
@@ -426,19 +429,26 @@ def distill_student(
             signals, labels = signals.to(device), labels.to(device)
             optimizer.zero_grad()
             logits_s, feat_s = student(signals)
-            with torch.no_grad():
-                logits_t, feat_t = teacher(signals)
+            logits_t = None
+            feat_t = None
+            if use_kd and (kd_alpha > 0 or kd_beta > 0) and teacher is not None:
+                with torch.no_grad():
+                    logits_t, feat_t = teacher(signals)
             loss_ce = ce_loss(logits_s, labels)
-            loss_kd = kd_logit_loss(logits_s, logits_t, KD_TEMPERATURE)
-            proj_s = project_features(feat_s, projector_s)
-            proj_t = project_features(feat_t, projector_t)
-            loss_feat = F.mse_loss(proj_s, proj_t)
+            loss_kd = torch.tensor(0.0, device=device)
+            loss_feat = torch.tensor(0.0, device=device)
+            if logits_t is not None:
+                loss_kd = kd_logit_loss(logits_s, logits_t, KD_TEMPERATURE)
+            if feat_t is not None:
+                proj_s = project_features(feat_s, projector_s)
+                proj_t = project_features(feat_t, projector_t)
+                loss_feat = F.mse_loss(proj_s, proj_t)
             prob_pos = torch.softmax(logits_s, dim=1)[:, 1]
             pos_mask = labels == 1
             miss_focus = torch.tensor(0.0, device=device)
             if pos_mask.any():
                 miss_focus = F.relu(KD_POS_MARGIN - prob_pos[pos_mask]).mean()
-            loss = loss_ce + kd_alpha * loss_kd + KD_BETA * loss_feat + KD_POS_PENALTY * miss_focus
+            loss = loss_ce + kd_alpha * loss_kd + kd_beta * loss_feat + KD_POS_PENALTY * miss_focus
             loss.backward()
             torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
             optimizer.step()
@@ -564,10 +574,22 @@ def main() -> None:
     teacher_gen_loss, teacher_gen_metrics, _, _ = evaluate_with_probs(teacher, loaders.gen_loader, device)
     teacher_gap = teacher_gen_metrics["miss_rate"] - teacher_val_metrics["miss_rate"]
     kd_alpha_eff = KD_ALPHA
-    if teacher_gap > KD_TEACHER_GAP_TOL:
-        kd_alpha_eff = KD_ALPHA * 0.5
+    kd_beta_eff = KD_BETA
+    use_kd = True
+    student_better_gen = teacher_gen_metrics["miss_rate"] > baseline["gen"][1]["miss_rate"]
+    student_better_val = teacher_val_metrics["miss_rate"] > baseline["val"][1]["miss_rate"]
+    if student_better_gen and student_better_val:
+        kd_alpha_eff = 0.0
+        kd_beta_eff = 0.0
+        use_kd = False
         print(
-            f"Teacher generalization miss gap {teacher_gap*100:.2f}% exceeds {KD_TEACHER_GAP_TOL*100:.1f}% -> down-weight KD logits to {kd_alpha_eff:.3f}"
+            "Teacher underperforms baseline on both val/gen miss; disabling KD (fine-tuning student only)."
+        )
+    elif teacher_gap > KD_TEACHER_GAP_TOL:
+        kd_alpha_eff = KD_ALPHA * 0.5
+        kd_beta_eff = KD_BETA * 0.5
+        print(
+            f"Teacher generalization miss gap {teacher_gap*100:.2f}% exceeds {KD_TEACHER_GAP_TOL*100:.1f}% -> down-weight KD logits/features to {kd_alpha_eff:.3f}/{kd_beta_eff:.3f}"
         )
     print(
         f"Teacher -> Val loss {teacher_val_loss:.4f} Miss {teacher_val_metrics['miss_rate']*100:.2f}% FPR {teacher_val_metrics['fpr']*100:.2f}% | "
@@ -575,7 +597,16 @@ def main() -> None:
     )
 
     # Distillation
-    kd_student, kd_info = distill_student(args, loaders, teacher, device, student_base, kd_alpha=kd_alpha_eff)
+    kd_student, kd_info = distill_student(
+        args,
+        loaders,
+        teacher,
+        device,
+        student_base,
+        kd_alpha=kd_alpha_eff,
+        kd_beta=kd_beta_eff,
+        use_kd=use_kd,
+    )
 
     # Collect probabilities for comparison on validation set
     val_true, base_probs = baseline["val"][2], baseline["val"][3]
