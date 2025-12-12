@@ -422,3 +422,14 @@
   - **教师门控**：若教师泛化 miss 超过学生基线（可调 `KD_TEACHER_GEN_MARGIN`），直接关闭 KD，仅做 CE 微调；若仅存在泛化过拟合，则按 gap 自动降权。
   - **阈值对齐**：对教师也执行验证/泛化混合阈值搜索，供蒸馏和日志使用，避免用固定 0.5 误判教师质量。
   - **置信/正确性掩码**：蒸馏时仅对教师高置信（`KD_TEACHER_CONF`）且预测正确的样本计算 KD logits/特征损失，其余样本仅用 CE，避免教师在分布外误导学生。
+
+### KD V1 DEBUG 追加说明（日志与双侧 ROC 完整记录）
+- **操作改动**：
+  1. 教师训练改用 `dataloaders.class_weights` 做加权 CE，与学生训练保持一致。
+  2. 在主流程中先以 `evaluate_with_probs` 获取教师在 Val/Gen 的概率，再用 `sweep_thresholds_blended` 求得教师最优阈值；若教师在 Gen 上的 miss≥学生基线或 FPR 超过 `max(student_gen_fpr, threshold_max_fpr)`，则将 KD 权重置 0、仅做 CE 微调，并在日志打印门控原因。
+  3. 蒸馏时传入上述动态 KD 权重与教师阈值；若 KD 被关停，logit/feature KD 损失恒为 0。
+  4. 训练日志落盘 `artifacts/kd_training_log.csv`，同时生成包含 Val/Gen 双侧 ROC 的对比图 `figures/kd_roc_comparison.png`，方便复现与审计。
+  5. 性能摘要使用各自的最佳阈值：学生用基线阈值、教师用扫得阈值、KD 学生用蒸馏过程最优阈值，并在 Val/Gen 双侧报告 Miss/FPR/阈值。
+- **效果判断与表征方式**：
+  - 若教师被门控关闭 KD，学生仅做 CE 微调，指标应与基线接近；此时 KD 效果可以通过 “KD 权重=0（教师未被接受）” 的日志明确说明，无需期待性能提升。
+  - 若教师被接受，观测对比图（Val/Gen 双 ROC）与 `artifacts/kd_training_log.csv` 中阈值/指标轨迹，若 KD AUC 与 miss 明显优于基线且与教师趋势一致，则可认定 KD 起效；否则可进一步调整教师质量或 KD 权重。

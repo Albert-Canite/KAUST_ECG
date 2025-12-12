@@ -308,7 +308,7 @@ def train_teacher(args: argparse.Namespace, dataloaders: DatasetBundle, device: 
     teacher = build_teacher(args, device)
     optimizer = Adam(teacher.parameters(), lr=args.lr)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3, verbose=True)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(weight=dataloaders.class_weights)
     best_state = None
     best_val = float("inf")
     patience_counter = 0
@@ -445,9 +445,9 @@ def distill_student(
             loss_ce = ce_loss(logits_s, labels)
             loss_kd = torch.tensor(0.0, device=device)
             loss_feat = torch.tensor(0.0, device=device)
-            if logits_t is not None and teacher_mask is not None and teacher_mask.any():
+            if use_kd and logits_t is not None and teacher_mask is not None and teacher_mask.any():
                 loss_kd = kd_logit_loss(logits_s[teacher_mask], logits_t[teacher_mask], KD_TEMPERATURE)
-            if feat_t is not None and teacher_mask is not None and teacher_mask.any():
+            if use_kd and feat_t is not None and teacher_mask is not None and teacher_mask.any():
                 proj_s = project_features(feat_s[teacher_mask], projector_s)
                 proj_t = project_features(feat_t[teacher_mask], projector_t)
                 loss_feat = F.mse_loss(proj_s, proj_t)
@@ -512,6 +512,19 @@ def distill_student(
     if best_state is not None:
         student.load_state_dict(best_state)
 
+    os.makedirs("artifacts", exist_ok=True)
+    log_path = os.path.join("artifacts", "kd_training_log.csv")
+    with open(log_path, "w") as f:
+        f.write(
+            "epoch,train_loss,val_loss,val_f1,val_miss,val_fpr,gen_f1,gen_miss,gen_fpr,threshold\n"
+        )
+        for row in history:
+            f.write(
+                f"{row['epoch']},{row['train_loss']:.6f},{row['val_loss']:.6f},{row['val_f1']:.6f},{row['val_miss']:.6f},"
+                f"{row['val_fpr']:.6f},{row['gen_f1']:.6f},{row['gen_miss']:.6f},{row['gen_fpr']:.6f},{row['threshold']:.4f}\n"
+            )
+    print(f"Saved KD training log to {log_path}")
+
     torch.save({"student_state_dict": student.state_dict(), "best_threshold": best_threshold}, args.kd_output)
     print(f"Saved distilled student to {args.kd_output}")
     return student, {"history": history, "best_threshold": best_threshold}
@@ -531,22 +544,37 @@ def collect_probs(model: nn.Module, loader: DataLoader, device: torch.device) ->
     return trues, probs
 
 
-def plot_roc_comparison(val_true: List[int], baseline_probs: List[float], teacher_probs: List[float], kd_probs: List[float], out_path: str) -> None:
-    plt.figure(figsize=(6, 5))
-    fpr_s, tpr_s, _ = roc_curve(val_true, baseline_probs)
-    fpr_t, tpr_t, _ = roc_curve(val_true, teacher_probs)
-    fpr_k, tpr_k, _ = roc_curve(val_true, kd_probs)
-    auc_s = auc(fpr_s, tpr_s)
-    auc_t = auc(fpr_t, tpr_t)
-    auc_k = auc(fpr_k, tpr_k)
-    plt.plot(fpr_s, tpr_s, label=f"Student (baseline) AUC={auc_s:.3f}")
-    plt.plot(fpr_t, tpr_t, label=f"Teacher AUC={auc_t:.3f}")
-    plt.plot(fpr_k, tpr_k, label=f"Student (KD) AUC={auc_k:.3f}")
+def plot_roc_comparison(
+    val_true: List[int],
+    val_probs: Tuple[List[float], List[float], List[float]],
+    gen_true: List[int],
+    gen_probs: Tuple[List[float], List[float], List[float]],
+    out_path: str,
+) -> None:
+    plt.figure(figsize=(10, 4))
+
+    val_labels = ["Student (baseline)", "Teacher", "Student (KD)"]
+    gen_labels = val_labels
+    plt.subplot(1, 2, 1)
+    for probs, label in zip(val_probs, val_labels):
+        fpr, tpr, _ = roc_curve(val_true, probs)
+        plt.plot(fpr, tpr, label=f"{label} AUC={auc(fpr, tpr):.3f}")
     plt.plot([0, 1], [0, 1], "k--", alpha=0.3)
     plt.xlabel("False Positive Rate")
     plt.ylabel("True Positive Rate")
-    plt.title("ROC Comparison")
+    plt.title("Val ROC Comparison")
     plt.legend()
+
+    plt.subplot(1, 2, 2)
+    for probs, label in zip(gen_probs, gen_labels):
+        fpr, tpr, _ = roc_curve(gen_true, probs)
+        plt.plot(fpr, tpr, label=f"{label} AUC={auc(fpr, tpr):.3f}")
+    plt.plot([0, 1], [0, 1], "k--", alpha=0.3)
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("Gen ROC Comparison")
+    plt.legend()
+
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.tight_layout()
     plt.savefig(out_path)
@@ -577,42 +605,13 @@ def main() -> None:
         print("Teacher checkpoint missing. Training teacher...")
         teacher = train_teacher(args, loaders, device)
 
-    # Evaluate teacher and adapt KD strength if generalization gap is large
+    # Evaluate teacher, sweep thresholds, and gate KD based on gen performance vs student baseline
     teacher_val_loss, teacher_val_metrics, teacher_val_true, teacher_val_probs = evaluate_with_probs(
         teacher, loaders.val_loader, device
     )
     teacher_gen_loss, teacher_gen_metrics, teacher_gen_true, teacher_gen_probs = evaluate_with_probs(
         teacher, loaders.gen_loader, device
     )
-    teacher_gap = teacher_gen_metrics["miss_rate"] - teacher_val_metrics["miss_rate"]
-    kd_alpha_eff = KD_ALPHA
-    kd_beta_eff = KD_BETA
-    use_kd = True
-    student_better_gen = teacher_gen_metrics["miss_rate"] > baseline["gen"][1]["miss_rate"]
-    student_better_val = teacher_val_metrics["miss_rate"] > baseline["val"][1]["miss_rate"]
-    teacher_gen_over_student = (
-        teacher_gen_metrics["miss_rate"] - baseline["gen"][1]["miss_rate"] > KD_TEACHER_GEN_MARGIN
-    )
-    if student_better_gen and student_better_val:
-        kd_alpha_eff = 0.0
-        kd_beta_eff = 0.0
-        use_kd = False
-        print(
-            "Teacher underperforms baseline on both val/gen miss; disabling KD (fine-tuning student only)."
-        )
-    elif teacher_gen_over_student:
-        kd_alpha_eff = 0.0
-        kd_beta_eff = 0.0
-        use_kd = False
-        print(
-            "Teacher generalization miss above baseline; disabling KD to avoid overfitting to weaker teacher."
-        )
-    elif teacher_gap > KD_TEACHER_GAP_TOL:
-        kd_alpha_eff = KD_ALPHA * 0.5
-        kd_beta_eff = KD_BETA * 0.5
-        print(
-            f"Teacher generalization miss gap {teacher_gap*100:.2f}% exceeds {KD_TEACHER_GAP_TOL*100:.1f}% -> down-weight KD logits/features to {kd_alpha_eff:.3f}/{kd_beta_eff:.3f}"
-        )
 
     teacher_thr, teacher_val_thr_metrics, teacher_gen_thr_metrics = sweep_thresholds_blended(
         teacher_val_true,
@@ -627,6 +626,30 @@ def main() -> None:
         miss_target=args.threshold_target_miss,
         fpr_cap=args.threshold_max_fpr,
     )
+
+    student_gen_miss = baseline["gen"][1]["miss_rate"]
+    student_gen_fpr = baseline["gen"][1]["fpr"]
+    teacher_gen_miss_at_thr = teacher_gen_thr_metrics["miss_rate"]
+    teacher_gen_fpr_at_thr = teacher_gen_thr_metrics["fpr"]
+
+    kd_alpha_eff = KD_ALPHA
+    kd_beta_eff = KD_BETA
+    use_kd = True
+
+    if teacher_gen_miss_at_thr >= student_gen_miss or teacher_gen_fpr_at_thr > max(
+        student_gen_fpr, args.threshold_max_fpr
+    ):
+        kd_alpha_eff = 0.0
+        kd_beta_eff = 0.0
+        use_kd = False
+        print(
+            "Teacher underperforms student on generalization miss/FPR thresholds; disabling KD (CE fine-tune only)."
+        )
+    else:
+        print(
+            f"Teacher accepted for KD (thr={teacher_thr:.2f}) with Gen Miss {teacher_gen_miss_at_thr*100:.2f}% / FPR {teacher_gen_fpr_at_thr*100:.2f}%"
+        )
+
     print(
         f"Teacher -> Val loss {teacher_val_loss:.4f} Miss {teacher_val_metrics['miss_rate']*100:.2f}% FPR {teacher_val_metrics['fpr']*100:.2f}% | "
         f"Gen Miss {teacher_gen_metrics['miss_rate']*100:.2f}% FPR {teacher_gen_metrics['fpr']*100:.2f}%"
@@ -649,12 +672,21 @@ def main() -> None:
         teacher_threshold=teacher_thr,
     )
 
-    # Collect probabilities for comparison on validation set
-    val_true, base_probs = baseline["val"][2], baseline["val"][3]
-    _, teacher_probs = collect_probs(teacher, loaders.val_loader, device)
-    _, kd_probs = collect_probs(kd_student, loaders.val_loader, device)
-    plot_roc_comparison(val_true, base_probs, teacher_probs, kd_probs, os.path.join("figures", "kd_roc_comparison.png"))
-    print("Saved ROC comparison to ./figures/kd_roc_comparison.png")
+    # Collect probabilities for comparison on validation and generalization sets
+    val_true, base_val_probs = baseline["val"][2], baseline["val"][3]
+    gen_true, base_gen_probs = baseline["gen"][2], baseline["gen"][3]
+    _, teacher_val_probs = collect_probs(teacher, loaders.val_loader, device)
+    _, teacher_gen_probs = collect_probs(teacher, loaders.gen_loader, device)
+    _, kd_val_probs = collect_probs(kd_student, loaders.val_loader, device)
+    _, kd_gen_probs = collect_probs(kd_student, loaders.gen_loader, device)
+    plot_roc_comparison(
+        val_true,
+        (base_val_probs, teacher_val_probs, kd_val_probs),
+        gen_true,
+        (base_gen_probs, teacher_gen_probs, kd_gen_probs),
+        os.path.join("figures", "kd_roc_comparison.png"),
+    )
+    print("Saved ROC comparison (val/gen) to ./figures/kd_roc_comparison.png")
 
     # Evaluate distilled student
     kd_threshold = kd_info.get("best_threshold", 0.5)
@@ -663,10 +695,10 @@ def main() -> None:
 
     print("\nPerformance Summary (Val set):")
     print(
-        f"  Baseline Student -> Miss {baseline['val'][1]['miss_rate']*100:.2f}% | FPR {baseline['val'][1]['fpr']*100:.2f}%"
+        f"  Baseline Student -> Miss {baseline['val'][1]['miss_rate']*100:.2f}% | FPR {baseline['val'][1]['fpr']*100:.2f}% | Thr {base_threshold:.2f}"
     )
     print(
-        f"  Teacher -> Loss {teacher_val_loss:.4f} Miss {teacher_val_metrics['miss_rate']*100:.2f}% | FPR {teacher_val_metrics['fpr']*100:.2f}%"
+        f"  Teacher -> Loss {teacher_val_loss:.4f} Miss {teacher_val_thr_metrics['miss_rate']*100:.2f}% | FPR {teacher_val_thr_metrics['fpr']*100:.2f}% | Thr {teacher_thr:.2f}"
     )
     print(
         f"  Student (KD) -> Loss {kd_val_loss:.4f} Miss {kd_val_metrics['miss_rate']*100:.2f}% | FPR {kd_val_metrics['fpr']*100:.2f}%"
@@ -675,11 +707,11 @@ def main() -> None:
 
     print("\nPerformance Summary (Generalization set):")
     print(
-        f"  Baseline Student -> Miss {baseline['gen'][1]['miss_rate']*100:.2f}% | FPR {baseline['gen'][1]['fpr']*100:.2f}%"
+        f"  Baseline Student -> Miss {baseline['gen'][1]['miss_rate']*100:.2f}% | FPR {baseline['gen'][1]['fpr']*100:.2f}% | Thr {base_threshold:.2f}"
     )
-    teacher_gen_loss, teacher_gen_metrics, _, _ = evaluate_with_probs(teacher, loaders.gen_loader, device)
+    teacher_gen_loss, teacher_gen_metrics, _, _ = evaluate_with_probs(teacher, loaders.gen_loader, device, threshold=teacher_thr)
     print(
-        f"  Teacher -> Loss {teacher_gen_loss:.4f} Miss {teacher_gen_metrics['miss_rate']*100:.2f}% | FPR {teacher_gen_metrics['fpr']*100:.2f}%"
+        f"  Teacher -> Loss {teacher_gen_loss:.4f} Miss {teacher_gen_metrics['miss_rate']*100:.2f}% | FPR {teacher_gen_metrics['fpr']*100:.2f}% | Thr {teacher_thr:.2f}"
     )
     print(
         f"  Student (KD) -> Loss {kd_gen_loss:.4f} Miss {kd_gen_metrics['miss_rate']*100:.2f}% | FPR {kd_gen_metrics['fpr']*100:.2f}%"
