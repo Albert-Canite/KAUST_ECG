@@ -31,6 +31,14 @@ KD_EPOCHS = 30
 KD_FREEZE_ENCODER = True
 
 
+def _add_bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
+    """Backward-compatible boolean flags with --name / --no-name."""
+
+    parser.add_argument(f"--{name}", dest=name, action="store_true", help=f"Enable {help_text}")
+    parser.add_argument(f"--no-{name}", dest=name, action="store_false", help=f"Disable {help_text}")
+    parser.set_defaults(**{name: default})
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Knowledge distillation for ECG student model")
     parser.add_argument("--data_path", type=str, default="E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/")
@@ -42,6 +50,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout_rate", type=float, default=0.2)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
+    _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
+    _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
     parser.add_argument("--teacher_path", type=str, default=os.path.join("saved_models", "teacher_model.pth"))
     parser.add_argument("--student_path", type=str, default=os.path.join("saved_models", "student_model.pth"))
     parser.add_argument("--kd_output", type=str, default=os.path.join("saved_models", "student_KD.pth"))
@@ -91,6 +101,21 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
     return DatasetBundle(train_loader, val_loader, gen_loader, (va_x, va_y), (gen_x, gen_y))
+
+
+def hydrate_student_args(base_args: argparse.Namespace, student_config: argparse.Namespace) -> argparse.Namespace:
+    """Ensure KD args carry student build hyperparameters even if not passed via CLI."""
+
+    merged = argparse.Namespace(**vars(base_args))
+    for field, default in [
+        ("dropout_rate", base_args.dropout_rate),
+        ("num_mlp_layers", base_args.num_mlp_layers),
+        ("constraint_scale", base_args.constraint_scale),
+        ("use_value_constraint", True),
+        ("use_tanh_activations", False),
+    ]:
+        setattr(merged, field, getattr(student_config, field, default))
+    return merged
 
 
 class BasicBlock1D(nn.Module):
@@ -253,7 +278,7 @@ def train_teacher(args: argparse.Namespace, dataloaders: DatasetBundle, device: 
     return teacher
 
 
-def load_student(args: argparse.Namespace, device: torch.device) -> Tuple[nn.Module, float]:
+def load_student(args: argparse.Namespace, device: torch.device) -> Tuple[nn.Module, float, argparse.Namespace]:
     if not os.path.exists(args.student_path):
         raise FileNotFoundError(f"Student checkpoint not found at {args.student_path}")
     ckpt = torch.load(args.student_path, map_location=device)
@@ -266,7 +291,7 @@ def load_student(args: argparse.Namespace, device: torch.device) -> Tuple[nn.Mod
     student = build_student(config, device)
     student.load_state_dict(ckpt["student_state_dict"])
     threshold = float(ckpt.get("best_threshold", 0.5))
-    return student, threshold
+    return student, threshold, config
 
 
 def baseline_evaluation(model: nn.Module, loaders: DatasetBundle, device: torch.device, threshold: float) -> Dict[str, object]:
@@ -283,7 +308,9 @@ def baseline_evaluation(model: nn.Module, loaders: DatasetBundle, device: torch.
     }
 
 
-def distill_student(args: argparse.Namespace, loaders: DatasetBundle, teacher: nn.Module, device: torch.device, init_student: nn.Module) -> Tuple[nn.Module, Dict[str, object]]:
+def distill_student(
+    args: argparse.Namespace, loaders: DatasetBundle, teacher: nn.Module, device: torch.device, init_student: nn.Module
+) -> Tuple[nn.Module, Dict[str, object]]:
     teacher.eval()
     for p in teacher.parameters():
         p.requires_grad = False
@@ -386,7 +413,8 @@ def main() -> None:
 
     loaders = build_dataloaders(args, device)
 
-    student_base, base_threshold = load_student(args, device)
+    student_base, base_threshold, student_config = load_student(args, device)
+    args = hydrate_student_args(args, student_config)
     baseline = baseline_evaluation(student_base, loaders, device, base_threshold)
 
     # Teacher handling
