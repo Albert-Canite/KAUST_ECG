@@ -30,6 +30,9 @@ KD_LR = 5e-4
 KD_EPOCHS = 30
 KD_FREEZE_ENCODER = True
 KD_MISS_WEIGHT = 1.35  # extra weight on positives to curb miss rate
+KD_POS_MARGIN = 0.6  # encourage positive logits to exceed this probability
+KD_POS_PENALTY = 0.35  # scale for miss-focused auxiliary penalty
+KD_TEACHER_GAP_TOL = 0.05  # if teacher overfits, down-weight its logits
 
 
 def _add_bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
@@ -66,17 +69,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--student_path", type=str, default=os.path.join("saved_models", "student_model.pth"))
     parser.add_argument("--kd_output", type=str, default=os.path.join("saved_models", "student_KD.pth"))
     parser.add_argument("--skip_teacher_train", action="store_true", help="Skip teacher training if checkpoint missing")
+    parser.add_argument(
+        "--kd_gen_mix_ratio",
+        type=float,
+        default=0.35,
+        help="Fraction of generalization samples to mix into KD training (0-1)",
+    )
     return parser.parse_args()
 
 
 @dataclass
 class DatasetBundle:
     train_loader: DataLoader
+    kd_loader: DataLoader
     val_loader: DataLoader
     gen_loader: DataLoader
     val_arrays: Tuple[np.ndarray, np.ndarray]
     gen_arrays: Tuple[np.ndarray, np.ndarray]
     class_weights: torch.Tensor
+    kd_class_weights: torch.Tensor
 
 
 def build_dataloaders(args: argparse.Namespace, device: torch.device) -> DatasetBundle:
@@ -114,7 +125,48 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
     class_weights = compute_class_weights(tr_y, abnormal_boost=args.class_weight_abnormal, max_ratio=args.class_weight_max_ratio).to(
         device
     )
-    return DatasetBundle(train_loader, val_loader, gen_loader, (va_x, va_y), (gen_x, gen_y), class_weights)
+
+    # Build a KD loader that mixes in part of the generalization distribution to reduce miss drift
+    if args.kd_gen_mix_ratio > 0:
+        mix_k = int(len(gen_x) * args.kd_gen_mix_ratio)
+        kd_x = np.concatenate([tr_x, gen_x[:mix_k]], axis=0)
+        kd_y = np.concatenate([tr_y, gen_y[:mix_k]], axis=0)
+    else:
+        kd_x, kd_y = tr_x, tr_y
+    kd_dataset = ECGBeatDataset(kd_x, kd_y)
+    kd_sampler = None
+    kd_batch_sampler = None
+    kd_abnormal_ratio = float(np.mean(kd_y)) if len(kd_y) > 0 else 0.0
+    if kd_abnormal_ratio < 0.35:
+        kd_sampler = make_weighted_sampler(kd_y, abnormal_boost=sampler_boost)
+    if kd_abnormal_ratio < 0.45:
+        try:
+            kd_batch_sampler = BalancedBatchSampler(kd_y, batch_size=args.batch_size)
+        except ValueError:
+            kd_batch_sampler = None
+    if kd_batch_sampler is not None:
+        kd_loader = DataLoader(kd_dataset, batch_sampler=kd_batch_sampler)
+    else:
+        kd_loader = DataLoader(
+            kd_dataset,
+            batch_size=args.batch_size,
+            shuffle=kd_sampler is None,
+            sampler=kd_sampler,
+        )
+    kd_class_weights = compute_class_weights(
+        kd_y, abnormal_boost=args.class_weight_abnormal * KD_MISS_WEIGHT, max_ratio=args.class_weight_max_ratio
+    ).to(device)
+
+    return DatasetBundle(
+        train_loader,
+        kd_loader,
+        val_loader,
+        gen_loader,
+        (va_x, va_y),
+        (gen_x, gen_y),
+        class_weights,
+        kd_class_weights,
+    )
 
 
 def hydrate_student_args(base_args: argparse.Namespace, student_config: argparse.Namespace) -> argparse.Namespace:
@@ -332,7 +384,12 @@ def baseline_evaluation(model: nn.Module, loaders: DatasetBundle, device: torch.
 
 
 def distill_student(
-    args: argparse.Namespace, loaders: DatasetBundle, teacher: nn.Module, device: torch.device, init_student: nn.Module
+    args: argparse.Namespace,
+    loaders: DatasetBundle,
+    teacher: nn.Module,
+    device: torch.device,
+    init_student: nn.Module,
+    kd_alpha: float = KD_ALPHA,
 ) -> Tuple[nn.Module, Dict[str, object]]:
     teacher.eval()
     for p in teacher.parameters():
@@ -353,9 +410,7 @@ def distill_student(
     params = list(filter(lambda p: p.requires_grad, student.parameters())) + list(projector_s.parameters()) + list(projector_t.parameters())
     optimizer = Adam(params, lr=KD_LR)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3, verbose=True)
-    class_weights = loaders.class_weights.clone()
-    if class_weights.numel() >= 2:
-        class_weights[1] = class_weights[1] * KD_MISS_WEIGHT
+    class_weights = loaders.kd_class_weights.clone()
     ce_loss = nn.CrossEntropyLoss(weight=class_weights)
 
     history: List[Dict[str, float]] = []
@@ -367,7 +422,7 @@ def distill_student(
         student.train()
         running_loss = 0.0
         total = 0
-        for signals, labels in loaders.train_loader:
+        for signals, labels in loaders.kd_loader:
             signals, labels = signals.to(device), labels.to(device)
             optimizer.zero_grad()
             logits_s, feat_s = student(signals)
@@ -378,7 +433,12 @@ def distill_student(
             proj_s = project_features(feat_s, projector_s)
             proj_t = project_features(feat_t, projector_t)
             loss_feat = F.mse_loss(proj_s, proj_t)
-            loss = loss_ce + KD_ALPHA * loss_kd + KD_BETA * loss_feat
+            prob_pos = torch.softmax(logits_s, dim=1)[:, 1]
+            pos_mask = labels == 1
+            miss_focus = torch.tensor(0.0, device=device)
+            if pos_mask.any():
+                miss_focus = F.relu(KD_POS_MARGIN - prob_pos[pos_mask]).mean()
+            loss = loss_ce + kd_alpha * loss_kd + KD_BETA * loss_feat + KD_POS_PENALTY * miss_focus
             loss.backward()
             torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
             optimizer.step()
@@ -403,6 +463,7 @@ def distill_student(
         )
 
         blended_miss = (1 - args.generalization_score_weight) * val_at_thr["miss_rate"] + args.generalization_score_weight * gen_at_thr["miss_rate"]
+        blended_fpr = (1 - args.generalization_score_weight) * val_at_thr["fpr"] + args.generalization_score_weight * gen_at_thr["fpr"]
         scheduler.step(val_loss)
         history.append(
             {
@@ -424,8 +485,9 @@ def distill_student(
             f"Gen F1 {gen_at_thr['f1']:.3f} Miss {gen_at_thr['miss_rate']*100:.2f}% FPR {gen_at_thr['fpr']*100:.2f}% | Thr {thr:.2f}"
         )
 
-        if blended_miss < best_miss:
-            best_miss = blended_miss
+        miss_fpr_score = blended_miss + 0.35 * blended_fpr
+        if miss_fpr_score < best_miss:
+            best_miss = miss_fpr_score
             best_state = student.state_dict()
             best_threshold = thr
 
@@ -496,16 +558,24 @@ def main() -> None:
             raise FileNotFoundError("Teacher checkpoint missing and training skipped.")
         print("Teacher checkpoint missing. Training teacher...")
         teacher = train_teacher(args, loaders, device)
-        # Evaluate teacher after training
-        val_loss_t, val_metrics_t, _, _ = evaluate_with_probs(teacher, loaders.val_loader, device)
-        gen_loss_t, gen_metrics_t, _, _ = evaluate_with_probs(teacher, loaders.gen_loader, device)
+
+    # Evaluate teacher and adapt KD strength if generalization gap is large
+    teacher_val_loss, teacher_val_metrics, _, _ = evaluate_with_probs(teacher, loaders.val_loader, device)
+    teacher_gen_loss, teacher_gen_metrics, _, _ = evaluate_with_probs(teacher, loaders.gen_loader, device)
+    teacher_gap = teacher_gen_metrics["miss_rate"] - teacher_val_metrics["miss_rate"]
+    kd_alpha_eff = KD_ALPHA
+    if teacher_gap > KD_TEACHER_GAP_TOL:
+        kd_alpha_eff = KD_ALPHA * 0.5
         print(
-            f"Teacher -> Val loss {val_loss_t:.4f} Miss {val_metrics_t['miss_rate']*100:.2f}% FPR {val_metrics_t['fpr']*100:.2f}% | "
-            f"Gen Miss {gen_metrics_t['miss_rate']*100:.2f}% FPR {gen_metrics_t['fpr']*100:.2f}%"
+            f"Teacher generalization miss gap {teacher_gap*100:.2f}% exceeds {KD_TEACHER_GAP_TOL*100:.1f}% -> down-weight KD logits to {kd_alpha_eff:.3f}"
         )
+    print(
+        f"Teacher -> Val loss {teacher_val_loss:.4f} Miss {teacher_val_metrics['miss_rate']*100:.2f}% FPR {teacher_val_metrics['fpr']*100:.2f}% | "
+        f"Gen Miss {teacher_gen_metrics['miss_rate']*100:.2f}% FPR {teacher_gen_metrics['fpr']*100:.2f}%"
+    )
 
     # Distillation
-    kd_student, kd_info = distill_student(args, loaders, teacher, device, student_base)
+    kd_student, kd_info = distill_student(args, loaders, teacher, device, student_base, kd_alpha=kd_alpha_eff)
 
     # Collect probabilities for comparison on validation set
     val_true, base_probs = baseline["val"][2], baseline["val"][3]
@@ -523,7 +593,6 @@ def main() -> None:
     print(
         f"  Baseline Student -> Miss {baseline['val'][1]['miss_rate']*100:.2f}% | FPR {baseline['val'][1]['fpr']*100:.2f}%"
     )
-    teacher_val_loss, teacher_val_metrics, _, _ = evaluate_with_probs(teacher, loaders.val_loader, device)
     print(
         f"  Teacher -> Loss {teacher_val_loss:.4f} Miss {teacher_val_metrics['miss_rate']*100:.2f}% | FPR {teacher_val_metrics['fpr']*100:.2f}%"
     )
