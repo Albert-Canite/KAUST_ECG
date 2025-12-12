@@ -198,6 +198,18 @@
   3. **召回救火只看验证**：自适应权重/采样的触发逻辑只依赖验证 miss/FPR，泛化 miss 高时没有反馈回训练循环。
 - **修复措施（本轮新增）**：
   - **引入泛化参与的早停评分**：新增 `--use_generalization_score/--no-use_generalization_score`（默认开）和 `--generalization_score_weight`（默认 0.3），每个 epoch 以验证最优阈值在泛化集上评估 `Score=f1+sensitivity-0.5*FPR`，与验证 Score 按权重线性融合驱动早停与最佳模型保存，降低验证过拟合。
+
+## KD V1 DEBUG（最新日志：Teacher Val miss≈3.4% / Gen miss≈9.8%；KD 学生 Val miss≈5.0% FPR≈12.6%，Gen miss≈7.1% FPR≈4.9%，阈值≈0.26）
+- **问题与假设**：
+  - 教师在验证集 miss 很低，但泛化 miss 提升 6%+，存在过拟合；直接蒸馏可能将“过保守”的阈值信号传递给学生，导致 FPR 上升。
+  - KD 训练仅使用训练集，未覆盖泛化分布，学生在泛化集 miss 改善有限，FPR 却增大。
+  - 损失函数缺少显式 miss 限制，KD logits 与特征对齐可能压制正类概率，提升漏诊。
+- **代码改动**：
+  1) **KD 训练混入泛化数据**：新增 `kd_loader`，按 `--kd_gen_mix_ratio`（默认 0.35）截取泛化样本加入训练，`kd_class_weights` 也基于混合分布计算，以减轻分布偏差导致的漏诊。
+  2) **教师过拟合自适应**：加载教师后同时评估验证/泛化 miss，若泛化 miss 比验证高超过 `KD_TEACHER_GAP_TOL`（5%），自动将 KD logits 权重减半，避免弱泛化教师拖低学生。
+  3) **显式 miss 惩罚**：在 KD 循环中对正类概率添加 margin 惩罚（目标 ≥0.6，权重 `KD_POS_PENALTY`），与 CE/KD/MSE 并行，优先拉升正类置信度、降低漏诊。
+  4) **选模兼顾 FPR**：最佳模型不再仅看 blended miss，改为 `miss + 0.35*FPR`，防止为压 miss 过度抬升误报；阈值依旧由验证/泛化混合扫描得到。
+  5) **日志补充**：教师泛化 gap、KD logits 实际权重将在控制台提示，便于快速判断是否触发降权。
   - **训练曲线增加泛化轨迹**：训练曲线图中加入 Gen F1/Miss/FPR 轨迹，便于直观看到验证-泛化的分布差距与收敛状态。
 - **后续建议**：
   - 若泛化 miss 仍高，可提高 `--generalization_score_weight` 到 0.4–0.5，使早停更重视泛化；或在阈值搜索时调低 `--threshold_target_miss`（如 0.10）以压漏诊。
@@ -403,3 +415,21 @@
 - **异常类强化但仍限幅**：默认 `class_weight_abnormal` 调低到 **1.30**、采样倍率默认 **1.1**，保持比值上限 2.0；`--force_balanced_batches` 仍可在异常占比不足时强制 1:1 batch 采样。
 - **阈值搜索稳健化**：`sweep_thresholds_blended` 在约束无可行解时优先选择 miss/FPR 违约最小的候选，避免极低阈值导致 FPR=100% 的退化；默认硬约束收紧到 miss/FPR≤10%，FPR 惩罚、阈值中心和正则默认值下调（中心 0.78、惩罚 0.9、正则 0.02），减少不必要的高阈值或过强偏置。
 - **可控实验开关**：保留 `--threshold_fpr_penalty`、`--threshold_center`、`--threshold_reg` 与 `--force_balanced_batches` 供调优，在当前更温和的默认值基础上按需加强/减弱。
+## KD V1 DEBUG（教师泛化劣化 & 学生未获提升）
+- **现象**：教师验证 miss≈3.4%、FPR≈0.18%，但泛化 miss≈9.8%（高于学生基线 8.1%）；KD 后学生验证 miss≈7.0%、泛化 miss≈8.3%，与基线相比提升有限甚至略降。
+- **原因判断**：教师在泛化集上低于学生，蒸馏信号被混入泛化分布后可能拉低学生决策；KD 过程中未对教师置信度和正确性过滤，学生被误导。
+- **本轮修改**：
+  - **教师门控**：若教师泛化 miss 超过学生基线（可调 `KD_TEACHER_GEN_MARGIN`），直接关闭 KD，仅做 CE 微调；若仅存在泛化过拟合，则按 gap 自动降权。
+  - **阈值对齐**：对教师也执行验证/泛化混合阈值搜索，供蒸馏和日志使用，避免用固定 0.5 误判教师质量。
+  - **置信/正确性掩码**：蒸馏时仅对教师高置信（`KD_TEACHER_CONF`）且预测正确的样本计算 KD logits/特征损失，其余样本仅用 CE，避免教师在分布外误导学生。
+
+### KD V1 DEBUG 追加说明（日志与双侧 ROC 完整记录）
+- **操作改动**：
+  1. 教师训练改用 `dataloaders.class_weights` 做加权 CE，与学生训练保持一致。
+  2. 在主流程中先以 `evaluate_with_probs` 获取教师在 Val/Gen 的概率，再用 `sweep_thresholds_blended` 求得教师最优阈值；若教师在 Gen 上的 miss≥学生基线或 FPR 超过 `max(student_gen_fpr, threshold_max_fpr)`，则将 KD 权重置 0、仅做 CE 微调，并在日志打印门控原因。
+  3. 蒸馏时传入上述动态 KD 权重与教师阈值；若 KD 被关停，logit/feature KD 损失恒为 0。
+  4. 训练日志落盘 `artifacts/kd_training_log.csv`，同时生成包含 Val/Gen 双侧 ROC 的对比图 `figures/kd_roc_comparison.png`，方便复现与审计。
+  5. 性能摘要使用各自的最佳阈值：学生用基线阈值、教师用扫得阈值、KD 学生用蒸馏过程最优阈值，并在 Val/Gen 双侧报告 Miss/FPR/阈值。
+- **效果判断与表征方式**：
+  - 若教师被门控关闭 KD，学生仅做 CE 微调，指标应与基线接近；此时 KD 效果可以通过 “KD 权重=0（教师未被接受）” 的日志明确说明，无需期待性能提升。
+  - 若教师被接受，观测对比图（Val/Gen 双 ROC）与 `artifacts/kd_training_log.csv` 中阈值/指标轨迹，若 KD AUC 与 miss 明显优于基线且与教师趋势一致，则可认定 KD 起效；否则可进一步调整教师质量或 KD 权重。

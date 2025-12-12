@@ -1,75 +1,65 @@
-# Segment-Aware MIT-BIH ECG Classification
+# MIT-BIH Segment-Aware ECG Classification & Distillation
 
-This project provides a fully configurable training pipeline for single-lead beat classification on the MIT-BIH Arrhythmia Database using a lightweight segment-aware student model and an optional ResNet18-based teacher for knowledge distillation. Value-constrained layers and activation scaling are available to bound weights/activations for deployment in limited numeric domains.
+Single-lead beat classification on the MIT-BIH Arrhythmia Database with a compact segment-aware student and an optional 1D ResNet teacher for knowledge distillation. The codebase provides:
 
-## Repository Layout
-- `train.py` – Training entrypoint with argument-parsable hyperparameters, early stopping, LR scheduling, class weighting, class-rebalancing sampler, and optional distillation with teacher quality checks.
-- `data.py` – MIT-BIH loading, per-beat preprocessing (mean removal + max-abs scaling to `[-1, 1]`), and dataset split utilities.
-- `models/student.py` – Segment-aware student encoder that slices beats into P/QRS/T/Global windows, produces eight 4-D tokens, feeds a configurable photonic MLP, and classifies beats.
-- `models/teacher.py` – 1D ResNet18 teacher producing logits and an intermediate embedding for distillation.
-- `constraints.py` – Tanh-reparameterized Conv1d/Linear layers plus activation scaling helpers for bounded weights/inputs.
-- `utils.py` – Class-weight computation, confusion metrics, and KD logit loss helpers.
+- `train.py`: baseline student training with class rebalancing, recall-biased threshold sweeps, and validation/generalization reporting.
+- `KD.py`: end-to-end distillation entrypoint that reuses the same dataloaders/model builder, auto-trains or loads a teacher, gates KD by teacher quality, logs training, and plots ROC comparisons for both validation and generalization splits.
+- `models/`: segment-aware student definition and constrained layers for bounded weights/activations.
 
-## Installation
-1. Install Python 3.9+ and PyTorch (with CUDA if available).
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt  # if present
-   pip install wfdb numpy torch seaborn matplotlib
-   ```
+## Data & Preprocessing
+- Dataset: MIT-BIH Arrhythmia Database. Set `--data_path` to the folder containing `*.dat`/`*.hea` files.
+- Beats: 360-sample windows centered on annotations; per-beat mean removal and max-abs scaling to `[-1, 1]` (see `data.py`).
+- Splits: `TRAIN_RECORDS` vs. `GENERALIZATION_RECORDS` (hold-out) with a 80/20 train/val split inside `TRAIN_RECORDS`.
 
-## Data
-Download the MIT-BIH Arrhythmia Database and set `--data_path` to the folder containing record files (e.g., `100.dat`, `100.hea`). Each beat is extracted as a 360-sample window centered on annotations and normalized per beat.
+## Models & Parameter Counts
+### Student (models/student.py)
+- Inputs: `(batch, 1, 360)` sliced into P/QRS/T/global segments.
+- Encoders: four `Conv1d(1, 4, kernel_size=4, stride=1)` blocks (value-constrained by default) → pooled into 8 tokens of dim 4.
+- MLP head: `num_mlp_layers` × `Linear(4, 4)` with ReLU/tanh + token dropout, followed by mean pooling and dropout.
+- Classifier: `Linear(4, 2)`.
+- Minimum depth: **now allows a single MLP layer** (`num_mlp_layers=1` keeps one block; previously clamped to 2).
+- Parameter counts (includes biases):
+  - `num_mlp_layers=1`: **110** parameters.
+  - `num_mlp_layers=2`: **130** parameters.
+  - `num_mlp_layers=3` (default): **150** parameters.
 
-## Training
-### One-click / default run
-Simply run the script (e.g., click "Run" in an IDE or execute `python train.py`). The default **`strategy_preset=stable`** keeps KD, adaptive reweighting, and weighted sampling **off** to avoid collapse; you can switch to `balanced` (mild class weights + sampler) or `full` (KD + adaptive reweighting) via `--strategy_preset`. If no teacher checkpoint is provided and a preset with KD is selected, a compact ResNet18-1D teacher is auto-trained (15 epochs by default), validated, and only used for KD if it meets minimal F1/TPR thresholds; otherwise KD is disabled to avoid harming recall. Checkpoints and the auto-trained teacher are saved under `saved_models/`.
+### Teacher (KD.py)
+- Architecture: 1D ResNet18 variant with a (Conv-BN-ReLU-MaxPool) stem, four residual stages [32, 64, 128, 256] with two BasicBlock1D units each, global average pooling, and `Linear(256, 2)` classifier.
+- Parameters: **964,002**.
+- Outputs logits and a pooled embedding for feature-level KD.
 
-### Command-line customization
-- Basic student-only training:
-  ```bash
-  python train.py --data_path /path/to/mit-bih --max_epochs 90 --strategy_preset stable
-  ```
+## Baseline Training (`train.py`)
+- Class imbalance handling: per-epoch class weights from `compute_class_weights`; optional weighted/balanced samplers triggered when abnormal ratio is low.
+- Objective & optimization: cross-entropy, `Adam` with `ReduceLROnPlateau` on validation loss; gradient clipping to 1.0.
+- Threshold tuning: `sweep_thresholds_blended` sweeps candidate thresholds to satisfy `miss <= threshold_target_miss` and `fpr <= threshold_max_fpr`, blending validation/generalization metrics via `generalization_score_weight` and recall/miss penalties. The best threshold is stored in the checkpoint and reused for reporting.
+- Metrics: loss, F1, miss rate, FPR on validation and generalization splits each epoch; final probabilities are persisted for offline analysis.
+- Checkpoints: saved to `saved_models/student_model.pth` with configuration and best threshold.
 
-- Knowledge distillation with an existing teacher:
-  ```bash
-  python train.py --data_path /path/to/mit-bih --strategy_preset full \
-    --teacher_checkpoint /path/to/teacher.pth --teacher_embedding_dim 128 \
-    --kd_temperature 2.0 --kd_d 16 --alpha 1.0 --beta 1.0 --gamma 1.0
-  ```
+### Example
+```bash
+python train.py --data_path /path/to/mit-bih --batch_size 128 --num_mlp_layers 1 --dropout_rate 0.2 \
+  --threshold_target_miss 0.10 --threshold_max_fpr 0.10
+```
 
-- Enable bounded-weight/value pipeline:
-  ```bash
-  python train.py --data_path /path/to/mit-bih --use_value_constraint --use_tanh_activations \
-    --constraint_scale 1.0 --dropout_rate 0.2
-  ```
+## Knowledge Distillation (`KD.py`)
+- Baseline evaluation: loads `student_model.pth`, rebuilds the student with its saved config, and reports baseline metrics on val/gen with their tuned threshold.
+- Teacher: builds `ResNet1D18`; trains with class-weighted cross-entropy if `teacher_model.pth` is absent, otherwise loads it. Teacher thresholds are swept on both val/gen to pick `teacher_thr`.
+- KD gating: compares teacher generalization miss/FPR at `teacher_thr` against the baseline student. If teacher miss is higher or FPR exceeds `max(student_gen_fpr, threshold_max_fpr)`, KD losses are disabled; otherwise KD proceeds. Effective KD weights (`kd_alpha`, `kd_beta`) and `use_kd` are printed.
+- Losses: cross-entropy with positive upweighting plus optional logit KL (temperature-scaled) and feature MSE distillation. KD can be toggled off dynamically (`use_kd=False`) without changing CE training.
+- Logging & artifacts: per-epoch KD metrics written to `artifacts/kd_training_log.csv`; ROC curves for validation and generalization (baseline student vs. teacher vs. KD student) saved to `figures/kd_roc_comparison.png`.
+- Outputs: distilled checkpoint `saved_models/student_KD.pth` with its own best threshold from the KD run.
 
-Early stopping monitors a recall-biased score (`F1 + 1.5*sensitivity - FPR`) with configurable patience (`--patience`, default 25) and a minimum epoch guard (`--min_epochs`, default 25). You can blend validation and generalization scores for the stopping criterion via `--use_generalization_score/--no-use_generalization_score` and `--generalization_score_weight` (default 0.3) to reduce validation overfitting. Learning-rate scheduling uses `ReduceLROnPlateau` on the validation loss (`--scheduler_patience`, default 3, `factor=0.5`). Gradients are clipped to `max_norm=1.0`.
+### Example
+```bash
+python KD.py --data_path /path/to/mit-bih --student_path saved_models/student_model.pth \
+  --teacher_path saved_models/teacher_model.pth --kd_gen_mix_ratio 0.35 --num_mlp_layers 1
+```
 
-**Threshold tuning**: each validation pass sweeps a dense grid plus probability quantiles in `[0.05, 0.95]`, first filtering thresholds that satisfy `miss <= --threshold_target_miss` (default 0.12) and `fpr <= --threshold_max_fpr` (default 0.20). Among feasible candidates it maximizes `F1 + 1.5*sensitivity - FPR`; if none meet the constraints, the best score over all thresholds is used. Optionally enable `--use_blended_thresholds` to sweep jointly on validation + generalization metrics with a blend weight `--threshold_generalization_weight` (default 0.3) so the selected decision boundary better reflects both splits. The chosen threshold drives early stopping, artifact reporting, generalization evaluation, and is stored in the checkpoint.
+## Notes on Capacity Choices
+- The student is extremely compact; dropping to a single MLP layer (110 params) further reduces capacity for deployment. Higher `num_mlp_layers` modestly increases parameters while keeping the footprint tiny (<200 params).
+- The teacher remains ~0.96M parameters to provide a stronger signal when its generalization miss/FPR beat the student; KD is automatically skipped otherwise to avoid harming recall.
 
-**Class imbalance handling**: training begins with **no class weights and no weighted sampler** for a short warmup (`--imbalance_warmup_epochs`, default 5) to avoid early collapse, then linearly ramps to mild reweighting over `--imbalance_ramp_epochs` (default 5) (abnormal weight `--class_weight_abnormal=1.2`, ratio clamp `--max_class_weight_ratio=1.5`). Weighted sampling is auto-enabled after warmup when the abnormal ratio is below `--auto_sampler_ratio` (default 0.35) or when `--use_weighted_sampler` is set, using a ramped boost up to `--sampler_abnormal_boost` (default 1.2). Adaptive recall rescue triggers when miss exceeds `--recall_target_miss` (default 0.15) under an FPR cap (`--adaptive_fpr_cap`, default 0.25) and can fire up to `--recall_rescue_limit` times (default 3), increasing abnormal emphasis and enabling the sampler; with `--use_generalization_rescue` the same logic can be driven by generalization metrics when validation looks good but out-of-domain recall lags. Dual collapse detectors pause KD and drop rebalancing if the model predicts nearly all abnormal (`FPR>95% & miss<5%`) or nearly all normal (`miss>95% & FPR<5%`); after any collapse rebalancing is locked and a cooldown (`--collapse_cooldown_epochs`, default 5) prevents the ramp from restarting until explicitly requested.
+## Artifacts & Logging
+- Baseline training: artifacts in `./artifacts` (probabilities, plots) and checkpoints in `./saved_models`.
+- Distillation: `artifacts/kd_training_log.csv` plus ROC comparison figure in `./figures`.
 
-**Strategy presets and strength sweeps**: use `--strategy_preset {stable,balanced,full}` to toggle whole bundles of knobs; `--strategy_strength` scales class-weight strength, sampler boost, and KD beta/gamma to make sweeping easier (e.g., `--strategy_strength 0.6` for gentle reweighting, `1.5` for a stronger setting). `--stable_mode/--no-stable_mode` remains available for backward compatibility; setting a preset automatically aligns the stable flag.
-
-## Segment-Aware Student Overview
-- Inputs: `(batch_size, 1, 360)`
-- Four Conv1d encoders (P/QRS/T/Global): `Conv1d(1, 4, kernel_size=4, stride=1, padding=0)`
-- Token pooling: P→2 tokens, QRS→3 tokens, T→2 tokens (AvgPool over time), Global→1 token (global average); concatenated tokens shape `(batch, 8, 4)`
-- Photonic MLP: `num_mlp_layers` (>=2, default 3) of `Linear(4, 4) + ReLU` (optionally tanh with constrained weights)
-- Token average pooling → `h_pool` `(batch, 4)` → optional dropout (default 0.2) → classifier `Linear(4, 2)`
-
-## Knowledge Distillation
-- Teacher: 1D ResNet18 producing logits and an embedding (`embedding_dim`).
-- Student: logits + pooled feature (`h_pool`).
-- Loss: `alpha * CE` + `beta * KL(softmax(z_T/T) || softmax(z_S/T))` + `gamma * MSE(norm(proj_T(feat_T)), norm(proj_S(h_pool)))`.
-- Projections: `proj_T: Linear(embedding_dim, kd_d)`, `proj_S: Linear(4, kd_d)` (constrained if `--use_value_constraint`).
-- Teacher quality guard: KD is automatically disabled if the teacher validation F1 or sensitivity drops below `--teacher_min_f1/--teacher_min_sensitivity`; KD also pauses when validation miss exceeds `--kd_pause_miss` and resumes after it falls below `--kd_resume_miss`.
-
-## Value Constraints & Normalization
-- Constrained layers use tanh-reparameterized weights (and optional bias) scaled by `constraint_scale` to keep weights in `[-scale, scale]`.
-- Inputs to constrained layers can be scaled to `[-1, 1]` via `scale_to_unit`; alternatively, tanh activations bound them directly (`--use_tanh_activations`).
-- Beat preprocessing keeps raw inputs in `[-1, 1]` via mean removal and max-abs scaling; optional post-layer dropout mitigates overfitting.
-
-## Saved Artifacts
-Checkpoints are written to `saved_models/student_model.pth` with the CLI configuration. Training curves, ROC curves (val/generalization), and confusion matrices are exported to `./artifacts` as PNG files. Adjust paths as needed for your environment.
