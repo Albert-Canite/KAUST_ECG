@@ -33,6 +33,8 @@ KD_MISS_WEIGHT = 1.35  # extra weight on positives to curb miss rate
 KD_POS_MARGIN = 0.6  # encourage positive logits to exceed this probability
 KD_POS_PENALTY = 0.35  # scale for miss-focused auxiliary penalty
 KD_TEACHER_GAP_TOL = 0.05  # if teacher overfits, down-weight its logits
+KD_TEACHER_CONF = 0.65  # only trust teacher KD when it is confident
+KD_TEACHER_GEN_MARGIN = 0.0  # disable KD if teacher miss exceeds student gen miss by this margin
 
 
 def _add_bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
@@ -392,6 +394,7 @@ def distill_student(
     kd_alpha: float = KD_ALPHA,
     kd_beta: float = KD_BETA,
     use_kd: bool = True,
+    teacher_threshold: float = 0.5,
 ) -> Tuple[nn.Module, Dict[str, object]]:
     if teacher is not None:
         teacher.eval()
@@ -431,17 +434,22 @@ def distill_student(
             logits_s, feat_s = student(signals)
             logits_t = None
             feat_t = None
+            teacher_mask = None
             if use_kd and (kd_alpha > 0 or kd_beta > 0) and teacher is not None:
                 with torch.no_grad():
                     logits_t, feat_t = teacher(signals)
+                    probs_t = torch.softmax(logits_t, dim=1)
+                    conf_t, pred_t = probs_t.max(dim=1)
+                    pred_bin = (probs_t[:, 1] >= teacher_threshold).long()
+                    teacher_mask = (pred_bin == labels) & (conf_t >= KD_TEACHER_CONF)
             loss_ce = ce_loss(logits_s, labels)
             loss_kd = torch.tensor(0.0, device=device)
             loss_feat = torch.tensor(0.0, device=device)
-            if logits_t is not None:
-                loss_kd = kd_logit_loss(logits_s, logits_t, KD_TEMPERATURE)
-            if feat_t is not None:
-                proj_s = project_features(feat_s, projector_s)
-                proj_t = project_features(feat_t, projector_t)
+            if logits_t is not None and teacher_mask is not None and teacher_mask.any():
+                loss_kd = kd_logit_loss(logits_s[teacher_mask], logits_t[teacher_mask], KD_TEMPERATURE)
+            if feat_t is not None and teacher_mask is not None and teacher_mask.any():
+                proj_s = project_features(feat_s[teacher_mask], projector_s)
+                proj_t = project_features(feat_t[teacher_mask], projector_t)
                 loss_feat = F.mse_loss(proj_s, proj_t)
             prob_pos = torch.softmax(logits_s, dim=1)[:, 1]
             pos_mask = labels == 1
@@ -570,14 +578,21 @@ def main() -> None:
         teacher = train_teacher(args, loaders, device)
 
     # Evaluate teacher and adapt KD strength if generalization gap is large
-    teacher_val_loss, teacher_val_metrics, _, _ = evaluate_with_probs(teacher, loaders.val_loader, device)
-    teacher_gen_loss, teacher_gen_metrics, _, _ = evaluate_with_probs(teacher, loaders.gen_loader, device)
+    teacher_val_loss, teacher_val_metrics, teacher_val_true, teacher_val_probs = evaluate_with_probs(
+        teacher, loaders.val_loader, device
+    )
+    teacher_gen_loss, teacher_gen_metrics, teacher_gen_true, teacher_gen_probs = evaluate_with_probs(
+        teacher, loaders.gen_loader, device
+    )
     teacher_gap = teacher_gen_metrics["miss_rate"] - teacher_val_metrics["miss_rate"]
     kd_alpha_eff = KD_ALPHA
     kd_beta_eff = KD_BETA
     use_kd = True
     student_better_gen = teacher_gen_metrics["miss_rate"] > baseline["gen"][1]["miss_rate"]
     student_better_val = teacher_val_metrics["miss_rate"] > baseline["val"][1]["miss_rate"]
+    teacher_gen_over_student = (
+        teacher_gen_metrics["miss_rate"] - baseline["gen"][1]["miss_rate"] > KD_TEACHER_GEN_MARGIN
+    )
     if student_better_gen and student_better_val:
         kd_alpha_eff = 0.0
         kd_beta_eff = 0.0
@@ -585,15 +600,40 @@ def main() -> None:
         print(
             "Teacher underperforms baseline on both val/gen miss; disabling KD (fine-tuning student only)."
         )
+    elif teacher_gen_over_student:
+        kd_alpha_eff = 0.0
+        kd_beta_eff = 0.0
+        use_kd = False
+        print(
+            "Teacher generalization miss above baseline; disabling KD to avoid overfitting to weaker teacher."
+        )
     elif teacher_gap > KD_TEACHER_GAP_TOL:
         kd_alpha_eff = KD_ALPHA * 0.5
         kd_beta_eff = KD_BETA * 0.5
         print(
             f"Teacher generalization miss gap {teacher_gap*100:.2f}% exceeds {KD_TEACHER_GAP_TOL*100:.1f}% -> down-weight KD logits/features to {kd_alpha_eff:.3f}/{kd_beta_eff:.3f}"
         )
+
+    teacher_thr, teacher_val_thr_metrics, teacher_gen_thr_metrics = sweep_thresholds_blended(
+        teacher_val_true,
+        teacher_val_probs,
+        teacher_gen_true,
+        teacher_gen_probs,
+        gen_weight=args.generalization_score_weight,
+        recall_gain=args.threshold_recall_gain,
+        miss_penalty=args.threshold_miss_penalty,
+        gen_recall_gain=args.threshold_gen_recall_gain,
+        gen_miss_penalty=args.threshold_gen_miss_penalty,
+        miss_target=args.threshold_target_miss,
+        fpr_cap=args.threshold_max_fpr,
+    )
     print(
         f"Teacher -> Val loss {teacher_val_loss:.4f} Miss {teacher_val_metrics['miss_rate']*100:.2f}% FPR {teacher_val_metrics['fpr']*100:.2f}% | "
         f"Gen Miss {teacher_gen_metrics['miss_rate']*100:.2f}% FPR {teacher_gen_metrics['fpr']*100:.2f}%"
+    )
+    print(
+        f"Teacher threshold (blended) {teacher_thr:.2f} -> Val Miss {teacher_val_thr_metrics['miss_rate']*100:.2f}% FPR {teacher_val_thr_metrics['fpr']*100:.2f}% | "
+        f"Gen Miss {teacher_gen_thr_metrics['miss_rate']*100:.2f}% FPR {teacher_gen_thr_metrics['fpr']*100:.2f}%"
     )
 
     # Distillation
@@ -606,6 +646,7 @@ def main() -> None:
         kd_alpha=kd_alpha_eff,
         kd_beta=kd_beta_eff,
         use_kd=use_kd,
+        teacher_threshold=teacher_thr,
     )
 
     # Collect probabilities for comparison on validation set
