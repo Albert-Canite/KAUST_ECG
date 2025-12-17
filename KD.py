@@ -103,11 +103,13 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
     train_dataset = ECGBeatDataset(tr_x, tr_y)
     sampler = None
     batch_sampler = None
-    abnormal_ratio = float(np.mean(tr_y)) if len(tr_y) > 0 else 0.0
+    class_counts = np.bincount(tr_y, minlength=len(set(BEAT_LABEL_MAP.values())))
+    total_counts = class_counts.sum()
+    abnormal_ratio = 1.0 - (class_counts[0] / total_counts) if total_counts > 0 else 0.0
     sampler_boost = 1.2
     if abnormal_ratio < 0.35:
         sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
-    if abnormal_ratio < 0.45:
+    if len(np.unique(tr_y)) == 2 and abnormal_ratio < 0.45:
         try:
             batch_sampler = BalancedBatchSampler(tr_y, batch_size=args.batch_size)
         except ValueError:
@@ -280,8 +282,10 @@ def evaluate_with_probs(
     total_loss = 0.0
     total = 0
     preds: List[int] = []
-    trues: List[int] = []
+    trues_bin: List[int] = []
+    trues_4: List[int] = []
     probs: List[float] = []
+    sample_debug: Dict[str, torch.Tensor] | None = None
     with torch.no_grad():
         for signals, labels in data_loader:
             signals, labels = signals.to(device), labels.to(device)
@@ -289,19 +293,47 @@ def evaluate_with_probs(
             loss = criterion(logits, labels)
             total_loss += loss.item() * labels.size(0)
             total += labels.size(0)
-            prob_pos = torch.softmax(logits, dim=1)[:, 1]
-            pred = (prob_pos >= threshold).long()
+            prob_all = torch.softmax(logits, dim=1)
+            prob_abnormal = prob_all[:, 1:].sum(dim=1)
+            pred = (prob_abnormal >= threshold).long()
             preds.extend(pred.cpu().tolist())
-            trues.extend(labels.cpu().tolist())
-            probs.extend(prob_pos.cpu().tolist())
+            trues_4.extend(labels.cpu().tolist())
+            trues_bin.extend((labels != 0).long().cpu().tolist())
+            probs.extend(prob_abnormal.cpu().tolist())
+            if sample_debug is None:
+                sample_debug = {
+                    "y_true_4": labels.detach().cpu(),
+                    "y_true_bin": (labels != 0).long().detach().cpu(),
+                    "p_abnormal": prob_abnormal.detach().cpu(),
+                    "pred_bin": pred.detach().cpu(),
+                }
     avg_loss = total_loss / max(total, 1)
-    metrics = confusion_metrics(trues, preds)
-    try:
-        fpr, tpr, _ = roc_curve(trues, probs)
-        metrics["roc_auc"] = auc(fpr, tpr)
-    except ValueError:
+
+    unique_y = torch.unique(torch.tensor(trues_4))
+    y_true_bin_tensor = torch.tensor(trues_bin)
+    pos = int((y_true_bin_tensor == 1).sum())
+    neg = int((y_true_bin_tensor == 0).sum())
+    print(f"[Eval/KD] Unique y_true (4-class): {unique_y.tolist()} | bin pos={pos}, neg={neg}")
+
+    metrics = confusion_metrics(trues_bin, preds)
+    if len(torch.unique(y_true_bin_tensor)) < 2:
         metrics["roc_auc"] = 0.5
-    return avg_loss, metrics, trues, probs
+        print("[Eval/KD] ROC skipped due to single-class labels; defaulting to 0.5")
+    else:
+        fpr, tpr, _ = roc_curve(trues_bin, probs)
+        metrics["roc_auc"] = auc(fpr, tpr)
+
+    if sample_debug is not None:
+        print(
+            "[Eval/KD] Sample sanity (first batch, first 10):",
+            "y_true_4=", sample_debug["y_true_4"][:10].tolist(),
+            "y_true_bin=", sample_debug["y_true_bin"][:10].tolist(),
+            "p_abnormal=", sample_debug["p_abnormal"][:10].tolist(),
+            "pred_bin=", sample_debug["pred_bin"][:10].tolist(),
+            f"| ROC={metrics['roc_auc']:.3f} miss={metrics['miss_rate']:.3f} fpr={metrics['fpr']:.3f}",
+        )
+
+    return avg_loss, metrics, trues_bin, probs
 
 
 def train_teacher(args: argparse.Namespace, dataloaders: DatasetBundle, device: torch.device) -> nn.Module:
