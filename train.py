@@ -383,7 +383,7 @@ def main() -> None:
 
     print(f"Preprocessed input range: [{data_min:.3f}, {data_max:.3f}] (expected within [-1, 1])")
 
-    best_val_f1 = -float("inf")
+    best_val_macro_f1 = -float("inf")
     best_state = None
     best_threshold = 0.5
     patience_counter = 0
@@ -494,12 +494,13 @@ def main() -> None:
             }
         )
 
-        if val_metrics["f1"] > best_val_f1:
-            best_val_f1 = val_metrics["f1"]
+        # 4-class monitoring: use macro F1 to drive checkpointing/early stopping
+        if val_metrics_mc["macro_f1"] > best_val_macro_f1:
+            best_val_macro_f1 = val_metrics_mc["macro_f1"]
             best_state = student.state_dict()
             best_threshold = best_thr_epoch
             patience_counter = 0
-            print("  -> New best model saved.")
+            print("  -> New best model saved (by 4-class MacroF1).")
             _write_log(
                 {
                     "event": "best",
