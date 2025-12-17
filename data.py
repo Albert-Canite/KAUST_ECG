@@ -12,7 +12,31 @@ import wfdb
 
 MITBIH_SAMPLING_RATE = 360
 DEFAULT_BEAT_WINDOW = 360
-BEAT_LABEL_MAP = {"N": 0, "V": 1, "S": 1, "F": 1, "Q": 1}
+
+# Map raw MIT-BIH annotations to 4-class labels: N(0), S(1), V(2), O(3)
+# Any annotation not listed explicitly will be treated as class O (others).
+BEAT_LABEL_MAP = {
+    # Normal-like beats
+    "N": 0,
+    "L": 0,
+    "R": 0,
+    "e": 0,
+    "j": 0,
+    # Supraventricular ectopic beats
+    "A": 1,
+    "a": 1,
+    "J": 1,
+    "S": 1,
+    # Ventricular ectopic beats
+    "V": 2,
+    "E": 2,
+    # Other / unclassified beats
+    "F": 3,
+    "/": 3,
+    "f": 3,
+    "Q": 3,
+    "U": 3,
+}
 
 
 def set_seed(seed: int) -> None:
@@ -44,14 +68,15 @@ def load_record(record_id: str, data_path: str, window_size: int = DEFAULT_BEAT_
     samples: List[np.ndarray] = []
     labels: List[int] = []
     for sym, rpos in zip(ann.symbol, ann.sample):
-        if sym in BEAT_LABEL_MAP:
-            s = rpos - window_size // 2
-            e = rpos + window_size // 2
-            if s >= 0 and e <= len(raw):
-                win = raw[s:e].copy()
-                win = preprocess_beat(win)
-                samples.append(win)
-                labels.append(BEAT_LABEL_MAP[sym])
+        # Default to class O (3) for any annotation not explicitly mapped above.
+        label = BEAT_LABEL_MAP.get(sym, 3)
+        s = rpos - window_size // 2
+        e = rpos + window_size // 2
+        if s >= 0 and e <= len(raw):
+            win = raw[s:e].copy()
+            win = preprocess_beat(win)
+            samples.append(win)
+            labels.append(label)
     return np.array(samples, dtype=np.float32), np.array(labels, dtype=np.int64)
 
 

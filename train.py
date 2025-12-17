@@ -22,6 +22,7 @@ from models.student import SegmentAwareStudent
 from utils import (
     BalancedBatchSampler,
     compute_class_weights,
+    compute_multiclass_metrics,
     confusion_metrics,
     make_weighted_sampler,
     sweep_thresholds_blended,
@@ -80,10 +81,13 @@ GENERALIZATION_RECORDS = [
     "234",
 ]
 
+NUM_CLASSES = len(set(BEAT_LABEL_MAP.values()))
+CLASS_NAMES = ["N", "S", "V", "O"]
+
 
 def build_student(args: argparse.Namespace, device: torch.device) -> nn.Module:
     student = SegmentAwareStudent(
-        num_classes=len(set(BEAT_LABEL_MAP.values())),
+        num_classes=NUM_CLASSES,
         num_mlp_layers=args.num_mlp_layers,
         dropout_rate=args.dropout_rate,
         use_value_constraint=args.use_value_constraint,
@@ -97,6 +101,7 @@ def evaluate(
     model: SegmentAwareStudent,
     data_loader: DataLoader,
     device: torch.device,
+    num_classes: int,
     return_probs: bool = False,
     threshold: float | None = None,
 ) -> Tuple[float, Dict[str, float], List[int], List[int], List[float]]:
@@ -107,6 +112,7 @@ def evaluate(
     preds: List[int] = []
     trues: List[int] = []
     probs: List[float] = []
+    metrics_fn = compute_multiclass_metrics if threshold is None else confusion_metrics
     with torch.no_grad():
         for signals, labels in data_loader:
             signals, labels = signals.to(device), labels.to(device)
@@ -114,17 +120,21 @@ def evaluate(
             loss = criterion(logits, labels)
             total_loss += loss.item() * labels.size(0)
             total += labels.size(0)
-            prob_pos = torch.softmax(logits, dim=1)[:, 1]
+            prob_all = torch.softmax(logits, dim=1)
+            prob_abnormal = 1.0 - prob_all[:, 0]
             if threshold is None:
                 pred = torch.argmax(logits, dim=1)
             else:
-                pred = (prob_pos >= threshold).long()
+                pred = (prob_abnormal >= threshold).long()
             preds.extend(pred.cpu().tolist())
             trues.extend(labels.cpu().tolist())
             if return_probs:
-                probs.extend(prob_pos.cpu().tolist())
+                probs.extend(prob_abnormal.cpu().tolist())
     avg_loss = total_loss / max(total, 1)
-    metrics = confusion_metrics(trues, preds)
+    if threshold is None:
+        metrics = metrics_fn(trues, preds, num_classes)  # type: ignore[arg-type]
+    else:
+        metrics = metrics_fn(trues, preds)
     return avg_loss, metrics, trues, preds, probs
 
 
@@ -201,9 +211,12 @@ def main() -> None:
     tr_x, tr_y, va_x, va_y = split_dataset(train_x, train_y, val_ratio=0.2)
     print(f"Train: {len(tr_x)} | Val: {len(va_x)} | Generalization: {len(gen_x)}")
 
-    abnormal_ratio = float(np.mean(tr_y)) if len(tr_y) > 0 else 0.0
+    class_counts = np.bincount(tr_y, minlength=NUM_CLASSES)
+    total_counts = class_counts.sum()
+    abnormal_ratio = 1.0 - (class_counts[0] / total_counts) if total_counts > 0 else 0.0
     print(
-        f"Class ratio (abnormal): {abnormal_ratio:.3f} | counts -> normal: {(tr_y == 0).sum()} abnormal: {(tr_y == 1).sum()}"
+        "Class distribution (N,S,V,O): "
+        f"{class_counts.tolist()} | non-normal fraction={abnormal_ratio:.3f}"
     )
 
     train_dataset = ECGBeatDataset(tr_x, tr_y)
@@ -214,15 +227,17 @@ def main() -> None:
     if abnormal_ratio < 0.35:
         sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
         print(
-            "Enabling mild abnormal oversampling: "
-            f"boost={sampler_boost:.2f}, expected abnormal frac≈{min(0.5, abnormal_ratio * sampler_boost):.2f}"
+            "Enabling mild abnormal oversampling across non-normal classes: "
+            f"boost={sampler_boost:.2f}"
         )
-    if abnormal_ratio < 0.45:
+    if NUM_CLASSES == 2 and abnormal_ratio < 0.45:
         try:
             batch_sampler = BalancedBatchSampler(tr_y, batch_size=args.batch_size)
             print("Using balanced batch sampler to keep per-batch class mix stable")
         except ValueError:
             batch_sampler = None
+    elif NUM_CLASSES > 2:
+        batch_sampler = None
 
     if batch_sampler is not None:
         train_loader = DataLoader(train_dataset, batch_sampler=batch_sampler)
@@ -237,11 +252,11 @@ def main() -> None:
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
 
     # Mitigate collapse to the majority class by balancing cross-entropy with class weights
-    class_counts = np.bincount(tr_y, minlength=2)
     class_weights_np = compute_class_weights(
         tr_y,
         abnormal_boost=args.class_weight_abnormal,
         max_ratio=args.class_weight_max_ratio,
+        num_classes=NUM_CLASSES,
     )
     class_weights = class_weights_np.to(device)
     base_weights = class_weights.clone()
@@ -294,11 +309,13 @@ def main() -> None:
 
         adaptive_pos_boost = 1.0 + miss_ema * 0.8
         epoch_weights = base_weights.clone()
-        epoch_weights[1] = torch.clamp(
-            base_weights[1] * adaptive_pos_boost,
-            min=base_weights.min() * 0.8,
-            max=base_weights.max() * 2.0,
-        )
+        if epoch_weights.numel() > 1:
+            for cls in range(1, NUM_CLASSES):
+                epoch_weights[cls] = torch.clamp(
+                    base_weights[cls] * adaptive_pos_boost,
+                    min=base_weights.min() * 0.8,
+                    max=base_weights.max() * 2.0,
+                )
         ce_loss_fn = nn.CrossEntropyLoss(weight=epoch_weights)
 
         for signals, labels in train_loader:
@@ -317,17 +334,20 @@ def main() -> None:
 
         train_loss = running_loss / max(total, 1)
 
-        val_loss, _, val_true, _, val_probs = evaluate(
-            student, val_loader, device, return_probs=True
+        val_loss, val_metrics_mc, val_true, val_pred_mc, val_probs = evaluate(
+            student, val_loader, device, NUM_CLASSES, return_probs=True
         )
-        gen_loss, _, gen_true, _, gen_probs = evaluate(
-            student, gen_loader, device, return_probs=True
+        gen_loss, gen_metrics_mc, gen_true, gen_pred_mc, gen_probs = evaluate(
+            student, gen_loader, device, NUM_CLASSES, return_probs=True
         )
 
+        val_true_bin = [int(y != 0) for y in val_true]
+        gen_true_bin = [int(y != 0) for y in gen_true]
+
         best_thr_epoch, val_metrics, gen_metrics = sweep_thresholds_blended(
-            val_true,
+            val_true_bin,
             val_probs,
-            gen_true,
+            gen_true_bin,
             gen_probs,
             gen_weight=args.generalization_score_weight,
             recall_gain=args.threshold_recall_gain,
@@ -344,8 +364,10 @@ def main() -> None:
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
-            f"Val F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}% | "
-            f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}% | Thr {best_thr_epoch:.2f}"
+            f"Val BinF1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}% "
+            f"| Val MacroF1 {val_metrics_mc['macro_f1']:.3f} | "
+            f"Gen BinF1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}% "
+            f"| Gen MacroF1 {gen_metrics_mc['macro_f1']:.3f} | Thr {best_thr_epoch:.2f}"
         )
 
         history.append(
@@ -356,9 +378,11 @@ def main() -> None:
                 "val_f1": val_metrics["f1"],
                 "val_miss": val_metrics["miss_rate"],
                 "val_fpr": val_metrics["fpr"],
+                "val_macro_f1": val_metrics_mc["macro_f1"],
                 "gen_f1": gen_metrics["f1"],
                 "gen_miss": gen_metrics["miss_rate"],
                 "gen_fpr": gen_metrics["fpr"],
+                "gen_macro_f1": gen_metrics_mc["macro_f1"],
                 "threshold": best_thr_epoch,
             }
         )
@@ -372,9 +396,11 @@ def main() -> None:
                 "val_f1": val_metrics["f1"],
                 "val_miss": val_metrics["miss_rate"],
                 "val_fpr": val_metrics["fpr"],
+                "val_macro_f1": val_metrics_mc["macro_f1"],
                 "gen_f1": gen_metrics["f1"],
                 "gen_miss": gen_metrics["miss_rate"],
                 "gen_fpr": gen_metrics["fpr"],
+                "gen_macro_f1": gen_metrics_mc["macro_f1"],
                 "threshold": best_thr_epoch,
             }
         )
@@ -392,9 +418,11 @@ def main() -> None:
                     "val_f1": val_metrics["f1"],
                     "val_miss": val_metrics["miss_rate"],
                     "val_fpr": val_metrics["fpr"],
+                    "val_macro_f1": val_metrics_mc["macro_f1"],
                     "gen_f1": gen_metrics["f1"],
                     "gen_miss": gen_metrics["miss_rate"],
                     "gen_fpr": gen_metrics["fpr"],
+                    "gen_macro_f1": gen_metrics_mc["macro_f1"],
                     "threshold": best_thr_epoch,
                 }
             )
@@ -407,17 +435,20 @@ def main() -> None:
     if best_state is not None:
         student.load_state_dict(best_state)
 
-    val_loss, _, val_true, _, val_probs = evaluate(
-        student, val_loader, device, return_probs=True
+    val_loss, val_metrics_mc, val_true, val_pred_mc, val_probs = evaluate(
+        student, val_loader, device, NUM_CLASSES, return_probs=True
     )
-    gen_loss, _, gen_true, _, gen_probs = evaluate(
-        student, gen_loader, device, return_probs=True
+    gen_loss, gen_metrics_mc, gen_true, gen_pred_mc, gen_probs = evaluate(
+        student, gen_loader, device, NUM_CLASSES, return_probs=True
     )
 
+    val_true_bin = [int(y != 0) for y in val_true]
+    gen_true_bin = [int(y != 0) for y in gen_true]
+
     best_threshold, val_metrics, gen_metrics = sweep_thresholds_blended(
-        val_true,
+        val_true_bin,
         val_probs,
-        gen_true,
+        gen_true_bin,
         gen_probs,
         gen_weight=args.generalization_score_weight,
         recall_gain=args.threshold_recall_gain,
@@ -427,8 +458,8 @@ def main() -> None:
         miss_target=args.threshold_target_miss,
         fpr_cap=args.threshold_max_fpr,
     )
-    val_pred = (np.array(val_probs) >= best_threshold).astype(int).tolist()
-    gen_pred = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
+    val_pred_bin = (np.array(val_probs) >= best_threshold).astype(int).tolist()
+    gen_pred_bin = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
 
     print(
         f"Final Val@thr={best_threshold:.2f}: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, "
@@ -437,6 +468,13 @@ def main() -> None:
     print(
         f"Generalization@thr={best_threshold:.2f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, "
         f"miss={gen_metrics['miss_rate'] * 100:.2f}%, fpr={gen_metrics['fpr'] * 100:.2f}%"
+    )
+
+    print(
+        f"Validation multi-class: Acc={val_metrics_mc['accuracy']:.3f}, MacroF1={val_metrics_mc['macro_f1']:.3f}"
+    )
+    print(
+        f"Generalization multi-class: Acc={gen_metrics_mc['accuracy']:.3f}, MacroF1={gen_metrics_mc['macro_f1']:.3f}"
     )
 
     _write_log(
@@ -451,6 +489,8 @@ def main() -> None:
             "gen_f1": gen_metrics["f1"],
             "gen_miss": gen_metrics["miss_rate"],
             "gen_fpr": gen_metrics["fpr"],
+            "val_macro_f1": val_metrics_mc["macro_f1"],
+            "gen_macro_f1": gen_metrics_mc["macro_f1"],
         }
     )
 
@@ -512,27 +552,31 @@ def main() -> None:
         fig.savefig(os.path.join("artifacts", f"roc_{name.lower()}.png"))
         plt.close(fig)
 
-    def _save_confusion(y_true: List[int], y_pred: List[int], name: str) -> None:
-        cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-        fig, ax = plt.subplots(figsize=(4, 4))
+    def _save_confusion(y_true: List[int], y_pred: List[int], name: str, labels: List[int], class_names: List[str]) -> None:
+        cm = confusion_matrix(y_true, y_pred, labels=labels)
+        fig, ax = plt.subplots(figsize=(5, 4))
         im = ax.imshow(cm, cmap="Blues")
-        ax.set_xticks([0, 1])
-        ax.set_yticks([0, 1])
+        ax.set_xticks(range(len(labels)))
+        ax.set_yticks(range(len(labels)))
+        ax.set_xticklabels(class_names)
+        ax.set_yticklabels(class_names)
         ax.set_xlabel("Predicted")
         ax.set_ylabel("True")
         ax.set_title(f"Confusion Matrix - {name}")
-        for i in range(2):
-            for j in range(2):
+        for i in range(len(labels)):
+            for j in range(len(labels)):
                 ax.text(j, i, cm[i, j], ha="center", va="center", color="black")
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         fig.savefig(os.path.join("artifacts", f"confusion_{name.lower()}.png"))
         plt.close(fig)
 
     _save_training_curves()
-    _save_roc(val_true, val_probs, "Val")
-    _save_roc(gen_true, gen_probs, "Generalization")
-    _save_confusion(val_true, val_pred, "Val")
-    _save_confusion(gen_true, gen_pred, "Generalization")
+    _save_roc(val_true_bin, val_probs, "Val")
+    _save_roc(gen_true_bin, gen_probs, "Generalization")
+    _save_confusion(val_true, val_pred_mc, "Val_4class", list(range(NUM_CLASSES)), CLASS_NAMES)
+    _save_confusion(gen_true, gen_pred_mc, "Generalization_4class", list(range(NUM_CLASSES)), CLASS_NAMES)
+    _save_confusion(val_true_bin, val_pred_bin, "Val_binary", [0, 1], ["Normal", "Abnormal"])
+    _save_confusion(gen_true_bin, gen_pred_bin, "Generalization_binary", [0, 1], ["Normal", "Abnormal"])
     print("Saved training curves, ROC curves, and confusion matrices to ./artifacts")
     print(f"Training log saved to {log_path}")
 

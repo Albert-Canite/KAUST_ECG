@@ -8,23 +8,27 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Sampler, WeightedRandomSampler
+from sklearn.metrics import accuracy_score, f1_score, precision_recall_fscore_support
 
 
 def compute_class_weights(
     labels: np.ndarray,
     abnormal_boost: float = 1.35,
     max_ratio: float = 2.0,
+    num_classes: int | None = None,
 ) -> torch.Tensor:
     """Inverse-frequency class weights with optional abnormal boost and ratio clamp."""
 
     counter = Counter(labels.tolist())
     total = len(labels)
     weights: List[float] = []
-    num_classes = len(set(labels.tolist()))
+    if num_classes is None:
+        num_classes = int(np.max(labels)) + 1 if len(labels) > 0 else 0
+
     for i in range(num_classes):
         if i in counter:
             base = total / (num_classes * counter[i])
-            if num_classes == 2 and i == 1:
+            if i != 0:
                 base *= abnormal_boost
             weights.append(base)
         else:
@@ -40,6 +44,21 @@ def compute_class_weights(
         weight_tensor = weight_tensor.clamp(min=min_w, max=max_w)
 
     return weight_tensor
+
+
+def compute_multiclass_metrics(y_true: List[int], y_pred: List[int], num_classes: int) -> Dict[str, object]:
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, labels=list(range(num_classes)), zero_division=0
+    )
+    per_class = {
+        i: {"precision": float(p), "recall": float(r), "f1": float(f)}
+        for i, (p, r, f) in enumerate(zip(precision, recall, f1))
+    }
+    return {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "per_class": per_class,
+    }
 
 
 def confusion_metrics(y_true: List[int], y_pred: List[int]) -> Dict[str, float]:
@@ -306,11 +325,12 @@ def make_weighted_sampler(labels: np.ndarray, abnormal_boost: float = 1.0) -> We
     counts = Counter(label_list)
     num_samples = len(label_list)
     class_weights: Dict[int, float] = {}
+    abnormal_labels = [lbl for lbl in counts.keys() if lbl != 0]
     for cls, cnt in counts.items():
         # inverse frequency weighting
         class_weights[cls] = num_samples / (len(counts) * cnt)
-    if 1 in class_weights:
-        class_weights[1] *= abnormal_boost
+        if cls in abnormal_labels:
+            class_weights[cls] *= abnormal_boost
     sample_weights = [class_weights[y] for y in label_list]
     return WeightedRandomSampler(sample_weights, num_samples=num_samples, replacement=True)
 

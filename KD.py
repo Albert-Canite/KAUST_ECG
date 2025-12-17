@@ -103,11 +103,13 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
     train_dataset = ECGBeatDataset(tr_x, tr_y)
     sampler = None
     batch_sampler = None
-    abnormal_ratio = float(np.mean(tr_y)) if len(tr_y) > 0 else 0.0
+    class_counts = np.bincount(tr_y, minlength=len(set(BEAT_LABEL_MAP.values())))
+    total_counts = class_counts.sum()
+    abnormal_ratio = 1.0 - (class_counts[0] / total_counts) if total_counts > 0 else 0.0
     sampler_boost = 1.2
     if abnormal_ratio < 0.35:
         sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
-    if abnormal_ratio < 0.45:
+    if len(np.unique(tr_y)) == 2 and abnormal_ratio < 0.45:
         try:
             batch_sampler = BalancedBatchSampler(tr_y, batch_size=args.batch_size)
         except ValueError:
