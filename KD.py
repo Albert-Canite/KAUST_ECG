@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help_text="enable weighted sampler (sqrt balancing) for long-tail classes",
     )
-    parser.add_argument("--sampler_power", type=float, default=0.5)
+    parser.add_argument("--sampler_power", type=float, default=1.0)
     parser.add_argument("--student_path", type=str, default=os.path.join("saved_models", "student_model.pth"))
     return parser.parse_args()
 
@@ -84,7 +84,7 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
     if args.use_weighted_sampler:
         sampler = make_weighted_sampler(tr_y, power=args.sampler_power)
         print(
-            "[KD] Using weighted sampler for 4-class to expose rare S/V beats; CE weights stay uniform to avoid double boosts. "
+            "[KD] Using weighted sampler for 4-class to expose rare S/V beats; CE also uses inverse-frequency weights. "
             f"power={args.sampler_power:.2f}"
         )
 
@@ -101,14 +101,9 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
         tr_y,
         max_ratio=args.class_weight_max_ratio,
         num_classes=num_classes,
-        power=0.5,
+        power=1.0,
     )
-    if sampler is not None:
-        print("[KD] Sampler active -> using uniform CE weights to avoid double balancing")
-        class_weights = torch.ones_like(class_weights_np)
-    else:
-        class_weights = class_weights_np
-    class_weights = class_weights.to(device)
+    class_weights = class_weights_np.to(device)
     print(
         "[KD] Train class counts (N,S,V,O): "
         f"{class_counts.tolist()} | weights={np.round(class_weights.cpu().numpy(), 4)}"

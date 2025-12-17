@@ -190,7 +190,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sampler_power",
         type=float,
-        default=0.5,
+        default=1.0,
         help="inverse-frequency exponent for sampler (0.5=sqrt, 1.0=full balance)",
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -239,7 +239,7 @@ def main() -> None:
     if args.use_weighted_sampler:
         sampler = make_weighted_sampler(tr_y, power=args.sampler_power)
         print(
-            "Using weighted sampler for 4-class to surface rare S/V beats; loss weights stay uniform to avoid double boosting. "
+            "Using weighted sampler for 4-class to surface rare S/V beats; CE also uses inverse-frequency weights. "
             f"power={args.sampler_power:.2f}"
         )
 
@@ -252,23 +252,23 @@ def main() -> None:
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
 
-    # Keep loss gently reflecting class prior with sqrt inverse-frequency weights (no binary boosts).
+    # Keep loss reflecting class prior with inverse-frequency weights (no binary boosts).
     class_weights_np = compute_class_weights(
         tr_y,
         max_ratio=args.class_weight_max_ratio,
         num_classes=NUM_CLASSES,
-        power=0.5,
+        power=1.0,
     )
     raw_weights = []
     for idx, count in enumerate(class_counts):
         freq = count / max(total_counts, 1)
-        base = (1.0 / max(freq, 1e-8)) ** 0.5
+        base = (1.0 / max(freq, 1e-8)) ** 1.0
         raw_weights.append(base)
     mean_w = float(class_weights_np.mean()) if class_weights_np.numel() > 0 else 0.0
     min_w = mean_w / args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
     max_w = mean_w * args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
     print(
-        "Class weights computed as (1/freq)^0.5 (no binary abnormal boost), normalized to mean~1: "
+        "Class weights computed as (1/freq)^1.0 (no binary abnormal boost), normalized to mean~1: "
         f"raw={np.round(raw_weights, 4)}"
     )
     print(
@@ -276,13 +276,8 @@ def main() -> None:
         f"{np.round(class_weights_np.cpu().numpy(), 4)} (mean={mean_w:.4f}, min={min_w:.4f}, max={max_w:.4f})"
     )
 
-    # If a sampler already balances classes, use uniform loss weights to prevent over-emphasizing rare classes.
-    if sampler is not None:
-        print("Sampler active -> using uniform CE weights (no extra abnormal boost) to avoid double balancing")
-        class_weights = torch.ones_like(class_weights_np)
-    else:
-        class_weights = class_weights_np
-    class_weights = class_weights.to(device)
+    # Always apply mild inverse-frequency CE weights alongside the sampler to ensure S/V stay visible.
+    class_weights = class_weights_np.to(device)
     base_weights = class_weights.clone()
 
     os.makedirs("artifacts", exist_ok=True)
