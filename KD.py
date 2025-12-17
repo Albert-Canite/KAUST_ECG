@@ -30,13 +30,22 @@ class DatasetBundle:
 
 
 def _add_bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
-    parser.add_argument(f"--{name}", dest=name, action="store_true", help=f"Enable {help_text}")
+    """Boolean flags with safety against duplicate registration."""
+
+    opt = f"--{name}"
+    if any(opt in action.option_strings for action in parser._actions):
+        parser.set_defaults(**{name: default})
+        return
+
+    parser.add_argument(opt, dest=name, action="store_true", help=f"Enable {help_text}")
     parser.add_argument(f"--no-{name}", dest=name, action="store_false", help=f"Disable {help_text}")
     parser.set_defaults(**{name: default})
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Simplified KD script (multiclass evaluation only)")
+    parser = argparse.ArgumentParser(
+        description="Simplified KD script (multiclass evaluation only)", conflict_handler="resolve"
+    )
     parser.add_argument("--data_path", type=str, default="E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/")
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -170,6 +179,11 @@ def load_student(args: argparse.Namespace, device: torch.device) -> Tuple[nn.Mod
     student.load_state_dict(ckpt["student_state_dict"])
     return student, config
 
+def main() -> None:
+    args = parse_args()
+    set_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
 def main() -> None:
     args = parse_args()

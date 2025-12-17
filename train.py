@@ -149,15 +149,26 @@ def evaluate(
 
 
 def _add_bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
-    """Backward-compatible boolean flags with --name / --no-name."""
+    """Backward-compatible boolean flags with --name / --no-name.
 
-    parser.add_argument(f"--{name}", dest=name, action="store_true", help=f"Enable {help_text}")
+    Guard against double registration (seen in some downstream wrappers) by
+    skipping if the positive flag already exists.
+    """
+
+    opt = f"--{name}"
+    if any(opt in action.option_strings for action in parser._actions):
+        parser.set_defaults(**{name: default})
+        return
+
+    parser.add_argument(opt, dest=name, action="store_true", help=f"Enable {help_text}")
     parser.add_argument(f"--no-{name}", dest=name, action="store_false", help=f"Disable {help_text}")
     parser.set_defaults(**{name: default})
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="MIT-BIH ECG training with cross-entropy baseline")
+    parser = argparse.ArgumentParser(
+        description="MIT-BIH ECG training with cross-entropy baseline", conflict_handler="resolve"
+    )
     parser.add_argument("--data_path", type=str, default="E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/")
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -181,36 +192,6 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.5,
         help="inverse-frequency exponent for sampler (0.5=sqrt, 1.0=full balance)",
-    )
-    _add_bool_arg(
-        parser,
-        "use_fn_penalty_4cls",
-        default=False,
-        help_text="binary-style FN penalty on abnormal beats (4-class debug default: off)",
-    )
-    _add_bool_arg(
-        parser,
-        "use_weighted_sampler",
-        default=False,
-        help_text="enable weighted sampler (sqrt balancing) for long-tail classes",
-    )
-    parser.add_argument(
-        "--sampler_power",
-        type=float,
-        default=0.5,
-        help="inverse-frequency exponent for sampler (0.5=sqrt, 1.0=full balance)",
-    )
-    parser.add_argument(
-        "--sampler_abnormal_boost",
-        type=float,
-        default=1.0,
-        help="extra boost applied to non-normal classes in the sampler",
-    )
-    _add_bool_arg(
-        parser,
-        "use_fn_penalty",
-        default=True,
-        help_text="adaptive abnormal upweighting based on recent miss rate (set false for plain CE)",
     )
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
