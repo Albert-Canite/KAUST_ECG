@@ -119,7 +119,8 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
     if num_classes == 2 and abnormal_ratio < 0.35:
         sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
     elif num_classes > 2:
-        print("[KD] Skipping weighted sampler for 4-class to preserve normal/abnormal prior")
+        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
+        print("[KD] Using weighted sampler for 4-class to expose rare S/V beats; CE weights will be uniform to avoid double boosts.")
     if len(np.unique(tr_y)) == 2 and abnormal_ratio < 0.45:
         try:
             batch_sampler = BalancedBatchSampler(tr_y, batch_size=args.batch_size)
@@ -137,14 +138,14 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
         )
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
-    effective_abnormal_boost = 1.0 if sampler is not None else min(args.class_weight_abnormal, 1.0)
-    class_weights = compute_class_weights(
+    effective_abnormal_boost = args.class_weight_abnormal
+    class_weights_np = compute_class_weights(
         tr_y,
         abnormal_boost=effective_abnormal_boost,
         max_ratio=args.class_weight_max_ratio,
         num_classes=num_classes,
         power=0.5,
-    ).to(device)
+    )
     raw_weights = []
     for idx, count in enumerate(class_counts):
         freq = count / max(total_counts, 1)
@@ -152,6 +153,12 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
         if idx != 0:
             base *= effective_abnormal_boost
         raw_weights.append(base)
+    if sampler is not None:
+        print("[KD] Sampler active -> using uniform CE weights (no extra abnormal boost) to avoid double balancing")
+        class_weights = torch.ones_like(class_weights_np)
+    else:
+        class_weights = class_weights_np
+    class_weights = class_weights.to(device)
     print(
         "[KD] Class weights (1/freq)^0.5 with abnormal boost "
         f"{effective_abnormal_boost}: raw={np.round(raw_weights, 4)} | final={np.round(class_weights.cpu().numpy(), 4)}"
@@ -171,7 +178,8 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
     if num_classes == 2 and kd_abnormal_ratio < 0.35:
         kd_sampler = make_weighted_sampler(kd_y, abnormal_boost=sampler_boost)
     elif num_classes > 2:
-        print("[KD] Skipping KD sampler for 4-class to preserve normal/abnormal prior")
+        kd_sampler = make_weighted_sampler(kd_y, abnormal_boost=sampler_boost)
+        print("[KD] Using KD weighted sampler for 4-class; KD CE weights will be uniform to avoid double boosts.")
     if kd_abnormal_ratio < 0.45:
         try:
             kd_batch_sampler = BalancedBatchSampler(kd_y, batch_size=args.batch_size)
@@ -186,14 +194,20 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
             shuffle=kd_sampler is None,
             sampler=kd_sampler,
         )
-    kd_abnormal_boost = 1.0 if kd_sampler is not None else min(args.class_weight_abnormal * KD_MISS_WEIGHT, 1.0)
-    kd_class_weights = compute_class_weights(
+    kd_abnormal_boost = args.class_weight_abnormal * KD_MISS_WEIGHT
+    kd_class_weights_np = compute_class_weights(
         kd_y,
         abnormal_boost=kd_abnormal_boost,
         max_ratio=args.class_weight_max_ratio,
         num_classes=num_classes,
         power=0.5,
-    ).to(device)
+    )
+    if kd_sampler is not None:
+        print("[KD] KD sampler active -> using uniform KD CE weights to avoid double balancing")
+        kd_class_weights = torch.ones_like(kd_class_weights_np)
+    else:
+        kd_class_weights = kd_class_weights_np
+    kd_class_weights = kd_class_weights.to(device)
 
     return DatasetBundle(
         train_loader,

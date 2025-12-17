@@ -279,7 +279,6 @@ def main() -> None:
 
     sampler = None
     batch_sampler = None
-    # Multi-class collapse was driven by over-balancing; keep natural priors by default for 4-class.
     sampler_boost = 1.0
     if NUM_CLASSES == 2 and abnormal_ratio < 0.35:
         sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
@@ -288,7 +287,10 @@ def main() -> None:
             f"boost={sampler_boost:.2f}"
         )
     elif NUM_CLASSES > 2:
-        print("Skipping weighted sampler for 4-class to preserve normal/abnormal prior")
+        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
+        print(
+            "Using weighted sampler for 4-class to expose rare S/V beats; loss weights will stay uniform to avoid double boosting."
+        )
     if NUM_CLASSES == 2 and abnormal_ratio < 0.45:
         try:
             batch_sampler = BalancedBatchSampler(tr_y, batch_size=args.batch_size)
@@ -310,8 +312,8 @@ def main() -> None:
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
 
-    # Keep loss gently reflecting class prior; avoid abnormal over-weighting that suppresses class N.
-    effective_abnormal_boost = 1.0 if sampler is not None else min(args.class_weight_abnormal, 1.0)
+    # Keep loss gently reflecting class prior; when a sampler balances classes, avoid double-weighting.
+    effective_abnormal_boost = args.class_weight_abnormal
     class_weights_np = compute_class_weights(
         tr_y,
         abnormal_boost=effective_abnormal_boost,
@@ -338,7 +340,13 @@ def main() -> None:
         f"{np.round(class_weights_np.cpu().numpy(), 4)} (mean={mean_w:.4f}, min={min_w:.4f}, max={max_w:.4f})"
     )
 
-    class_weights = class_weights_np.to(device)
+    # If a sampler already balances classes, use uniform loss weights to prevent over-emphasizing rare classes.
+    if sampler is not None:
+        print("Sampler active -> using uniform CE weights (no extra abnormal boost) to avoid double balancing")
+        class_weights = torch.ones_like(class_weights_np)
+    else:
+        class_weights = class_weights_np
+    class_weights = class_weights.to(device)
     base_weights = class_weights.clone()
 
     miss_ema = 0.25
