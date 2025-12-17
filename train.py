@@ -231,6 +231,24 @@ def parse_args() -> argparse.Namespace:
     )
     _add_bool_arg(
         parser,
+        "use_weighted_sampler",
+        default=False,
+        help_text="enable weighted sampler (sqrt balancing) for long-tail classes",
+    )
+    parser.add_argument(
+        "--sampler_power",
+        type=float,
+        default=0.5,
+        help="inverse-frequency exponent for sampler (0.5=sqrt, 1.0=full balance)",
+    )
+    parser.add_argument(
+        "--sampler_abnormal_boost",
+        type=float,
+        default=1.0,
+        help="extra boost applied to non-normal classes in the sampler",
+    )
+    _add_bool_arg(
+        parser,
         "use_fn_penalty",
         default=True,
         help_text="adaptive abnormal upweighting based on recent miss rate (set false for plain CE)",
@@ -279,17 +297,18 @@ def main() -> None:
 
     sampler = None
     batch_sampler = None
-    sampler_boost = 1.0
-    if NUM_CLASSES == 2 and abnormal_ratio < 0.35:
-        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
+    sampler_boost = args.sampler_abnormal_boost
+    if args.use_weighted_sampler and NUM_CLASSES == 2 and abnormal_ratio < 0.35:
+        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost, power=args.sampler_power)
         print(
             "Enabling weighted sampler without extra abnormal boost to avoid collapse; "
-            f"boost={sampler_boost:.2f}"
+            f"boost={sampler_boost:.2f}, power={args.sampler_power:.2f}"
         )
-    elif NUM_CLASSES > 2:
-        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
+    elif args.use_weighted_sampler and NUM_CLASSES > 2:
+        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost, power=args.sampler_power)
         print(
-            "Using weighted sampler for 4-class to expose rare S/V beats; loss weights will stay uniform to avoid double boosting."
+            "Using weighted sampler for 4-class to surface rare S/V beats; loss weights stay uniform to avoid double boosting. "
+            f"power={args.sampler_power:.2f}, boost={sampler_boost:.2f}"
         )
     if NUM_CLASSES == 2 and abnormal_ratio < 0.45:
         try:

@@ -321,12 +321,18 @@ def l2_normalize(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return x / (x.norm(p=2, dim=1, keepdim=True) + eps)
 
 
-def make_weighted_sampler(labels: np.ndarray, abnormal_boost: float = 1.0) -> WeightedRandomSampler:
-    """Create a weighted sampler to upsample minority/abnormal beats.
+def make_weighted_sampler(
+    labels: np.ndarray,
+    abnormal_boost: float = 1.0,
+    power: float = 0.5,
+) -> WeightedRandomSampler:
+    """Create a weighted sampler to softly upsample minority/abnormal beats.
 
     Args:
         labels: Array of integer labels.
-        abnormal_boost: Multiplicative boost for the abnormal class (label==1).
+        abnormal_boost: Multiplicative boost for abnormal classes (label!=0).
+        power: Exponent on inverse frequency; 0.5 produces sqrt balancing instead
+            of fully uniform sampling.
 
     Returns:
         WeightedRandomSampler configured with per-sample weights.
@@ -338,8 +344,8 @@ def make_weighted_sampler(labels: np.ndarray, abnormal_boost: float = 1.0) -> We
     class_weights: Dict[int, float] = {}
     abnormal_labels = [lbl for lbl in counts.keys() if lbl != 0]
     for cls, cnt in counts.items():
-        # inverse frequency weighting
-        class_weights[cls] = num_samples / (len(counts) * cnt)
+        # inverse frequency with a gentle power (default sqrt) to avoid over-equalizing
+        class_weights[cls] = (num_samples / (len(counts) * cnt)) ** power
         if cls in abnormal_labels:
             class_weights[cls] *= abnormal_boost
     sample_weights = [class_weights[y] for y in label_list]

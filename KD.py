@@ -72,6 +72,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold_miss_penalty", type=float, default=1.25)
     parser.add_argument("--threshold_gen_recall_gain", type=float, default=2.5)
     parser.add_argument("--threshold_gen_miss_penalty", type=float, default=1.35)
+    _add_bool_arg(
+        parser,
+        "use_weighted_sampler",
+        default=False,
+        help_text="enable weighted sampler (sqrt balancing) for long-tail classes",
+    )
+    parser.add_argument(
+        "--sampler_power",
+        type=float,
+        default=0.5,
+        help="inverse-frequency exponent for sampler (0.5=sqrt, 1.0=full balance)",
+    )
+    parser.add_argument(
+        "--sampler_abnormal_boost",
+        type=float,
+        default=1.0,
+        help="extra boost applied to non-normal classes in the sampler",
+    )
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
     parser.add_argument("--teacher_path", type=str, default=os.path.join("saved_models", "teacher_model.pth"))
@@ -115,12 +133,15 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
     total_counts = class_counts.sum()
     abnormal_ratio = 1.0 - (class_counts[0] / total_counts) if total_counts > 0 else 0.0
     print(f"[KD] Train class counts (N,S,V,O): {class_counts.tolist()} | total={int(total_counts)}")
-    sampler_boost = 1.0
-    if num_classes == 2 and abnormal_ratio < 0.35:
-        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
-    elif num_classes > 2:
-        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
-        print("[KD] Using weighted sampler for 4-class to expose rare S/V beats; CE weights will be uniform to avoid double boosts.")
+    sampler_boost = args.sampler_abnormal_boost
+    if args.use_weighted_sampler and num_classes == 2 and abnormal_ratio < 0.35:
+        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost, power=args.sampler_power)
+    elif args.use_weighted_sampler and num_classes > 2:
+        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost, power=args.sampler_power)
+        print(
+            "[KD] Using weighted sampler for 4-class to expose rare S/V beats; CE weights will be uniform to avoid double boosts. "
+            f"power={args.sampler_power:.2f}, boost={sampler_boost:.2f}"
+        )
     if len(np.unique(tr_y)) == 2 and abnormal_ratio < 0.45:
         try:
             batch_sampler = BalancedBatchSampler(tr_y, batch_size=args.batch_size)
@@ -175,11 +196,14 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
     kd_sampler = None
     kd_batch_sampler = None
     kd_abnormal_ratio = float(np.mean(kd_y)) if len(kd_y) > 0 else 0.0
-    if num_classes == 2 and kd_abnormal_ratio < 0.35:
-        kd_sampler = make_weighted_sampler(kd_y, abnormal_boost=sampler_boost)
-    elif num_classes > 2:
-        kd_sampler = make_weighted_sampler(kd_y, abnormal_boost=sampler_boost)
-        print("[KD] Using KD weighted sampler for 4-class; KD CE weights will be uniform to avoid double boosts.")
+    if args.use_weighted_sampler and num_classes == 2 and kd_abnormal_ratio < 0.35:
+        kd_sampler = make_weighted_sampler(kd_y, abnormal_boost=sampler_boost, power=args.sampler_power)
+    elif args.use_weighted_sampler and num_classes > 2:
+        kd_sampler = make_weighted_sampler(kd_y, abnormal_boost=sampler_boost, power=args.sampler_power)
+        print(
+            "[KD] Using KD weighted sampler for 4-class; KD CE weights will be uniform to avoid double boosts. "
+            f"power={args.sampler_power:.2f}, boost={sampler_boost:.2f}"
+        )
     if kd_abnormal_ratio < 0.45:
         try:
             kd_batch_sampler = BalancedBatchSampler(kd_y, batch_size=args.batch_size)
