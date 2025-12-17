@@ -15,17 +15,11 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
 from matplotlib import pyplot as plt
-from sklearn.metrics import auc, confusion_matrix, roc_curve
+from sklearn.metrics import confusion_matrix
 
 from data import BEAT_LABEL_MAP, ECGBeatDataset, load_records, set_seed, split_dataset
 from models.student import SegmentAwareStudent
-from utils import (
-    BalancedBatchSampler,
-    compute_class_weights,
-    confusion_metrics,
-    make_weighted_sampler,
-    sweep_thresholds_blended,
-)
+from utils import compute_class_weights, compute_multiclass_metrics, make_weighted_sampler
 
 
 TRAIN_RECORDS = [
@@ -80,10 +74,13 @@ GENERALIZATION_RECORDS = [
     "234",
 ]
 
+NUM_CLASSES = len(set(BEAT_LABEL_MAP.values()))
+CLASS_NAMES = ["N", "S", "V", "O"]
+
 
 def build_student(args: argparse.Namespace, device: torch.device) -> nn.Module:
     student = SegmentAwareStudent(
-        num_classes=len(set(BEAT_LABEL_MAP.values())),
+        num_classes=NUM_CLASSES,
         num_mlp_layers=args.num_mlp_layers,
         dropout_rate=args.dropout_rate,
         use_value_constraint=args.use_value_constraint,
@@ -97,16 +94,16 @@ def evaluate(
     model: SegmentAwareStudent,
     data_loader: DataLoader,
     device: torch.device,
-    return_probs: bool = False,
-    threshold: float | None = None,
-) -> Tuple[float, Dict[str, float], List[int], List[int], List[float]]:
+    num_classes: int,
+) -> Tuple[float, Dict[str, float], List[int], List[int], torch.Tensor]:
     model.eval()
     criterion = nn.CrossEntropyLoss()
     total_loss = 0.0
     total = 0
     preds: List[int] = []
     trues: List[int] = []
-    probs: List[float] = []
+    probs_all: List[torch.Tensor] = []
+    sample_debug: Optional[Dict[str, torch.Tensor]] = None
     with torch.no_grad():
         for signals, labels in data_loader:
             signals, labels = signals.to(device), labels.to(device)
@@ -114,30 +111,64 @@ def evaluate(
             loss = criterion(logits, labels)
             total_loss += loss.item() * labels.size(0)
             total += labels.size(0)
-            prob_pos = torch.softmax(logits, dim=1)[:, 1]
-            if threshold is None:
-                pred = torch.argmax(logits, dim=1)
-            else:
-                pred = (prob_pos >= threshold).long()
+            prob_all = torch.softmax(logits, dim=1)
+            pred = torch.argmax(logits, dim=1)
             preds.extend(pred.cpu().tolist())
             trues.extend(labels.cpu().tolist())
-            if return_probs:
-                probs.extend(prob_pos.cpu().tolist())
+            probs_all.append(prob_all.detach().cpu())
+            if sample_debug is None:
+                sample_debug = {
+                    "y_true": labels.detach().cpu(),
+                    "pred": pred.detach().cpu(),
+                    "prob_all": prob_all.detach().cpu(),
+                }
     avg_loss = total_loss / max(total, 1)
-    metrics = confusion_metrics(trues, preds)
-    return avg_loss, metrics, trues, preds, probs
+    metrics = compute_multiclass_metrics(trues, preds, num_classes)  # type: ignore[arg-type]
+
+    if sample_debug is not None:
+        unique_y = torch.unique(torch.tensor(trues))
+        print(f"[Eval] Unique y_true (4-class): {unique_y.tolist()}")
+        cm = confusion_matrix(trues, preds, labels=list(range(num_classes)))
+        print(f"[Eval] 4-class confusion matrix (rows=true, cols=pred):\n{cm}")
+        per_cls = metrics.get("per_class", {}) if isinstance(metrics, dict) else {}
+        for cid in range(num_classes):
+            mc = per_cls.get(cid, {})
+            print(
+                f"[Eval] Class {CLASS_NAMES[cid]}: precision={mc.get('precision', 0):.3f} "
+                f"recall={mc.get('recall', 0):.3f} f1={mc.get('f1', 0):.3f}"
+            )
+        print(
+            "[Eval] Sample sanity (first batch, first 10):",
+            "y_true=", sample_debug["y_true"][:10].tolist(),
+            "pred=", sample_debug["pred"][:10].tolist(),
+            "prob_first_class=", sample_debug["prob_all"][:10, 0].tolist(),
+        )
+
+    stacked_probs = torch.cat(probs_all, dim=0) if probs_all else torch.empty(0, num_classes)
+    return avg_loss, metrics, trues, preds, stacked_probs
 
 
 def _add_bool_arg(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
-    """Backward-compatible boolean flags with --name / --no-name."""
+    """Backward-compatible boolean flags with --name / --no-name.
 
-    parser.add_argument(f"--{name}", dest=name, action="store_true", help=f"Enable {help_text}")
+    Guard against double registration (seen in some downstream wrappers) by
+    skipping if the positive flag already exists.
+    """
+
+    opt = f"--{name}"
+    if any(opt in action.option_strings for action in parser._actions):
+        parser.set_defaults(**{name: default})
+        return
+
+    parser.add_argument(opt, dest=name, action="store_true", help=f"Enable {help_text}")
     parser.add_argument(f"--no-{name}", dest=name, action="store_false", help=f"Disable {help_text}")
     parser.set_defaults(**{name: default})
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="MIT-BIH ECG training with cross-entropy baseline")
+    parser = argparse.ArgumentParser(
+        description="MIT-BIH ECG training with cross-entropy baseline", conflict_handler="resolve"
+    )
     parser.add_argument("--data_path", type=str, default="E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/")
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -149,34 +180,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout_rate", type=float, default=0.2)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
-    parser.add_argument("--class_weight_abnormal", type=float, default=1.35)
     parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
-    parser.add_argument("--generalization_score_weight", type=float, default=0.35)
-    parser.add_argument("--threshold_target_miss", type=float, default=0.10)
-    parser.add_argument("--threshold_max_fpr", type=float, default=0.10)
-    parser.add_argument(
-        "--threshold_recall_gain",
-        type=float,
-        default=2.0,
-        help="Sensitivity gain when scoring thresholds to prefer lower miss rates",
+    _add_bool_arg(
+        parser,
+        "use_weighted_sampler",
+        default=False,
+        help_text="enable weighted sampler (sqrt balancing) for long-tail classes",
     )
     parser.add_argument(
-        "--threshold_miss_penalty",
+        "--sampler_power",
         type=float,
-        default=1.25,
-        help="Penalty weight on miss rate during blended threshold scoring",
-    )
-    parser.add_argument(
-        "--threshold_gen_recall_gain",
-        type=float,
-        default=2.5,
-        help="Sensitivity gain applied to generalization metrics during threshold sweeps",
-    )
-    parser.add_argument(
-        "--threshold_gen_miss_penalty",
-        type=float,
-        default=1.35,
-        help="Miss-rate penalty applied to generalization metrics during threshold sweeps",
+        default=0.5,
+        help="inverse-frequency exponent for sampler (0.5=sqrt, 1.0=full balance)",
     )
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
@@ -201,52 +216,74 @@ def main() -> None:
     tr_x, tr_y, va_x, va_y = split_dataset(train_x, train_y, val_ratio=0.2)
     print(f"Train: {len(tr_x)} | Val: {len(va_x)} | Generalization: {len(gen_x)}")
 
-    abnormal_ratio = float(np.mean(tr_y)) if len(tr_y) > 0 else 0.0
+    def _print_class_stats(name: str, labels: np.ndarray) -> None:
+        counts = np.bincount(labels, minlength=NUM_CLASSES)
+        total = counts.sum()
+        print(f"{name} class counts (N,S,V,O): {counts.tolist()} | total={int(total)}")
+
+    _print_class_stats("Train", tr_y)
+    _print_class_stats("Val", va_y)
+    _print_class_stats("Gen", gen_y)
+
+    class_counts = np.bincount(tr_y, minlength=NUM_CLASSES)
+    total_counts = class_counts.sum()
+    abnormal_ratio = 1.0 - (class_counts[0] / total_counts) if total_counts > 0 else 0.0
     print(
-        f"Class ratio (abnormal): {abnormal_ratio:.3f} | counts -> normal: {(tr_y == 0).sum()} abnormal: {(tr_y == 1).sum()}"
+        "Class distribution (N,S,V,O): "
+        f"{class_counts.tolist()} | non-normal fraction={abnormal_ratio:.3f}"
     )
 
     train_dataset = ECGBeatDataset(tr_x, tr_y)
 
     sampler = None
-    batch_sampler = None
-    sampler_boost = 1.2
-    if abnormal_ratio < 0.35:
-        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
+    if args.use_weighted_sampler:
+        sampler = make_weighted_sampler(tr_y, power=args.sampler_power)
         print(
-            "Enabling mild abnormal oversampling: "
-            f"boost={sampler_boost:.2f}, expected abnormal frac≈{min(0.5, abnormal_ratio * sampler_boost):.2f}"
+            "Using weighted sampler for 4-class to surface rare S/V beats; loss weights stay uniform to avoid double boosting. "
+            f"power={args.sampler_power:.2f}"
         )
-    if abnormal_ratio < 0.45:
-        try:
-            batch_sampler = BalancedBatchSampler(tr_y, batch_size=args.batch_size)
-            print("Using balanced batch sampler to keep per-batch class mix stable")
-        except ValueError:
-            batch_sampler = None
 
-    if batch_sampler is not None:
-        train_loader = DataLoader(train_dataset, batch_sampler=batch_sampler)
-    else:
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=args.batch_size,
-            shuffle=sampler is None,
-            sampler=sampler,
-        )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=sampler is None,
+        sampler=sampler,
+    )
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
 
-    # Mitigate collapse to the majority class by balancing cross-entropy with class weights
-    class_counts = np.bincount(tr_y, minlength=2)
+    # Keep loss gently reflecting class prior with sqrt inverse-frequency weights (no binary boosts).
     class_weights_np = compute_class_weights(
         tr_y,
-        abnormal_boost=args.class_weight_abnormal,
         max_ratio=args.class_weight_max_ratio,
+        num_classes=NUM_CLASSES,
+        power=0.5,
     )
-    class_weights = class_weights_np.to(device)
-    base_weights = class_weights.clone()
+    raw_weights = []
+    for idx, count in enumerate(class_counts):
+        freq = count / max(total_counts, 1)
+        base = (1.0 / max(freq, 1e-8)) ** 0.5
+        raw_weights.append(base)
+    mean_w = float(class_weights_np.mean()) if class_weights_np.numel() > 0 else 0.0
+    min_w = mean_w / args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
+    max_w = mean_w * args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
+    print(
+        "Class weights computed as (1/freq)^0.5 (no binary abnormal boost), normalized to mean~1: "
+        f"raw={np.round(raw_weights, 4)}"
+    )
+    print(
+        f"Clamped to max_ratio={args.class_weight_max_ratio}: final weights="
+        f"{np.round(class_weights_np.cpu().numpy(), 4)} (mean={mean_w:.4f}, min={min_w:.4f}, max={max_w:.4f})"
+    )
 
-    miss_ema = 0.25
+    # If a sampler already balances classes, use uniform loss weights to prevent over-emphasizing rare classes.
+    if sampler is not None:
+        print("Sampler active -> using uniform CE weights (no extra abnormal boost) to avoid double balancing")
+        class_weights = torch.ones_like(class_weights_np)
+    else:
+        class_weights = class_weights_np
+    class_weights = class_weights.to(device)
+    base_weights = class_weights.clone()
 
     os.makedirs("artifacts", exist_ok=True)
     log_path = os.path.join(
@@ -280,9 +317,8 @@ def main() -> None:
 
     print(f"Preprocessed input range: [{data_min:.3f}, {data_max:.3f}] (expected within [-1, 1])")
 
-    best_val_f1 = -float("inf")
+    best_val_macro_f1 = -float("inf")
     best_state = None
-    best_threshold = 0.5
     patience_counter = 0
 
     history: List[Dict[str, float]] = []
@@ -292,13 +328,7 @@ def main() -> None:
         running_loss = 0.0
         total = 0
 
-        adaptive_pos_boost = 1.0 + miss_ema * 0.8
         epoch_weights = base_weights.clone()
-        epoch_weights[1] = torch.clamp(
-            base_weights[1] * adaptive_pos_boost,
-            min=base_weights.min() * 0.8,
-            max=base_weights.max() * 2.0,
-        )
         ce_loss_fn = nn.CrossEntropyLoss(weight=epoch_weights)
 
         for signals, labels in train_loader:
@@ -317,35 +347,19 @@ def main() -> None:
 
         train_loss = running_loss / max(total, 1)
 
-        val_loss, _, val_true, _, val_probs = evaluate(
-            student, val_loader, device, return_probs=True
+        val_loss, val_metrics_mc, val_true, val_pred_mc, _ = evaluate(
+            student, val_loader, device, NUM_CLASSES
         )
-        gen_loss, _, gen_true, _, gen_probs = evaluate(
-            student, gen_loader, device, return_probs=True
+        gen_loss, gen_metrics_mc, gen_true, gen_pred_mc, _ = evaluate(
+            student, gen_loader, device, NUM_CLASSES
         )
-
-        best_thr_epoch, val_metrics, gen_metrics = sweep_thresholds_blended(
-            val_true,
-            val_probs,
-            gen_true,
-            gen_probs,
-            gen_weight=args.generalization_score_weight,
-            recall_gain=args.threshold_recall_gain,
-            miss_penalty=args.threshold_miss_penalty,
-            gen_recall_gain=args.threshold_gen_recall_gain,
-            gen_miss_penalty=args.threshold_gen_miss_penalty,
-            miss_target=args.threshold_target_miss,
-            fpr_cap=args.threshold_max_fpr,
-        )
-
-        miss_ema = 0.8 * miss_ema + 0.2 * val_metrics["miss_rate"]
 
         scheduler.step(val_loss)
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
-            f"Val F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}% | "
-            f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}% | Thr {best_thr_epoch:.2f}"
+            f"Val MacroF1 {val_metrics_mc['macro_f1']:.3f} Acc {val_metrics_mc['accuracy']:.3f} | "
+            f"Gen MacroF1 {gen_metrics_mc['macro_f1']:.3f} Acc {gen_metrics_mc['accuracy']:.3f}"
         )
 
         history.append(
@@ -353,13 +367,10 @@ def main() -> None:
                 "epoch": epoch,
                 "train_loss": train_loss,
                 "val_loss": val_loss,
-                "val_f1": val_metrics["f1"],
-                "val_miss": val_metrics["miss_rate"],
-                "val_fpr": val_metrics["fpr"],
-                "gen_f1": gen_metrics["f1"],
-                "gen_miss": gen_metrics["miss_rate"],
-                "gen_fpr": gen_metrics["fpr"],
-                "threshold": best_thr_epoch,
+                "val_macro_f1": val_metrics_mc["macro_f1"],
+                "val_acc": val_metrics_mc["accuracy"],
+                "gen_macro_f1": gen_metrics_mc["macro_f1"],
+                "gen_acc": gen_metrics_mc["accuracy"],
             }
         )
 
@@ -369,33 +380,27 @@ def main() -> None:
                 "epoch": epoch,
                 "train_loss": train_loss,
                 "val_loss": val_loss,
-                "val_f1": val_metrics["f1"],
-                "val_miss": val_metrics["miss_rate"],
-                "val_fpr": val_metrics["fpr"],
-                "gen_f1": gen_metrics["f1"],
-                "gen_miss": gen_metrics["miss_rate"],
-                "gen_fpr": gen_metrics["fpr"],
-                "threshold": best_thr_epoch,
+                "val_macro_f1": val_metrics_mc["macro_f1"],
+                "val_acc": val_metrics_mc["accuracy"],
+                "gen_macro_f1": gen_metrics_mc["macro_f1"],
+                "gen_acc": gen_metrics_mc["accuracy"],
             }
         )
 
-        if val_metrics["f1"] > best_val_f1:
-            best_val_f1 = val_metrics["f1"]
+        # 4-class monitoring: use macro F1 to drive checkpointing/early stopping
+        if val_metrics_mc["macro_f1"] > best_val_macro_f1:
+            best_val_macro_f1 = val_metrics_mc["macro_f1"]
             best_state = student.state_dict()
-            best_threshold = best_thr_epoch
             patience_counter = 0
-            print("  -> New best model saved.")
+            print("  -> New best model saved (by 4-class MacroF1).")
             _write_log(
                 {
                     "event": "best",
                     "epoch": epoch,
-                    "val_f1": val_metrics["f1"],
-                    "val_miss": val_metrics["miss_rate"],
-                    "val_fpr": val_metrics["fpr"],
-                    "gen_f1": gen_metrics["f1"],
-                    "gen_miss": gen_metrics["miss_rate"],
-                    "gen_fpr": gen_metrics["fpr"],
-                    "threshold": best_thr_epoch,
+                    "val_macro_f1": val_metrics_mc["macro_f1"],
+                    "val_acc": val_metrics_mc["accuracy"],
+                    "gen_macro_f1": gen_metrics_mc["macro_f1"],
+                    "gen_acc": gen_metrics_mc["accuracy"],
                 }
             )
         else:
@@ -407,56 +412,50 @@ def main() -> None:
     if best_state is not None:
         student.load_state_dict(best_state)
 
-    val_loss, _, val_true, _, val_probs = evaluate(
-        student, val_loader, device, return_probs=True
+    val_loss, val_metrics_mc, val_true, val_pred_mc, _ = evaluate(
+        student, val_loader, device, NUM_CLASSES
     )
-    gen_loss, _, gen_true, _, gen_probs = evaluate(
-        student, gen_loader, device, return_probs=True
+    gen_loss, gen_metrics_mc, gen_true, gen_pred_mc, _ = evaluate(
+        student, gen_loader, device, NUM_CLASSES
     )
 
-    best_threshold, val_metrics, gen_metrics = sweep_thresholds_blended(
-        val_true,
-        val_probs,
-        gen_true,
-        gen_probs,
-        gen_weight=args.generalization_score_weight,
-        recall_gain=args.threshold_recall_gain,
-        miss_penalty=args.threshold_miss_penalty,
-        gen_recall_gain=args.threshold_gen_recall_gain,
-        gen_miss_penalty=args.threshold_gen_miss_penalty,
-        miss_target=args.threshold_target_miss,
-        fpr_cap=args.threshold_max_fpr,
+    print(
+        f"Validation multi-class: Acc={val_metrics_mc['accuracy']:.3f}, MacroF1={val_metrics_mc['macro_f1']:.3f}"
     )
-    val_pred = (np.array(val_probs) >= best_threshold).astype(int).tolist()
-    gen_pred = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
+    print(
+        f"Generalization multi-class: Acc={gen_metrics_mc['accuracy']:.3f}, MacroF1={gen_metrics_mc['macro_f1']:.3f}"
+    )
 
-    print(
-        f"Final Val@thr={best_threshold:.2f}: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, "
-        f"miss={val_metrics['miss_rate'] * 100:.2f}%, fpr={val_metrics['fpr'] * 100:.2f}%"
-    )
-    print(
-        f"Generalization@thr={best_threshold:.2f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, "
-        f"miss={gen_metrics['miss_rate'] * 100:.2f}%, fpr={gen_metrics['fpr'] * 100:.2f}%"
-    )
+    val_cm = confusion_matrix(val_true, val_pred_mc, labels=list(range(NUM_CLASSES)))
+    gen_cm = confusion_matrix(gen_true, gen_pred_mc, labels=list(range(NUM_CLASSES)))
+    print(f"Validation 4-class confusion matrix (rows=true, cols=pred):\n{val_cm}")
+    for cid in range(NUM_CLASSES):
+        mc = val_metrics_mc.get("per_class", {}).get(cid, {})
+        print(
+            f"Val class {CLASS_NAMES[cid]}: precision={mc.get('precision', 0):.3f} "
+            f"recall={mc.get('recall', 0):.3f} f1={mc.get('f1', 0):.3f}"
+        )
+    print(f"Generalization 4-class confusion matrix (rows=true, cols=pred):\n{gen_cm}")
+    for cid in range(NUM_CLASSES):
+        mc = gen_metrics_mc.get("per_class", {}).get(cid, {})
+        print(
+            f"Gen class {CLASS_NAMES[cid]}: precision={mc.get('precision', 0):.3f} "
+            f"recall={mc.get('recall', 0):.3f} f1={mc.get('f1', 0):.3f}"
+        )
 
     _write_log(
         {
             "event": "final",
-            "best_threshold": best_threshold,
             "val_loss": val_loss,
-            "val_f1": val_metrics["f1"],
-            "val_miss": val_metrics["miss_rate"],
-            "val_fpr": val_metrics["fpr"],
             "gen_loss": gen_loss,
-            "gen_f1": gen_metrics["f1"],
-            "gen_miss": gen_metrics["miss_rate"],
-            "gen_fpr": gen_metrics["fpr"],
+            "val_macro_f1": val_metrics_mc["macro_f1"],
+            "val_acc": val_metrics_mc["accuracy"],
+            "gen_macro_f1": gen_metrics_mc["macro_f1"],
+            "gen_acc": gen_metrics_mc["accuracy"],
         }
     )
 
-    # Persist probabilities for offline threshold resweeps and diagnostics
-    np.save(os.path.join("artifacts", "val_probs.npy"), np.array(val_probs))
-    np.save(os.path.join("artifacts", "gen_probs.npy"), np.array(gen_probs))
+    # Persist labels for offline diagnostics
     np.save(os.path.join("artifacts", "val_labels.npy"), np.array(val_true))
     np.save(os.path.join("artifacts", "gen_labels.npy"), np.array(gen_true))
 
@@ -466,7 +465,6 @@ def main() -> None:
         {
             "student_state_dict": student.state_dict(),
             "config": vars(args),
-            "best_threshold": best_threshold,
         },
         save_path,
     )
@@ -485,13 +483,11 @@ def main() -> None:
         axes[0].set_title("Loss Curves")
         axes[0].legend()
 
-        axes[1].plot(epochs, [h["val_f1"] for h in history], label="F1")
-        axes[1].plot(epochs, [h["val_miss"] for h in history], label="Miss Rate")
-        axes[1].plot(epochs, [h["val_fpr"] for h in history], label="FPR")
-        if any("gen_f1" in h for h in history):
-            axes[1].plot(epochs, [h.get("gen_f1", float("nan")) for h in history], label="Gen F1", linestyle="--")
-            axes[1].plot(epochs, [h.get("gen_miss", float("nan")) for h in history], label="Gen Miss", linestyle="--")
-            axes[1].plot(epochs, [h.get("gen_fpr", float("nan")) for h in history], label="Gen FPR", linestyle="--")
+        axes[1].plot(epochs, [h["val_macro_f1"] for h in history], label="Val MacroF1")
+        axes[1].plot(epochs, [h["val_acc"] for h in history], label="Val Acc")
+        if any("gen_macro_f1" in h for h in history):
+            axes[1].plot(epochs, [h.get("gen_macro_f1", float("nan")) for h in history], label="Gen MacroF1", linestyle="--")
+            axes[1].plot(epochs, [h.get("gen_acc", float("nan")) for h in history], label="Gen Acc", linestyle="--")
         axes[1].set_xlabel("Epoch")
         axes[1].set_title("Val Metrics")
         axes[1].legend()
@@ -499,41 +495,28 @@ def main() -> None:
         fig.savefig(os.path.join("artifacts", "training_curves.png"))
         plt.close(fig)
 
-    def _save_roc(y_true: List[int], probs: List[float], name: str) -> None:
-        fpr, tpr, _ = roc_curve(y_true, probs)
-        roc_auc = auc(fpr, tpr)
+    def _save_confusion(y_true: List[int], y_pred: List[int], name: str, labels: List[int], class_names: List[str]) -> None:
+        cm = confusion_matrix(y_true, y_pred, labels=labels)
         fig, ax = plt.subplots(figsize=(5, 4))
-        ax.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
-        ax.plot([0, 1], [0, 1], "k--", alpha=0.4)
-        ax.set_xlabel("False Positive Rate")
-        ax.set_ylabel("True Positive Rate")
-        ax.set_title(f"ROC - {name}")
-        ax.legend()
-        fig.savefig(os.path.join("artifacts", f"roc_{name.lower()}.png"))
-        plt.close(fig)
-
-    def _save_confusion(y_true: List[int], y_pred: List[int], name: str) -> None:
-        cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-        fig, ax = plt.subplots(figsize=(4, 4))
         im = ax.imshow(cm, cmap="Blues")
-        ax.set_xticks([0, 1])
-        ax.set_yticks([0, 1])
+        ax.set_xticks(range(len(labels)))
+        ax.set_yticks(range(len(labels)))
+        ax.set_xticklabels(class_names)
+        ax.set_yticklabels(class_names)
         ax.set_xlabel("Predicted")
         ax.set_ylabel("True")
         ax.set_title(f"Confusion Matrix - {name}")
-        for i in range(2):
-            for j in range(2):
+        for i in range(len(labels)):
+            for j in range(len(labels)):
                 ax.text(j, i, cm[i, j], ha="center", va="center", color="black")
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         fig.savefig(os.path.join("artifacts", f"confusion_{name.lower()}.png"))
         plt.close(fig)
 
     _save_training_curves()
-    _save_roc(val_true, val_probs, "Val")
-    _save_roc(gen_true, gen_probs, "Generalization")
-    _save_confusion(val_true, val_pred, "Val")
-    _save_confusion(gen_true, gen_pred, "Generalization")
-    print("Saved training curves, ROC curves, and confusion matrices to ./artifacts")
+    _save_confusion(val_true, val_pred_mc, "Val_4class", list(range(NUM_CLASSES)), CLASS_NAMES)
+    _save_confusion(gen_true, gen_pred_mc, "Generalization_4class", list(range(NUM_CLASSES)), CLASS_NAMES)
+    print("Saved training curves and confusion matrices to ./artifacts")
     print(f"Training log saved to {log_path}")
 
 
