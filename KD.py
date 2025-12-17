@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import auc, roc_curve
+from sklearn.metrics import auc, confusion_matrix, roc_curve
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
@@ -19,7 +19,14 @@ from torch.utils.data import DataLoader
 from data import BEAT_LABEL_MAP, ECGBeatDataset, load_records, set_seed, split_dataset
 from models.student import SegmentAwareStudent
 from train import GENERALIZATION_RECORDS, TRAIN_RECORDS, build_student
-from utils import BalancedBatchSampler, compute_class_weights, confusion_metrics, make_weighted_sampler, sweep_thresholds_blended
+from utils import (
+    BalancedBatchSampler,
+    compute_class_weights,
+    compute_multiclass_metrics,
+    confusion_metrics,
+    make_weighted_sampler,
+    sweep_thresholds_blended,
+)
 
 # Distillation hyperparameters
 KD_TEMPERATURE = 3.0
@@ -65,6 +72,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold_miss_penalty", type=float, default=1.25)
     parser.add_argument("--threshold_gen_recall_gain", type=float, default=2.5)
     parser.add_argument("--threshold_gen_miss_penalty", type=float, default=1.35)
+    _add_bool_arg(
+        parser,
+        "use_weighted_sampler",
+        default=False,
+        help_text="enable weighted sampler (sqrt balancing) for long-tail classes",
+    )
+    parser.add_argument(
+        "--sampler_power",
+        type=float,
+        default=0.5,
+        help="inverse-frequency exponent for sampler (0.5=sqrt, 1.0=full balance)",
+    )
+    parser.add_argument(
+        "--sampler_abnormal_boost",
+        type=float,
+        default=1.0,
+        help="extra boost applied to non-normal classes in the sampler",
+    )
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
     parser.add_argument("--teacher_path", type=str, default=os.path.join("saved_models", "teacher_model.pth"))
@@ -103,11 +128,21 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
     train_dataset = ECGBeatDataset(tr_x, tr_y)
     sampler = None
     batch_sampler = None
-    abnormal_ratio = float(np.mean(tr_y)) if len(tr_y) > 0 else 0.0
-    sampler_boost = 1.2
-    if abnormal_ratio < 0.35:
-        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
-    if abnormal_ratio < 0.45:
+    num_classes = len(set(BEAT_LABEL_MAP.values()))
+    class_counts = np.bincount(tr_y, minlength=num_classes)
+    total_counts = class_counts.sum()
+    abnormal_ratio = 1.0 - (class_counts[0] / total_counts) if total_counts > 0 else 0.0
+    print(f"[KD] Train class counts (N,S,V,O): {class_counts.tolist()} | total={int(total_counts)}")
+    sampler_boost = args.sampler_abnormal_boost
+    if args.use_weighted_sampler and num_classes == 2 and abnormal_ratio < 0.35:
+        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost, power=args.sampler_power)
+    elif args.use_weighted_sampler and num_classes > 2:
+        sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost, power=args.sampler_power)
+        print(
+            "[KD] Using weighted sampler for 4-class to expose rare S/V beats; CE weights will be uniform to avoid double boosts. "
+            f"power={args.sampler_power:.2f}, boost={sampler_boost:.2f}"
+        )
+    if len(np.unique(tr_y)) == 2 and abnormal_ratio < 0.45:
         try:
             batch_sampler = BalancedBatchSampler(tr_y, batch_size=args.batch_size)
         except ValueError:
@@ -124,8 +159,32 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
         )
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
-    class_weights = compute_class_weights(tr_y, abnormal_boost=args.class_weight_abnormal, max_ratio=args.class_weight_max_ratio).to(
-        device
+    # For 4-class KD runs keep loss weights close to class prior (no extra abnormal boost)
+    # to avoid collapsing toward non-normal predictions; retain CLI boost only for binary.
+    effective_abnormal_boost = args.class_weight_abnormal if num_classes == 2 else 1.0
+    class_weights_np = compute_class_weights(
+        tr_y,
+        abnormal_boost=effective_abnormal_boost,
+        max_ratio=args.class_weight_max_ratio,
+        num_classes=num_classes,
+        power=0.5,
+    )
+    raw_weights = []
+    for idx, count in enumerate(class_counts):
+        freq = count / max(total_counts, 1)
+        base = (1.0 / max(freq, 1e-8)) ** 0.5
+        if idx != 0:
+            base *= effective_abnormal_boost
+        raw_weights.append(base)
+    if sampler is not None:
+        print("[KD] Sampler active -> using uniform CE weights (no extra abnormal boost) to avoid double balancing")
+        class_weights = torch.ones_like(class_weights_np)
+    else:
+        class_weights = class_weights_np
+    class_weights = class_weights.to(device)
+    print(
+        "[KD] Class weights (1/freq)^0.5 with abnormal boost "
+        f"{effective_abnormal_boost}: raw={np.round(raw_weights, 4)} | final={np.round(class_weights.cpu().numpy(), 4)}"
     )
 
     # Build a KD loader that mixes in part of the generalization distribution to reduce miss drift
@@ -138,9 +197,15 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
     kd_dataset = ECGBeatDataset(kd_x, kd_y)
     kd_sampler = None
     kd_batch_sampler = None
-    kd_abnormal_ratio = float(np.mean(kd_y)) if len(kd_y) > 0 else 0.0
-    if kd_abnormal_ratio < 0.35:
-        kd_sampler = make_weighted_sampler(kd_y, abnormal_boost=sampler_boost)
+    kd_abnormal_ratio = 1.0 - (np.count_nonzero(kd_y == 0) / len(kd_y)) if len(kd_y) > 0 else 0.0
+    if args.use_weighted_sampler and num_classes == 2 and kd_abnormal_ratio < 0.35:
+        kd_sampler = make_weighted_sampler(kd_y, abnormal_boost=sampler_boost, power=args.sampler_power)
+    elif args.use_weighted_sampler and num_classes > 2:
+        kd_sampler = make_weighted_sampler(kd_y, abnormal_boost=sampler_boost, power=args.sampler_power)
+        print(
+            "[KD] Using KD weighted sampler for 4-class; KD CE weights will be uniform to avoid double boosts. "
+            f"power={args.sampler_power:.2f}, boost={sampler_boost:.2f}"
+        )
     if kd_abnormal_ratio < 0.45:
         try:
             kd_batch_sampler = BalancedBatchSampler(kd_y, batch_size=args.batch_size)
@@ -155,9 +220,20 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
             shuffle=kd_sampler is None,
             sampler=kd_sampler,
         )
-    kd_class_weights = compute_class_weights(
-        kd_y, abnormal_boost=args.class_weight_abnormal * KD_MISS_WEIGHT, max_ratio=args.class_weight_max_ratio
-    ).to(device)
+    kd_abnormal_boost = (args.class_weight_abnormal if num_classes == 2 else 1.0) * KD_MISS_WEIGHT
+    kd_class_weights_np = compute_class_weights(
+        kd_y,
+        abnormal_boost=kd_abnormal_boost,
+        max_ratio=args.class_weight_max_ratio,
+        num_classes=num_classes,
+        power=0.5,
+    )
+    if kd_sampler is not None:
+        print("[KD] KD sampler active -> using uniform KD CE weights to avoid double balancing")
+        kd_class_weights = torch.ones_like(kd_class_weights_np)
+    else:
+        kd_class_weights = kd_class_weights_np
+    kd_class_weights = kd_class_weights.to(device)
 
     return DatasetBundle(
         train_loader,
@@ -280,8 +356,11 @@ def evaluate_with_probs(
     total_loss = 0.0
     total = 0
     preds: List[int] = []
-    trues: List[int] = []
+    preds_mc: List[int] = []
+    trues_bin: List[int] = []
+    trues_4: List[int] = []
     probs: List[float] = []
+    sample_debug: Dict[str, torch.Tensor] | None = None
     with torch.no_grad():
         for signals, labels in data_loader:
             signals, labels = signals.to(device), labels.to(device)
@@ -289,19 +368,60 @@ def evaluate_with_probs(
             loss = criterion(logits, labels)
             total_loss += loss.item() * labels.size(0)
             total += labels.size(0)
-            prob_pos = torch.softmax(logits, dim=1)[:, 1]
-            pred = (prob_pos >= threshold).long()
+            prob_all = torch.softmax(logits, dim=1)
+            prob_abnormal = prob_all[:, 1:].sum(dim=1)
+            pred = (prob_abnormal >= threshold).long()
+            pred_mc = torch.argmax(logits, dim=1)
             preds.extend(pred.cpu().tolist())
-            trues.extend(labels.cpu().tolist())
-            probs.extend(prob_pos.cpu().tolist())
+            preds_mc.extend(pred_mc.cpu().tolist())
+            trues_4.extend(labels.cpu().tolist())
+            trues_bin.extend((labels != 0).long().cpu().tolist())
+            probs.extend(prob_abnormal.cpu().tolist())
+            if sample_debug is None:
+                sample_debug = {
+                    "y_true_4": labels.detach().cpu(),
+                    "y_true_bin": (labels != 0).long().detach().cpu(),
+                    "p_abnormal": prob_abnormal.detach().cpu(),
+                    "pred_bin": pred.detach().cpu(),
+                }
     avg_loss = total_loss / max(total, 1)
-    metrics = confusion_metrics(trues, preds)
-    try:
-        fpr, tpr, _ = roc_curve(trues, probs)
-        metrics["roc_auc"] = auc(fpr, tpr)
-    except ValueError:
+
+    unique_y = torch.unique(torch.tensor(trues_4))
+    y_true_bin_tensor = torch.tensor(trues_bin)
+    pos = int((y_true_bin_tensor == 1).sum())
+    neg = int((y_true_bin_tensor == 0).sum())
+    print(f"[Eval/KD] Unique y_true (4-class): {unique_y.tolist()} | bin pos={pos}, neg={neg}")
+
+    metrics = confusion_metrics(trues_bin, preds)
+    mc_metrics = compute_multiclass_metrics(trues_4, preds_mc, num_classes=len(set(BEAT_LABEL_MAP.values())))
+    metrics["macro_f1_4"] = mc_metrics["macro_f1"]
+    metrics["per_class_4"] = mc_metrics["per_class"]
+    if len(torch.unique(y_true_bin_tensor)) < 2:
         metrics["roc_auc"] = 0.5
-    return avg_loss, metrics, trues, probs
+        print("[Eval/KD] ROC skipped due to single-class labels; defaulting to 0.5")
+    else:
+        fpr, tpr, _ = roc_curve(trues_bin, probs)
+        metrics["roc_auc"] = auc(fpr, tpr)
+    cm = confusion_matrix(trues_4, preds_mc, labels=list(range(len(set(BEAT_LABEL_MAP.values())))))
+    print(f"[Eval/KD] 4-class confusion matrix (rows=true, cols=pred):\n{cm}")
+    for cid, cname in enumerate(["N", "S", "V", "O"]):
+        mc = mc_metrics["per_class"].get(cid, {})
+        print(
+            f"[Eval/KD] Class {cname}: precision={mc.get('precision', 0):.3f} "
+            f"recall={mc.get('recall', 0):.3f} f1={mc.get('f1', 0):.3f}"
+        )
+
+    if sample_debug is not None:
+        print(
+            "[Eval/KD] Sample sanity (first batch, first 10):",
+            "y_true_4=", sample_debug["y_true_4"][:10].tolist(),
+            "y_true_bin=", sample_debug["y_true_bin"][:10].tolist(),
+            "p_abnormal=", sample_debug["p_abnormal"][:10].tolist(),
+            "pred_bin=", sample_debug["pred_bin"][:10].tolist(),
+            f"| ROC={metrics['roc_auc']:.3f} miss={metrics['miss_rate']:.3f} fpr={metrics['fpr']:.3f}",
+        )
+
+    return avg_loss, metrics, trues_bin, probs
 
 
 def train_teacher(args: argparse.Namespace, dataloaders: DatasetBundle, device: torch.device) -> nn.Module:

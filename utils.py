@@ -8,29 +8,44 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Sampler, WeightedRandomSampler
+from sklearn.metrics import accuracy_score, f1_score, precision_recall_fscore_support
 
 
 def compute_class_weights(
     labels: np.ndarray,
     abnormal_boost: float = 1.35,
     max_ratio: float = 2.0,
+    num_classes: int | None = None,
+    power: float = 0.5,
 ) -> torch.Tensor:
-    """Inverse-frequency class weights with optional abnormal boost and ratio clamp."""
+    """Mild inverse-frequency weights normalized near mean=1.
+
+    We use ``(1 / freq)**power`` (``power`` defaults to 0.5 for a square-root
+    scaling) so weights do not explode on rare classes. Abnormal classes (id !=
+    0) can receive a gentle ``abnormal_boost`` before normalizing to mean≈1.
+    A final clamp enforces ``max_ratio`` around the mean to avoid extreme
+    imbalance.
+    """
 
     counter = Counter(labels.tolist())
     total = len(labels)
     weights: List[float] = []
-    num_classes = len(set(labels.tolist()))
+    if num_classes is None:
+        num_classes = int(np.max(labels)) + 1 if len(labels) > 0 else 0
+
+    eps = 1e-8
     for i in range(num_classes):
-        if i in counter:
-            base = total / (num_classes * counter[i])
-            if num_classes == 2 and i == 1:
-                base *= abnormal_boost
-            weights.append(base)
-        else:
-            weights.append(1.0)
+        freq = counter.get(i, 0) / max(total, 1)
+        base = (1.0 / max(freq, eps)) ** power
+        if i != 0:
+            base *= abnormal_boost
+        weights.append(base)
 
     weight_tensor = torch.tensor(weights, dtype=torch.float32)
+
+    # Normalize to mean ~1 to keep magnitudes stable across datasets.
+    mean_w = weight_tensor.mean().clamp(min=eps)
+    weight_tensor = weight_tensor / mean_w
 
     # Clamp extreme ratios to avoid collapsing to predicting全异常或全正常
     if max_ratio is not None and max_ratio > 0:
@@ -40,6 +55,21 @@ def compute_class_weights(
         weight_tensor = weight_tensor.clamp(min=min_w, max=max_w)
 
     return weight_tensor
+
+
+def compute_multiclass_metrics(y_true: List[int], y_pred: List[int], num_classes: int) -> Dict[str, object]:
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, labels=list(range(num_classes)), zero_division=0
+    )
+    per_class = {
+        i: {"precision": float(p), "recall": float(r), "f1": float(f)}
+        for i, (p, r, f) in enumerate(zip(precision, recall, f1))
+    }
+    return {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "per_class": per_class,
+    }
 
 
 def confusion_metrics(y_true: List[int], y_pred: List[int]) -> Dict[str, float]:
@@ -291,12 +321,18 @@ def l2_normalize(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return x / (x.norm(p=2, dim=1, keepdim=True) + eps)
 
 
-def make_weighted_sampler(labels: np.ndarray, abnormal_boost: float = 1.0) -> WeightedRandomSampler:
-    """Create a weighted sampler to upsample minority/abnormal beats.
+def make_weighted_sampler(
+    labels: np.ndarray,
+    abnormal_boost: float = 1.0,
+    power: float = 0.5,
+) -> WeightedRandomSampler:
+    """Create a weighted sampler to softly upsample minority/abnormal beats.
 
     Args:
         labels: Array of integer labels.
-        abnormal_boost: Multiplicative boost for the abnormal class (label==1).
+        abnormal_boost: Multiplicative boost for abnormal classes (label!=0).
+        power: Exponent on inverse frequency; 0.5 produces sqrt balancing instead
+            of fully uniform sampling.
 
     Returns:
         WeightedRandomSampler configured with per-sample weights.
@@ -306,11 +342,12 @@ def make_weighted_sampler(labels: np.ndarray, abnormal_boost: float = 1.0) -> We
     counts = Counter(label_list)
     num_samples = len(label_list)
     class_weights: Dict[int, float] = {}
+    abnormal_labels = [lbl for lbl in counts.keys() if lbl != 0]
     for cls, cnt in counts.items():
-        # inverse frequency weighting
-        class_weights[cls] = num_samples / (len(counts) * cnt)
-    if 1 in class_weights:
-        class_weights[1] *= abnormal_boost
+        # inverse frequency with a gentle power (default sqrt) to avoid over-equalizing
+        class_weights[cls] = (num_samples / (len(counts) * cnt)) ** power
+        if cls in abnormal_labels:
+            class_weights[cls] *= abnormal_boost
     sample_weights = [class_weights[y] for y in label_list]
     return WeightedRandomSampler(sample_weights, num_samples=num_samples, replacement=True)
 
