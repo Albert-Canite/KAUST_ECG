@@ -113,6 +113,7 @@ def evaluate(
     trues: List[int] = []
     probs: List[float] = []
     metrics_fn = compute_multiclass_metrics if threshold is None else confusion_metrics
+    sample_debug: Optional[Dict[str, torch.Tensor]] = None
     with torch.no_grad():
         for signals, labels in data_loader:
             signals, labels = signals.to(device), labels.to(device)
@@ -121,7 +122,7 @@ def evaluate(
             total_loss += loss.item() * labels.size(0)
             total += labels.size(0)
             prob_all = torch.softmax(logits, dim=1)
-            prob_abnormal = 1.0 - prob_all[:, 0]
+            prob_abnormal = prob_all[:, 1:].sum(dim=1)
             if threshold is None:
                 pred = torch.argmax(logits, dim=1)
             else:
@@ -130,11 +131,35 @@ def evaluate(
             trues.extend(labels.cpu().tolist())
             if return_probs:
                 probs.extend(prob_abnormal.cpu().tolist())
+            if sample_debug is None:
+                sample_debug = {
+                    "y_true_4": labels.detach().cpu(),
+                    "p_abnormal": prob_abnormal.detach().cpu(),
+                }
+                sample_pred = (prob_abnormal >= (0.5 if threshold is None else threshold)).long()
+                sample_debug["pred_bin"] = sample_pred.detach().cpu()
+                sample_debug["y_true_bin"] = (labels != 0).long().detach().cpu()
     avg_loss = total_loss / max(total, 1)
     if threshold is None:
         metrics = metrics_fn(trues, preds, num_classes)  # type: ignore[arg-type]
     else:
-        metrics = metrics_fn(trues, preds)
+        y_true_bin = [int(y != 0) for y in trues]
+        metrics = metrics_fn(y_true_bin, preds)
+
+    if return_probs and sample_debug is not None:
+        unique_y = torch.unique(torch.tensor(trues))
+        y_true_bin_tensor = (torch.tensor(trues) != 0).long()
+        pos = int((y_true_bin_tensor == 1).sum())
+        neg = int((y_true_bin_tensor == 0).sum())
+        print(f"[Eval] Unique y_true (4-class): {unique_y.tolist()} | bin pos={pos}, neg={neg}")
+        print(
+            "[Eval] Sample sanity (first batch, first 10):",
+            "y_true_4=", sample_debug["y_true_4"][:10].tolist(),
+            "y_true_bin=", sample_debug["y_true_bin"][:10].tolist(),
+            "p_abnormal=", sample_debug["p_abnormal"][:10].tolist(),
+            "pred_bin=", sample_debug["pred_bin"][:10].tolist(),
+        )
+
     return avg_loss, metrics, trues, preds, probs
 
 
