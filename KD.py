@@ -159,7 +159,9 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
         )
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
-    effective_abnormal_boost = args.class_weight_abnormal
+    # For 4-class KD runs keep loss weights close to class prior (no extra abnormal boost)
+    # to avoid collapsing toward non-normal predictions; retain CLI boost only for binary.
+    effective_abnormal_boost = args.class_weight_abnormal if num_classes == 2 else 1.0
     class_weights_np = compute_class_weights(
         tr_y,
         abnormal_boost=effective_abnormal_boost,
@@ -195,7 +197,7 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
     kd_dataset = ECGBeatDataset(kd_x, kd_y)
     kd_sampler = None
     kd_batch_sampler = None
-    kd_abnormal_ratio = float(np.mean(kd_y)) if len(kd_y) > 0 else 0.0
+    kd_abnormal_ratio = 1.0 - (np.count_nonzero(kd_y == 0) / len(kd_y)) if len(kd_y) > 0 else 0.0
     if args.use_weighted_sampler and num_classes == 2 and kd_abnormal_ratio < 0.35:
         kd_sampler = make_weighted_sampler(kd_y, abnormal_boost=sampler_boost, power=args.sampler_power)
     elif args.use_weighted_sampler and num_classes > 2:
@@ -218,7 +220,7 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
             shuffle=kd_sampler is None,
             sampler=kd_sampler,
         )
-    kd_abnormal_boost = args.class_weight_abnormal * KD_MISS_WEIGHT
+    kd_abnormal_boost = (args.class_weight_abnormal if num_classes == 2 else 1.0) * KD_MISS_WEIGHT
     kd_class_weights_np = compute_class_weights(
         kd_y,
         abnormal_boost=kd_abnormal_boost,

@@ -332,7 +332,9 @@ def main() -> None:
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
 
     # Keep loss gently reflecting class prior; when a sampler balances classes, avoid double-weighting.
-    effective_abnormal_boost = args.class_weight_abnormal
+    # In 4-class mode, avoid extra abnormal boosts in the loss weights so the model
+    # remains sensitive to the strong normal prior; retain the CLI value for binary.
+    effective_abnormal_boost = args.class_weight_abnormal if NUM_CLASSES == 2 else 1.0
     class_weights_np = compute_class_weights(
         tr_y,
         abnormal_boost=effective_abnormal_boost,
