@@ -182,6 +182,36 @@ def parse_args() -> argparse.Namespace:
         default=0.5,
         help="inverse-frequency exponent for sampler (0.5=sqrt, 1.0=full balance)",
     )
+    _add_bool_arg(
+        parser,
+        "use_fn_penalty_4cls",
+        default=False,
+        help_text="binary-style FN penalty on abnormal beats (4-class debug default: off)",
+    )
+    _add_bool_arg(
+        parser,
+        "use_weighted_sampler",
+        default=False,
+        help_text="enable weighted sampler (sqrt balancing) for long-tail classes",
+    )
+    parser.add_argument(
+        "--sampler_power",
+        type=float,
+        default=0.5,
+        help="inverse-frequency exponent for sampler (0.5=sqrt, 1.0=full balance)",
+    )
+    parser.add_argument(
+        "--sampler_abnormal_boost",
+        type=float,
+        default=1.0,
+        help="extra boost applied to non-normal classes in the sampler",
+    )
+    _add_bool_arg(
+        parser,
+        "use_fn_penalty",
+        default=True,
+        help_text="adaptive abnormal upweighting based on recent miss rate (set false for plain CE)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")

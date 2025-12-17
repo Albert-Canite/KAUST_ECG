@@ -77,6 +77,7 @@ def make_weighted_sampler(labels: np.ndarray, power: float = 0.5) -> WeightedRan
     counts = Counter(label_list)
     num_samples = len(label_list)
     class_weights: Dict[int, float] = {}
+    abnormal_labels = [lbl for lbl in counts.keys() if lbl != 0]
     for cls, cnt in counts.items():
         class_weights[cls] = (num_samples / (len(counts) * cnt)) ** power
     sample_weights = [class_weights[y] for y in label_list]
