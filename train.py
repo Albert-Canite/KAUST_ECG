@@ -152,6 +152,16 @@ def evaluate(
         pos = int((y_true_bin_tensor == 1).sum())
         neg = int((y_true_bin_tensor == 0).sum())
         print(f"[Eval] Unique y_true (4-class): {unique_y.tolist()} | bin pos={pos}, neg={neg}")
+        if threshold is None:
+            cm = confusion_matrix(trues, preds, labels=list(range(num_classes)))
+            print(f"[Eval] 4-class confusion matrix (rows=true, cols=pred):\n{cm}")
+            per_cls = metrics.get("per_class", {}) if isinstance(metrics, dict) else {}
+            for cid in range(num_classes):
+                mc = per_cls.get(cid, {})
+                print(
+                    f"[Eval] Class {CLASS_NAMES[cid]}: precision={mc.get('precision', 0):.3f} "
+                    f"recall={mc.get('recall', 0):.3f} f1={mc.get('f1', 0):.3f}"
+                )
         print(
             "[Eval] Sample sanity (first batch, first 10):",
             "y_true_4=", sample_debug["y_true_4"][:10].tolist(),
@@ -213,6 +223,12 @@ def parse_args() -> argparse.Namespace:
         default=1.35,
         help="Miss-rate penalty applied to generalization metrics during threshold sweeps",
     )
+    _add_bool_arg(
+        parser,
+        "use_fn_penalty",
+        default=True,
+        help_text="adaptive abnormal upweighting based on recent miss rate (set false for plain CE)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
@@ -235,6 +251,15 @@ def main() -> None:
 
     tr_x, tr_y, va_x, va_y = split_dataset(train_x, train_y, val_ratio=0.2)
     print(f"Train: {len(tr_x)} | Val: {len(va_x)} | Generalization: {len(gen_x)}")
+
+    def _print_class_stats(name: str, labels: np.ndarray) -> None:
+        counts = np.bincount(labels, minlength=NUM_CLASSES)
+        total = counts.sum()
+        print(f"{name} class counts (N,S,V,O): {counts.tolist()} | total={int(total)}")
+
+    _print_class_stats("Train", tr_y)
+    _print_class_stats("Val", va_y)
+    _print_class_stats("Gen", gen_y)
 
     class_counts = np.bincount(tr_y, minlength=NUM_CLASSES)
     total_counts = class_counts.sum()
@@ -282,6 +307,26 @@ def main() -> None:
         abnormal_boost=args.class_weight_abnormal,
         max_ratio=args.class_weight_max_ratio,
         num_classes=NUM_CLASSES,
+    )
+    raw_weights = []
+    for idx, count in enumerate(class_counts):
+        if count > 0:
+            base = total_counts / (NUM_CLASSES * count)
+            if idx != 0:
+                base *= args.class_weight_abnormal
+            raw_weights.append(base)
+        else:
+            raw_weights.append(1.0)
+    mean_w = float(class_weights_np.mean()) if class_weights_np.numel() > 0 else 0.0
+    min_w = mean_w / args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
+    max_w = mean_w * args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
+    print(
+        "Class weights computed as inverse freq with abnormal boost "
+        f"{args.class_weight_abnormal}: raw={np.round(raw_weights, 4)}"
+    )
+    print(
+        f"Clamped to max_ratio={args.class_weight_max_ratio}: final weights="
+        f"{np.round(class_weights_np.cpu().numpy(), 4)} (mean={mean_w:.4f}, min={min_w:.4f}, max={max_w:.4f})"
     )
     class_weights = class_weights_np.to(device)
     base_weights = class_weights.clone()
@@ -334,7 +379,9 @@ def main() -> None:
 
         adaptive_pos_boost = 1.0 + miss_ema * 0.8
         epoch_weights = base_weights.clone()
-        if epoch_weights.numel() > 1:
+        # FN-focused penalty: dynamically upweight abnormal classes when miss_ema is high.
+        # Set --no-use_fn_penalty to disable this and train with plain CE(class_weights).
+        if args.use_fn_penalty and epoch_weights.numel() > 1:
             for cls in range(1, NUM_CLASSES):
                 epoch_weights[cls] = torch.clamp(
                     base_weights[cls] * adaptive_pos_boost,
