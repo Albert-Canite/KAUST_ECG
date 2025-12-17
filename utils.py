@@ -16,8 +16,16 @@ def compute_class_weights(
     abnormal_boost: float = 1.35,
     max_ratio: float = 2.0,
     num_classes: int | None = None,
+    power: float = 0.5,
 ) -> torch.Tensor:
-    """Inverse-frequency class weights with optional abnormal boost and ratio clamp."""
+    """Mild inverse-frequency weights normalized near mean=1.
+
+    We use ``(1 / freq)**power`` (``power`` defaults to 0.5 for a square-root
+    scaling) so weights do not explode on rare classes. Abnormal classes (id !=
+    0) can receive a gentle ``abnormal_boost`` before normalizing to mean≈1.
+    A final clamp enforces ``max_ratio`` around the mean to avoid extreme
+    imbalance.
+    """
 
     counter = Counter(labels.tolist())
     total = len(labels)
@@ -25,16 +33,19 @@ def compute_class_weights(
     if num_classes is None:
         num_classes = int(np.max(labels)) + 1 if len(labels) > 0 else 0
 
+    eps = 1e-8
     for i in range(num_classes):
-        if i in counter:
-            base = total / (num_classes * counter[i])
-            if i != 0:
-                base *= abnormal_boost
-            weights.append(base)
-        else:
-            weights.append(1.0)
+        freq = counter.get(i, 0) / max(total, 1)
+        base = (1.0 / max(freq, eps)) ** power
+        if i != 0:
+            base *= abnormal_boost
+        weights.append(base)
 
     weight_tensor = torch.tensor(weights, dtype=torch.float32)
+
+    # Normalize to mean ~1 to keep magnitudes stable across datasets.
+    mean_w = weight_tensor.mean().clamp(min=eps)
+    weight_tensor = weight_tensor / mean_w
 
     # Clamp extreme ratios to avoid collapsing to predicting全异常或全正常
     if max_ratio is not None and max_ratio > 0:

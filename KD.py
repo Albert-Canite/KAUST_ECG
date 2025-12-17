@@ -110,9 +110,11 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
     train_dataset = ECGBeatDataset(tr_x, tr_y)
     sampler = None
     batch_sampler = None
-    class_counts = np.bincount(tr_y, minlength=len(set(BEAT_LABEL_MAP.values())))
+    num_classes = len(set(BEAT_LABEL_MAP.values()))
+    class_counts = np.bincount(tr_y, minlength=num_classes)
     total_counts = class_counts.sum()
     abnormal_ratio = 1.0 - (class_counts[0] / total_counts) if total_counts > 0 else 0.0
+    print(f"[KD] Train class counts (N,S,V,O): {class_counts.tolist()} | total={int(total_counts)}")
     sampler_boost = 1.2
     if abnormal_ratio < 0.35:
         sampler = make_weighted_sampler(tr_y, abnormal_boost=sampler_boost)
@@ -133,8 +135,23 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
         )
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
-    class_weights = compute_class_weights(tr_y, abnormal_boost=args.class_weight_abnormal, max_ratio=args.class_weight_max_ratio).to(
-        device
+    class_weights = compute_class_weights(
+        tr_y,
+        abnormal_boost=args.class_weight_abnormal,
+        max_ratio=args.class_weight_max_ratio,
+        num_classes=num_classes,
+        power=0.5,
+    ).to(device)
+    raw_weights = []
+    for idx, count in enumerate(class_counts):
+        freq = count / max(total_counts, 1)
+        base = (1.0 / max(freq, 1e-8)) ** 0.5
+        if idx != 0:
+            base *= args.class_weight_abnormal
+        raw_weights.append(base)
+    print(
+        "[KD] Class weights (1/freq)^0.5 with abnormal boost "
+        f"{args.class_weight_abnormal}: raw={np.round(raw_weights, 4)} | final={np.round(class_weights.cpu().numpy(), 4)}"
     )
 
     # Build a KD loader that mixes in part of the generalization distribution to reduce miss drift
@@ -165,7 +182,11 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
             sampler=kd_sampler,
         )
     kd_class_weights = compute_class_weights(
-        kd_y, abnormal_boost=args.class_weight_abnormal * KD_MISS_WEIGHT, max_ratio=args.class_weight_max_ratio
+        kd_y,
+        abnormal_boost=args.class_weight_abnormal * KD_MISS_WEIGHT,
+        max_ratio=args.class_weight_max_ratio,
+        num_classes=num_classes,
+        power=0.5,
     ).to(device)
 
     return DatasetBundle(

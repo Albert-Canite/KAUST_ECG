@@ -225,6 +225,12 @@ def parse_args() -> argparse.Namespace:
     )
     _add_bool_arg(
         parser,
+        "use_fn_penalty_4cls",
+        default=False,
+        help_text="binary-style FN penalty on abnormal beats (4-class debug default: off)",
+    )
+    _add_bool_arg(
+        parser,
         "use_fn_penalty",
         default=True,
         help_text="adaptive abnormal upweighting based on recent miss rate (set false for plain CE)",
@@ -307,22 +313,21 @@ def main() -> None:
         abnormal_boost=args.class_weight_abnormal,
         max_ratio=args.class_weight_max_ratio,
         num_classes=NUM_CLASSES,
+        power=0.5,
     )
     raw_weights = []
     for idx, count in enumerate(class_counts):
-        if count > 0:
-            base = total_counts / (NUM_CLASSES * count)
-            if idx != 0:
-                base *= args.class_weight_abnormal
-            raw_weights.append(base)
-        else:
-            raw_weights.append(1.0)
+        freq = count / max(total_counts, 1)
+        base = (1.0 / max(freq, 1e-8)) ** 0.5
+        if idx != 0:
+            base *= args.class_weight_abnormal
+        raw_weights.append(base)
     mean_w = float(class_weights_np.mean()) if class_weights_np.numel() > 0 else 0.0
     min_w = mean_w / args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
     max_w = mean_w * args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
     print(
-        "Class weights computed as inverse freq with abnormal boost "
-        f"{args.class_weight_abnormal}: raw={np.round(raw_weights, 4)}"
+        "Class weights computed as (1/freq)^0.5 with abnormal boost "
+        f"{args.class_weight_abnormal}, normalized to mean~1: raw={np.round(raw_weights, 4)}"
     )
     print(
         f"Clamped to max_ratio={args.class_weight_max_ratio}: final weights="
@@ -377,11 +382,10 @@ def main() -> None:
         running_loss = 0.0
         total = 0
 
-        adaptive_pos_boost = 1.0 + miss_ema * 0.8
         epoch_weights = base_weights.clone()
-        # FN-focused penalty: dynamically upweight abnormal classes when miss_ema is high.
-        # Set --no-use_fn_penalty to disable this and train with plain CE(class_weights).
-        if args.use_fn_penalty and epoch_weights.numel() > 1:
+        # Binary-style FN penalty retained for experiments; disabled by default for 4-class CE.
+        if args.use_fn_penalty_4cls and epoch_weights.numel() > 1:
+            adaptive_pos_boost = 1.0 + miss_ema * 0.8
             for cls in range(1, NUM_CLASSES):
                 epoch_weights[cls] = torch.clamp(
                     base_weights[cls] * adaptive_pos_boost,
@@ -548,6 +552,23 @@ def main() -> None:
     print(
         f"Generalization multi-class: Acc={gen_metrics_mc['accuracy']:.3f}, MacroF1={gen_metrics_mc['macro_f1']:.3f}"
     )
+
+    val_cm = confusion_matrix(val_true, val_pred_mc, labels=list(range(NUM_CLASSES)))
+    gen_cm = confusion_matrix(gen_true, gen_pred_mc, labels=list(range(NUM_CLASSES)))
+    print(f"Validation 4-class confusion matrix (rows=true, cols=pred):\n{val_cm}")
+    for cid in range(NUM_CLASSES):
+        mc = val_metrics_mc.get("per_class", {}).get(cid, {})
+        print(
+            f"Val class {CLASS_NAMES[cid]}: precision={mc.get('precision', 0):.3f} "
+            f"recall={mc.get('recall', 0):.3f} f1={mc.get('f1', 0):.3f}"
+        )
+    print(f"Generalization 4-class confusion matrix (rows=true, cols=pred):\n{gen_cm}")
+    for cid in range(NUM_CLASSES):
+        mc = gen_metrics_mc.get("per_class", {}).get(cid, {})
+        print(
+            f"Gen class {CLASS_NAMES[cid]}: precision={mc.get('precision', 0):.3f} "
+            f"recall={mc.get('recall', 0):.3f} f1={mc.get('f1', 0):.3f}"
+        )
 
     _write_log(
         {
