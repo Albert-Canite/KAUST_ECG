@@ -13,11 +13,15 @@ from sklearn.metrics import accuracy_score, f1_score, precision_recall_fscore_su
 
 def compute_class_weights(
     labels: np.ndarray,
-    max_ratio: float = 2.0,
+    max_ratio: float = 3.0,
     num_classes: int | None = None,
     power: float = 0.5,
 ) -> torch.Tensor:
-    """Mild inverse-frequency weights normalized near mean=1 for multi-class tasks."""
+    """Mild inverse-frequency weights normalized near mean=1 for multi-class tasks.
+
+    The default power=0.5 (sqrt inverse frequency) plus a relaxed clamp (max_ratio=3)
+    avoids collapsing normal beats while still giving S/V some emphasis.
+    """
 
     counter = Counter(labels.tolist())
     total = len(labels)

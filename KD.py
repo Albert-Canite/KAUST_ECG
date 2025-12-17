@@ -55,7 +55,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout_rate", type=float, default=0.2)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
-    parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
+    parser.add_argument("--class_weight_max_ratio", type=float, default=3.0)
+    parser.add_argument(
+        "--class_weight_power",
+        type=float,
+        default=0.5,
+        help="inverse-frequency exponent for CE weights (0.5=sqrt, 1.0=full)",
+    )
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
     _add_bool_arg(
@@ -64,7 +70,7 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help_text="enable weighted sampler (sqrt balancing) for long-tail classes",
     )
-    parser.add_argument("--sampler_power", type=float, default=1.0)
+    parser.add_argument("--sampler_power", type=float, default=0.5)
     parser.add_argument("--student_path", type=str, default=os.path.join("saved_models", "student_model.pth"))
     return parser.parse_args()
 
@@ -101,7 +107,7 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
         tr_y,
         max_ratio=args.class_weight_max_ratio,
         num_classes=num_classes,
-        power=1.0,
+        power=args.class_weight_power,
     )
     class_weights = class_weights_np.to(device)
     print(

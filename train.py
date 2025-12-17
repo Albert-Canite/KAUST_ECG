@@ -180,7 +180,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout_rate", type=float, default=0.2)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
-    parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
+    parser.add_argument("--class_weight_max_ratio", type=float, default=3.0)
+    parser.add_argument(
+        "--class_weight_power",
+        type=float,
+        default=0.5,
+        help="inverse-frequency exponent for CE weights (0.5=sqrt, 1.0=full)",
+    )
     _add_bool_arg(
         parser,
         "use_weighted_sampler",
@@ -190,7 +196,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sampler_power",
         type=float,
-        default=1.0,
+        default=0.5,
         help="inverse-frequency exponent for sampler (0.5=sqrt, 1.0=full balance)",
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -257,18 +263,18 @@ def main() -> None:
         tr_y,
         max_ratio=args.class_weight_max_ratio,
         num_classes=NUM_CLASSES,
-        power=1.0,
+        power=args.class_weight_power,
     )
     raw_weights = []
     for idx, count in enumerate(class_counts):
         freq = count / max(total_counts, 1)
-        base = (1.0 / max(freq, 1e-8)) ** 1.0
+        base = (1.0 / max(freq, 1e-8)) ** args.class_weight_power
         raw_weights.append(base)
     mean_w = float(class_weights_np.mean()) if class_weights_np.numel() > 0 else 0.0
     min_w = mean_w / args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
     max_w = mean_w * args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
     print(
-        "Class weights computed as (1/freq)^1.0 (no binary abnormal boost), normalized to mean~1: "
+        f"Class weights computed as (1/freq)^{args.class_weight_power:.2f} (no binary abnormal boost), normalized to mean~1: "
         f"raw={np.round(raw_weights, 4)}"
     )
     print(
