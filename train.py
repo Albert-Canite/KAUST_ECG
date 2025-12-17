@@ -308,35 +308,46 @@ def main() -> None:
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
 
-    # Mitigate collapse to the majority class by balancing cross-entropy with class weights
-    # Avoid double-counting abnormal emphasis: when sampling already rebalances classes,
-    # drop the abnormal boost in loss weights. Otherwise, respect the CLI-configured boost.
-    effective_abnormal_boost = args.class_weight_abnormal if sampler is None else 1.0
-    class_weights_np = compute_class_weights(
-        tr_y,
-        abnormal_boost=effective_abnormal_boost,
-        max_ratio=args.class_weight_max_ratio,
-        num_classes=NUM_CLASSES,
-        power=0.5,
-    )
-    raw_weights = []
-    for idx, count in enumerate(class_counts):
-        freq = count / max(total_counts, 1)
-        base = (1.0 / max(freq, 1e-8)) ** 0.5
-        if idx != 0:
-            base *= effective_abnormal_boost
-        raw_weights.append(base)
-    mean_w = float(class_weights_np.mean()) if class_weights_np.numel() > 0 else 0.0
-    min_w = mean_w / args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
-    max_w = mean_w * args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
-    print(
-        "Class weights computed as (1/freq)^0.5 with abnormal boost "
-        f"{effective_abnormal_boost}, normalized to mean~1: raw={np.round(raw_weights, 4)}"
-    )
-    print(
-        f"Clamped to max_ratio={args.class_weight_max_ratio}: final weights="
-        f"{np.round(class_weights_np.cpu().numpy(), 4)} (mean={mean_w:.4f}, min={min_w:.4f}, max={max_w:.4f})"
-    )
+    # Mitigate collapse to the majority class by balancing cross-entropy with class weights.
+    # When sampling already rebalances classes, keep the loss uniform to avoid suppressing
+    # the dominant normal class; otherwise apply a mild abnormal boost via CLI.
+    if sampler is not None:
+        effective_abnormal_boost = 1.0
+        class_weights_np = torch.ones(NUM_CLASSES, dtype=torch.float32)
+        print(
+            "Sampler balances classes; using uniform class weights to avoid over-penalizing normals."
+        )
+        mean_w = float(class_weights_np.mean())
+        min_w = mean_w
+        max_w = mean_w
+    else:
+        effective_abnormal_boost = args.class_weight_abnormal
+        class_weights_np = compute_class_weights(
+            tr_y,
+            abnormal_boost=effective_abnormal_boost,
+            max_ratio=args.class_weight_max_ratio,
+            num_classes=NUM_CLASSES,
+            power=0.5,
+        )
+        raw_weights = []
+        for idx, count in enumerate(class_counts):
+            freq = count / max(total_counts, 1)
+            base = (1.0 / max(freq, 1e-8)) ** 0.5
+            if idx != 0:
+                base *= effective_abnormal_boost
+            raw_weights.append(base)
+        mean_w = float(class_weights_np.mean()) if class_weights_np.numel() > 0 else 0.0
+        min_w = mean_w / args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
+        max_w = mean_w * args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
+        print(
+            "Class weights computed as (1/freq)^0.5 with abnormal boost "
+            f"{effective_abnormal_boost}, normalized to mean~1: raw={np.round(raw_weights, 4)}"
+        )
+        print(
+            f"Clamped to max_ratio={args.class_weight_max_ratio}: final weights="
+            f"{np.round(class_weights_np.cpu().numpy(), 4)} (mean={mean_w:.4f}, min={min_w:.4f}, max={max_w:.4f})"
+        )
+
     class_weights = class_weights_np.to(device)
     base_weights = class_weights.clone()
 
