@@ -297,6 +297,8 @@ def main() -> None:
             print("Using balanced batch sampler to keep per-batch class mix stable")
         except ValueError:
             batch_sampler = None
+    elif NUM_CLASSES > 2:
+        batch_sampler = None
 
     if batch_sampler is not None:
         train_loader = DataLoader(train_dataset, batch_sampler=batch_sampler)
