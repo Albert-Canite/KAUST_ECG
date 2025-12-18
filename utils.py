@@ -296,16 +296,21 @@ def sweep_thresholds_low_miss(
     gen_probs: List[float],
     gen_labels: List[int],
     thresholds: List[float] | None = None,
-    gen_fpr_cap: float = 0.2,
+    gen_fpr_cap: float = 0.15,
+    val_fpr_cap: float = 0.15,
     refine: bool = True,
     refine_step: float = 0.002,
+    fpr_beta: float = 0.1,
 ) -> Tuple[float, Dict[str, float], Dict[str, float], Dict[str, object]]:
-    """Sweep thresholds prioritizing lower generalization miss under an FPR cap.
+    """Sweep thresholds prioritizing lower generalization miss under dual FPR caps.
 
-    The selection order is:
-    1) Minimize generalization miss subject to gen_fpr_cap.
-    2) If miss ties, prefer lower generalization FPR.
-    3) If still tied, prefer higher generalization F1.
+    Selection order within candidates that satisfy gen_fpr_cap and val_fpr_cap:
+    1) Minimize generalization miss.
+    2) Minimize generalization FPR.
+    3) Maximize generalization F1.
+
+    A weak regularizer discourages extreme FPR values while keeping miss first:
+    score = -gen_miss + alpha * gen_f1 - beta * gen_fpr, with alpha=1.0.
     """
 
     if thresholds is None:
@@ -319,13 +324,16 @@ def sweep_thresholds_low_miss(
         gen_preds = (gen_arr >= thr).astype(int).tolist()
         return confusion_metrics(val_labels, val_preds), confusion_metrics(gen_labels, gen_preds)
 
-    def _select_best(thr_list: List[float]) -> Tuple[float, Dict[str, float], Dict[str, float], Dict[str, object]]:
+    def _select_best(
+        thr_list: List[float], val_cap: float
+    ) -> Tuple[float, Dict[str, float], Dict[str, float], Dict[str, object]]:
         candidate_log = []
         fallback_best = None
         best_thr = thr_list[0]
-        best_val = {}
-        best_gen = {}
-        best_record = {}
+        best_val: Dict[str, float] = {}
+        best_gen: Dict[str, float] = {}
+        best_record: Dict[str, object] = {}
+        alpha = 1.0
 
         for thr in thr_list:
             val_metrics, gen_metrics = _eval(thr)
@@ -335,42 +343,49 @@ def sweep_thresholds_low_miss(
                     "gen_miss": gen_metrics["miss_rate"],
                     "gen_fpr": gen_metrics["fpr"],
                     "gen_f1": gen_metrics["f1"],
+                    "val_fpr": val_metrics["fpr"],
                 }
             )
 
             if fallback_best is None or gen_metrics["miss_rate"] < fallback_best[2]["miss_rate"]:
                 fallback_best = (float(thr), val_metrics, gen_metrics)
 
-            if gen_metrics["fpr"] > gen_fpr_cap:
-                continue
-            if best_record == {}:
-                best_thr = float(thr)
-                best_val = val_metrics
-                best_gen = gen_metrics
-                best_record = {
-                    "threshold": best_thr,
-                    "gen_miss": best_gen["miss_rate"],
-                    "gen_fpr": best_gen["fpr"],
-                    "gen_f1": best_gen["f1"],
-                }
-                continue
+            within_caps = gen_metrics["fpr"] <= gen_fpr_cap and val_metrics["fpr"] <= val_cap
+            if within_caps:
+                if best_gen == {}:
+                    best_thr = float(thr)
+                    best_val = val_metrics
+                    best_gen = gen_metrics
+                    best_record = {
+                        "threshold": best_thr,
+                        "gen_miss": best_gen["miss_rate"],
+                        "gen_fpr": best_gen["fpr"],
+                        "gen_f1": best_gen["f1"],
+                        "val_fpr": best_val["fpr"],
+                        "score": -best_gen["miss_rate"] + alpha * best_gen["f1"] - fpr_beta * best_gen["fpr"],
+                    }
+                    continue
 
-            better_miss = gen_metrics["miss_rate"] < best_gen["miss_rate"]
-            miss_tie = np.isclose(gen_metrics["miss_rate"], best_gen["miss_rate"], atol=1e-6)
-            better_fpr = gen_metrics["fpr"] < best_gen["fpr"]
-            fpr_tie = np.isclose(gen_metrics["fpr"], best_gen["fpr"], atol=1e-6)
-            better_f1 = gen_metrics["f1"] > best_gen["f1"]
+                better_miss = gen_metrics["miss_rate"] < best_gen["miss_rate"]
+                miss_tie = np.isclose(gen_metrics["miss_rate"], best_gen["miss_rate"], atol=1e-8)
+                better_fpr = gen_metrics["fpr"] < best_gen["fpr"]
+                fpr_tie = np.isclose(gen_metrics["fpr"], best_gen["fpr"], atol=1e-8)
+                better_f1 = gen_metrics["f1"] > best_gen["f1"]
+                candidate_score = -gen_metrics["miss_rate"] + alpha * gen_metrics["f1"] - fpr_beta * gen_metrics["fpr"]
+                best_score = -best_gen["miss_rate"] + alpha * best_gen["f1"] - fpr_beta * best_gen["fpr"]
 
-            if better_miss or (miss_tie and better_fpr) or (miss_tie and fpr_tie and better_f1):
-                best_thr = float(thr)
-                best_val = val_metrics
-                best_gen = gen_metrics
-                best_record = {
-                    "threshold": best_thr,
-                    "gen_miss": best_gen["miss_rate"],
-                    "gen_fpr": best_gen["fpr"],
-                    "gen_f1": best_gen["f1"],
-                }
+                if better_miss or (miss_tie and better_fpr) or (miss_tie and fpr_tie and (better_f1 or candidate_score > best_score)):
+                    best_thr = float(thr)
+                    best_val = val_metrics
+                    best_gen = gen_metrics
+                    best_record = {
+                        "threshold": best_thr,
+                        "gen_miss": best_gen["miss_rate"],
+                        "gen_fpr": best_gen["fpr"],
+                        "gen_f1": best_gen["f1"],
+                        "val_fpr": best_val["fpr"],
+                        "score": candidate_score,
+                    }
 
         if best_record == {} and fallback_best is not None:
             best_thr, best_val, best_gen = fallback_best
@@ -379,25 +394,37 @@ def sweep_thresholds_low_miss(
                 "gen_miss": best_gen["miss_rate"],
                 "gen_fpr": best_gen["fpr"],
                 "gen_f1": best_gen["f1"],
+                "val_fpr": best_val["fpr"],
             }
 
         info = {
             "gen_fpr_cap": gen_fpr_cap,
+            "val_fpr_cap": val_cap,
             "selection": "minimize gen miss under cap, then lower gen fpr, then higher gen f1",
             "candidates": candidate_log,
             "best_record": best_record,
         }
         return best_thr, best_val, best_gen, info
 
-    best_thr, best_val_metrics, best_gen_metrics, info = _select_best(thresholds)
+    best_thr, best_val_metrics, best_gen_metrics, info = _select_best(thresholds, val_fpr_cap)
+    relaxed_val_cap = False
+    warning = None
+    if info.get("best_record", {}) == {}:
+        relaxed_val_cap = True
+        warning = "relaxed val fpr cap because no candidates met both caps"
+        best_thr, best_val_metrics, best_gen_metrics, info = _select_best(thresholds, float("inf"))
+    info["warning"] = warning
 
     if refine:
         window = 0.05
         refine_low = max(0.0, best_thr - window)
         refine_high = min(1.0, best_thr + window)
         fine_grid = np.arange(refine_low, refine_high + 1e-8, refine_step).tolist()
-        best_thr, best_val_metrics, best_gen_metrics, info = _select_best(fine_grid)
-        info["refined"] = True
+        refine_cap = float("inf") if relaxed_val_cap else val_fpr_cap
+        best_thr, best_val_metrics, best_gen_metrics, info_refined = _select_best(fine_grid, refine_cap)
+        info_refined["refined"] = True
+        info_refined["warning"] = warning
+        info = info_refined
     else:
         info["refined"] = False
 
