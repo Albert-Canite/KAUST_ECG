@@ -200,12 +200,6 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-def main() -> None:
-    args = parse_args()
-    set_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
     loaders = build_dataloaders(args, device)
     student, student_config = load_student(args, device)
 
