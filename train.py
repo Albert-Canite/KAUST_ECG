@@ -6,6 +6,7 @@ import copy
 import json
 import os
 from datetime import datetime
+from itertools import islice
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -193,7 +194,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sampler_max_ratio",
         type=float,
-        default=6.0,
+        default=50.0,
         help="cap on class sampling weights to avoid overshooting ultra-rare beats",
     )
     parser.add_argument(
@@ -227,6 +228,15 @@ def parse_args() -> argparse.Namespace:
     )
     _add_bool_arg(
         parser,
+        "use_logit_adjust",
+        default=True,
+        help_text="enable logit adjustment with class priors to resist collapse",
+    )
+    parser.add_argument(
+        "--logit_adjust_tau", type=float, default=1.0, help="temperature for logit adjustment"
+    )
+    _add_bool_arg(
+        parser,
         "stack_sampler_with_ce",
         default=False,
         help_text=(
@@ -240,6 +250,13 @@ def parse_args() -> argparse.Namespace:
         help="loss to train the student (focal improves hard S/V recall)",
     )
     parser.add_argument("--focal_gamma", type=float, default=2.0, help="gamma for focal loss")
+    parser.add_argument("--cb_beta", type=float, default=0.9999, help="beta for class-balanced weighting")
+    _add_bool_arg(
+        parser,
+        "use_cb_weights",
+        default=True,
+        help_text="use class-balanced effective number weights for CE/focal",
+    )
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
@@ -253,6 +270,10 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    print(
+        "Recommended anti-collapse recipe: focal loss + class-balanced weights + logit adjust + target mix sampler\n"
+        "Suggested target mix (N,S,V,O) = 0.50/0.15/0.15/0.20, logit_adjust_tau=1.0"
+    )
 
     print("Loading MIT-BIH records ...")
     train_x, train_y = load_records(TRAIN_RECORDS, args.data_path)
@@ -263,10 +284,25 @@ def main() -> None:
     tr_x, tr_y, va_x, va_y = split_dataset(train_x, train_y, val_ratio=0.2)
     print(f"Train: {len(tr_x)} | Val: {len(va_x)} | Generalization: {len(gen_x)}")
 
+    def _diagnose_labels(name: str, labels: np.ndarray) -> None:
+        unique_sorted = np.unique(labels)
+        print(f"{name} unique labels (sorted): {unique_sorted.tolist()}")
+        assert unique_sorted.min() >= 0 and unique_sorted.max() < NUM_CLASSES, (
+            f"{name} labels out of range. Expected within [0, {NUM_CLASSES-1}]"
+        )
+
+    _diagnose_labels("Train", tr_y)
+    _diagnose_labels("Val", va_y)
+    _diagnose_labels("Gen", gen_y)
+
     def _print_class_stats(name: str, labels: np.ndarray) -> None:
         counts = np.bincount(labels, minlength=NUM_CLASSES)
         total = counts.sum()
-        print(f"{name} class counts (N,S,V,O): {counts.tolist()} | total={int(total)}")
+        ratios = (counts / max(total, 1)).tolist()
+        print(
+            f"{name} class counts (N,S,V,O): {counts.tolist()} | total={int(total)} | ratios="
+            f"{[round(r, 4) for r in ratios]}"
+        )
 
     _print_class_stats("Train", tr_y)
     _print_class_stats("Val", va_y)
@@ -279,6 +315,9 @@ def main() -> None:
         "Class distribution (N,S,V,O): "
         f"{class_counts.tolist()} | non-normal fraction={abnormal_ratio:.3f}"
     )
+    prior = class_counts / max(total_counts, 1)
+    print(f"Training prior (N,S,V,O): {[round(p, 6) for p in prior.tolist()]}")
+    log_prior = torch.log(torch.tensor(prior, device=device, dtype=torch.float32) + 1e-12)
     missing_train = [CLASS_NAMES[i] for i, cnt in enumerate(class_counts) if cnt == 0]
     if missing_train:
         raise RuntimeError(
@@ -317,11 +356,20 @@ def main() -> None:
             f"power={args.sampler_power:.2f}, max_ratio={args.sampler_max_ratio:.1f}"
         )
         if target_mix is not None:
+            print(
+                "Sampler mode: target mix (uniform per-class weights within target proportions)"
+            )
+        if target_mix is not None:
             print(f"Target sampler mix (N,S,V,O): {[round(m,3) for m in target_mix]} (normalized)")
         print(
             "Per-class sampler weights (post-clamp): "
             f"{[round(sampler_weights.get(cid, 0.0), 3) for cid in range(NUM_CLASSES)]}"
         )
+        if sampler_weights:
+            weight_ranges = [
+                f"{CLASS_NAMES[cid]}: {sampler_weights.get(cid, 0.0):.4f}" for cid in range(NUM_CLASSES)
+            ]
+            print(f"Per-class sample weight ranges (uniform within class): {weight_ranges}")
         if sampler_mix:
             mix_pct = [round(100 * sampler_mix.get(cid, 0.0), 1) for cid in range(NUM_CLASSES)]
             print(f"Expected batch mix from sampler (N,S,V,O): {mix_pct} %")
@@ -365,38 +413,59 @@ def main() -> None:
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
 
-    # Keep loss reflecting class prior with inverse-frequency weights (no binary boosts).
-    class_weights_np = compute_class_weights(
-        tr_y,
-        max_ratio=args.class_weight_max_ratio,
-        num_classes=NUM_CLASSES,
-        power=args.class_weight_power,
-    )
-    raw_weights = []
-    max_count = max(class_counts) if len(class_counts) else 0
-    for count in class_counts:
-        base = (max_count / max(count, 1)) ** args.class_weight_power
-        raw_weights.append(base)
-    clamping_on = args.class_weight_max_ratio is not None and args.class_weight_max_ratio > 0
-    min_w = 1.0
-    max_w = args.class_weight_max_ratio if clamping_on else float("inf")
-    print(
-        f"Class weights computed vs. majority count (power={args.class_weight_power:.2f}): "
-        f"raw={np.round(raw_weights, 4)}"
-    )
-    print(
-        f"Clamped to [1, {args.class_weight_max_ratio}] to avoid downweighting N: "
-        f"final weights={np.round(class_weights_np.cpu().numpy(), 4)} (min={min_w:.1f}, max={max_w})"
-    )
+    print("Sanity check: first 3 batches label distribution (train loader)")
+    for idx, (_, batch_labels) in enumerate(islice(iter(train_loader), 3), start=1):
+        counts = np.bincount(batch_labels.numpy(), minlength=NUM_CLASSES)
+        ratios = counts / max(counts.sum(), 1)
+        print(
+            f"  Batch {idx}: counts={counts.tolist()} ratios={[round(r,3) for r in ratios.tolist()]}"
+        )
 
-    class_weights = class_weights_np.to(device)
+    eps = 1e-8
+    if args.use_cb_weights:
+        effective_num = 1.0 - np.power(args.cb_beta, class_counts)
+        cb_weight = (1 - args.cb_beta) / (effective_num + eps)
+        cb_weight = cb_weight / max(np.mean(cb_weight), eps)
+        ce_weight_tensor = torch.tensor(cb_weight, dtype=torch.float32)
+        focal_alpha_tensor = ce_weight_tensor / max(ce_weight_tensor.sum(), eps)
+        print(
+            "Using class-balanced weights (effective number): "
+            f"raw={np.round(cb_weight,4)} (mean-normalized)"
+        )
+    else:
+        class_weights_np = compute_class_weights(
+            tr_y,
+            max_ratio=args.class_weight_max_ratio,
+            num_classes=NUM_CLASSES,
+            power=args.class_weight_power,
+        )
+        raw_weights = []
+        max_count = max(class_counts) if len(class_counts) else 0
+        for count in class_counts:
+            base = (max_count / max(count, 1)) ** args.class_weight_power
+            raw_weights.append(base)
+        clamping_on = args.class_weight_max_ratio is not None and args.class_weight_max_ratio > 0
+        min_w = 1.0
+        max_w = args.class_weight_max_ratio if clamping_on else float("inf")
+        print(
+            f"Class weights computed vs. majority count (power={args.class_weight_power:.2f}): "
+            f"raw={np.round(raw_weights, 4)}"
+        )
+        print(
+            f"Clamped to [1, {args.class_weight_max_ratio}] to avoid downweighting N: "
+            f"final weights={np.round(class_weights_np.cpu().numpy(), 4)} (min={min_w:.1f}, max={max_w})"
+        )
+        ce_weight_tensor = class_weights_np
+        focal_alpha_tensor = ce_weight_tensor / max(ce_weight_tensor.sum(), eps)
+
+    class_weights = ce_weight_tensor.to(device)
     # Keep some class weighting even when a sampler is on; a soft exponent avoids over-correction
     # while preventing the sampler from drifting to all-N/O solutions. When the curriculum sampler
     # is used, we stay conservative to avoid repeating earlier over-balancing failures.
     if sampler is not None and not args.stack_sampler_with_ce:
         base_weights = torch.pow(class_weights, 0.5)
         print(
-            "Sampler active -> applying mild CE reweighting (sqrt of inverse-freq) to reinforce S/V. "
+            "Sampler active -> applying mild CE reweighting (sqrt of inverse-freq/CB) to reinforce S/V. "
             f"Effective CE weights: {np.round(base_weights.cpu().numpy(), 4)}"
         )
     else:
@@ -404,13 +473,13 @@ def main() -> None:
         if sampler is not None:
             print(
                 "Sampler active **and** CE stacking enabled -> combining sampler upsampling with "
-                f"full inverse-freq CE weights: {np.round(class_weights.cpu().numpy(), 4)}"
+                f"full CE weights: {np.round(class_weights.cpu().numpy(), 4)}"
             )
 
     curriculum_weights = torch.pow(class_weights, 0.5)
     if curriculum_loader is not None:
         print(
-            "Curriculum stage CE weights (sqrt inverse-freq) to pair with mild sampler: "
+            "Curriculum stage CE weights (sqrt inverse-freq/CB) to pair with mild sampler: "
             f"{np.round(curriculum_weights.cpu().numpy(), 4)}"
         )
 
@@ -421,6 +490,17 @@ def main() -> None:
     )
 
     student = build_student(args, device)
+    if hasattr(student, "classifier") and getattr(student.classifier, "bias", None) is not None:
+        try:
+            with torch.no_grad():
+                student.classifier.bias.copy_(
+                    -torch.log(torch.tensor(prior, device=device, dtype=student.classifier.bias.dtype) + 1e-12)
+                )
+            print("Initialized classifier bias with -log(prior) to counter imbalance.")
+        except Exception as exc:  # noqa: BLE001
+            print(f"Warning: failed to init classifier bias with prior: {exc}")
+    else:
+        print("Warning: classifier bias prior init skipped (no classifier/bias found).")
 
     optimizer = Adam(student.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=args.scheduler_patience, verbose=True)
@@ -441,6 +521,9 @@ def main() -> None:
             "class_counts": class_counts.tolist(),
             "class_weights": class_weights.detach().cpu().tolist(),
             "ce_weights": base_weights.detach().cpu().tolist(),
+            "prior": prior.tolist(),
+            "use_logit_adjust": args.use_logit_adjust,
+            "logit_adjust_tau": args.logit_adjust_tau,
             "sampler_weights": sampler_weights if sampler_weights is not None else None,
             "sampler_mix": sampler_mix if sampler_mix is not None else None,
             "data_range": [data_min, data_max],
@@ -505,6 +588,8 @@ def main() -> None:
             optimizer.zero_grad()
 
             logits, _ = student(signals)
+            if args.use_logit_adjust:
+                logits = logits - args.logit_adjust_tau * log_prior[None, :]
             loss = loss_fn(logits, labels)
 
             loss.backward()
@@ -532,6 +617,14 @@ def main() -> None:
         val_min_f1 = min((m.get("f1", 0.0) for m in val_metrics_mc.get("per_class", {}).values()), default=0.0)
         gen_min_f1 = min((m.get("f1", 0.0) for m in gen_metrics_mc.get("per_class", {}).values()), default=0.0)
 
+        val_pred_counts = np.bincount(np.array(val_pred_mc), minlength=NUM_CLASSES)
+        gen_pred_counts = np.bincount(np.array(gen_pred_mc), minlength=NUM_CLASSES)
+        val_pred_ratios = val_pred_counts / max(val_pred_counts.sum(), 1)
+        gen_pred_ratios = gen_pred_counts / max(gen_pred_counts.sum(), 1)
+        val_s_metrics = val_metrics_mc.get("per_class", {}).get(1, {})
+        gen_s_metrics = gen_metrics_mc.get("per_class", {}).get(1, {})
+        s_recall = val_s_metrics.get("recall", 0.0)
+
         # Encourage balanced learning across all classes; abnormal beats still matter,
         # but ignoring any class (including O) lowers the checkpoint score.
         composite_score = (
@@ -540,12 +633,28 @@ def main() -> None:
             + 0.3 * val_min_f1
         )
 
+        composite_before_collapse = composite_score
+        collapse_flag = s_recall == 0.0
+        if collapse_flag:
+            composite_score = 0.0
+
         scheduler.step(val_loss)
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
             f"Val MacroF1 {val_metrics_mc['macro_f1']:.3f} (abn {val_abnormal_f1:.3f} rare {val_rare_f1:.3f} min {val_min_f1:.3f}) Acc {val_metrics_mc['accuracy']:.3f} | "
             f"Gen MacroF1 {gen_metrics_mc['macro_f1']:.3f} (abn {gen_abnormal_f1:.3f} rare {gen_rare_f1:.3f} min {gen_min_f1:.3f}) Acc {gen_metrics_mc['accuracy']:.3f}"
+        )
+        print(
+            f"  Val pred counts: {val_pred_counts.tolist()} ratios={[round(r,3) for r in val_pred_ratios.tolist()]} | "
+            f"S precision/recall/f1 = {val_s_metrics.get('precision',0):.3f}/{val_s_metrics.get('recall',0):.3f}/{val_s_metrics.get('f1',0):.3f}"
+        )
+        print(
+            f"  Gen pred counts: {gen_pred_counts.tolist()} ratios={[round(r,3) for r in gen_pred_ratios.tolist()]} | "
+            f"S precision/recall/f1 = {gen_s_metrics.get('precision',0):.3f}/{gen_s_metrics.get('recall',0):.3f}/{gen_s_metrics.get('f1',0):.3f}"
+        )
+        print(
+            f"  S recall (val)={s_recall:.3f} | collapse flag={collapse_flag} | composite before={composite_before_collapse:.4f} after={composite_score:.4f}"
         )
 
         history.append(
@@ -560,10 +669,22 @@ def main() -> None:
                 "val_abnormal_macro_f1": val_abnormal_f1,
                 "val_rare_macro_f1": val_rare_f1,
                 "val_min_f1": val_min_f1,
+                "val_pred_counts": val_pred_counts.tolist(),
+                "val_pred_ratios": val_pred_ratios.tolist(),
+                "val_s_precision": val_s_metrics.get("precision", 0.0),
+                "val_s_recall": val_s_metrics.get("recall", 0.0),
+                "val_s_f1": val_s_metrics.get("f1", 0.0),
                 "gen_abnormal_macro_f1": gen_abnormal_f1,
                 "gen_rare_macro_f1": gen_rare_f1,
                 "gen_min_f1": gen_min_f1,
+                "gen_pred_counts": gen_pred_counts.tolist(),
+                "gen_pred_ratios": gen_pred_ratios.tolist(),
+                "gen_s_precision": gen_s_metrics.get("precision", 0.0),
+                "gen_s_recall": gen_s_metrics.get("recall", 0.0),
+                "gen_s_f1": gen_s_metrics.get("f1", 0.0),
                 "checkpoint_score": composite_score,
+                "s_collapse": collapse_flag,
+                "composite_before_collapse": composite_before_collapse,
             }
         )
 
@@ -580,16 +701,28 @@ def main() -> None:
                 "gen_abnormal_macro_f1": gen_abnormal_f1,
                 "gen_rare_macro_f1": gen_rare_f1,
                 "val_min_f1": val_min_f1,
+                "val_pred_counts": val_pred_counts.tolist(),
+                "val_pred_ratios": val_pred_ratios.tolist(),
+                "val_s_precision": val_s_metrics.get("precision", 0.0),
+                "val_s_recall": val_s_metrics.get("recall", 0.0),
+                "val_s_f1": val_s_metrics.get("f1", 0.0),
                 "gen_min_f1": gen_min_f1,
+                "gen_pred_counts": gen_pred_counts.tolist(),
+                "gen_pred_ratios": gen_pred_ratios.tolist(),
+                "gen_s_precision": gen_s_metrics.get("precision", 0.0),
+                "gen_s_recall": gen_s_metrics.get("recall", 0.0),
+                "gen_s_f1": gen_s_metrics.get("f1", 0.0),
                 "gen_acc": gen_metrics_mc["accuracy"],
                 "checkpoint_score": composite_score,
+                "s_collapse": collapse_flag,
+                "composite_before_collapse": composite_before_collapse,
             }
         )
 
         # 4-class monitoring: emphasize abnormal beats by blending macro F1
         # with abnormal-only macro F1. This prevents degenerate "all N" models
         # from winning early stopping when rare classes are ignored.
-        if composite_score > best_checkpoint_score:
+        if not collapse_flag and composite_score > best_checkpoint_score:
             best_checkpoint_score = composite_score
             best_state = copy.deepcopy(student.state_dict())
             patience_counter = 0
