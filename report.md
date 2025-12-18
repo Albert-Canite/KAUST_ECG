@@ -452,4 +452,9 @@
   6) **Sanity check script**: add a small CLI (e.g., `python train.py --eval_only --checkpoint ...`) that loads a checkpoint and prints per-class support/PRF over a held-out slice to ensure S/V recall >0.3 before full training.
 - **Rationale**: These edits remove binary-era residuals, limit overlapping boosts, and give S/V consistent gradient/share without collapsing N/O. Logging stays four-class only, so early stopping reflects the true objective.
 
+## v4-class weight warmup (current code changes)
+- **Stronger yet gradual weighting**: Default class weights now use full inverse frequency with a wider clamp (max_ratio=5). A linear warmup over the first 8 epochs blends from uniform to target weights so minority emphasis ramps up without immediately destabilizing N/O predictions.
+- **Consistent KD behavior**: The KD loop mirrors the same weight computation and warmup, preventing distillation from overriding the minority-focused weighting scheme.
+- **How to tune**: If S/V recall stays low, shorten the warmup or raise `--class_weight_max_ratio`; if N collapses, lengthen warmup. The sampler remains optional—when enabled it keeps CE weights uniform to avoid double balancing.
+
 4-class_debug

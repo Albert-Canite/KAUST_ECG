@@ -13,14 +13,16 @@ from sklearn.metrics import accuracy_score, f1_score, precision_recall_fscore_su
 
 def compute_class_weights(
     labels: np.ndarray,
-    max_ratio: float = 3.0,
+    max_ratio: float = 5.0,
     num_classes: int | None = None,
-    power: float = 0.5,
+    power: float = 1.0,
 ) -> torch.Tensor:
-    """Mild inverse-frequency weights normalized near mean=1 for multi-class tasks.
+    """Inverse-frequency weights normalized near mean=1 for multi-class tasks.
 
-    The default power=0.5 (sqrt inverse frequency) plus a relaxed clamp (max_ratio=3)
-    avoids collapsing normal beats while still giving S/V some emphasis.
+    Default settings use full inverse frequency (power=1.0) with a modest clamp
+    (max_ratio=5) so rare S/V beats receive noticeably larger weights without
+    overwhelming the normal prior. A separate warmup in the training loop can
+    blend these weights in gradually to avoid instability early in training.
     """
 
     counter = Counter(labels.tolist())

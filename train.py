@@ -180,12 +180,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout_rate", type=float, default=0.2)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
-    parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
+    parser.add_argument("--class_weight_max_ratio", type=float, default=5.0)
     parser.add_argument(
         "--class_weight_power",
         type=float,
-        default=0.5,
+        default=1.0,
         help="inverse-frequency exponent for CE weights (0.5=sqrt, 1.0=full)",
+    )
+    parser.add_argument(
+        "--weight_warmup_epochs",
+        type=int,
+        default=8,
+        help="epochs to linearly warm class weights from uniform to target inverse-frequency weights",
     )
     _add_bool_arg(
         parser,
@@ -338,8 +344,16 @@ def main() -> None:
         running_loss = 0.0
         total = 0
 
-        epoch_weights = base_weights.clone()
+        if args.weight_warmup_epochs > 0:
+            warm_frac = min(1.0, epoch / float(args.weight_warmup_epochs))
+            epoch_weights = torch.ones_like(base_weights) * (1 - warm_frac) + base_weights * warm_frac
+        else:
+            epoch_weights = base_weights.clone()
         ce_loss_fn = nn.CrossEntropyLoss(weight=epoch_weights)
+        if epoch == 1 or (args.weight_warmup_epochs > 0 and warm_frac < 1.0 and epoch % 5 == 0):
+            print(
+                f"Epoch {epoch}: CE weight warmup alpha={warm_frac:.2f}, weights={epoch_weights.detach().cpu().numpy()}"
+            )
 
         for signals, labels in train_loader:
             signals, labels = signals.to(device), labels.to(device)
