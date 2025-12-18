@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout_rate", type=float, default=0.2)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
-    parser.add_argument("--class_weight_max_ratio", type=float, default=3.0)
+    parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
     parser.add_argument(
         "--class_weight_power",
         type=float,
@@ -67,8 +67,8 @@ def parse_args() -> argparse.Namespace:
     _add_bool_arg(
         parser,
         "use_weighted_sampler",
-        default=True,
-        help_text="enable weighted sampler (sqrt balancing) for long-tail classes",
+        default=False,
+        help_text="enable weighted sampler (sqrt balancing) for long-tail classes; default off to preserve normal prior",
     )
     parser.add_argument("--sampler_power", type=float, default=0.5)
     parser.add_argument("--student_path", type=str, default=os.path.join("saved_models", "student_model.pth"))
@@ -90,7 +90,7 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
     if args.use_weighted_sampler:
         sampler = make_weighted_sampler(tr_y, power=args.sampler_power)
         print(
-            "[KD] Using weighted sampler for 4-class to expose rare S/V beats; CE also uses inverse-frequency weights. "
+            "[KD] Using weighted sampler for 4-class to expose rare S/V beats; CE will stay uniform to avoid double balancing. "
             f"power={args.sampler_power:.2f}"
         )
 
@@ -110,12 +110,20 @@ def build_dataloaders(args: argparse.Namespace, device: torch.device) -> Dataset
         power=args.class_weight_power,
     )
     class_weights = class_weights_np.to(device)
+    if sampler is not None:
+        ce_weights = torch.ones_like(class_weights)
+        print(
+            "[KD] Sampler active -> using uniform CE weights (sampler handles imbalance). "
+            f"Original inverse-freq weights: {np.round(class_weights.cpu().numpy(), 4)}"
+        )
+    else:
+        ce_weights = class_weights
     print(
         "[KD] Train class counts (N,S,V,O): "
-        f"{class_counts.tolist()} | weights={np.round(class_weights.cpu().numpy(), 4)}"
+        f"{class_counts.tolist()} | weights={np.round(ce_weights.cpu().numpy(), 4)}"
     )
 
-    return DatasetBundle(train_loader, val_loader, gen_loader, (va_x, va_y), (gen_x, gen_y), class_weights)
+    return DatasetBundle(train_loader, val_loader, gen_loader, (va_x, va_y), (gen_x, gen_y), ce_weights)
 
 
 def evaluate_with_probs(
@@ -179,6 +187,12 @@ def load_student(args: argparse.Namespace, device: torch.device) -> Tuple[nn.Mod
     student = build_student(config, device)
     student.load_state_dict(ckpt["student_state_dict"])
     return student, config
+
+def main() -> None:
+    args = parse_args()
+    set_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
 def main() -> None:
     args = parse_args()

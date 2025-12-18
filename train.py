@@ -180,7 +180,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout_rate", type=float, default=0.2)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
-    parser.add_argument("--class_weight_max_ratio", type=float, default=3.0)
+    parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
     parser.add_argument(
         "--class_weight_power",
         type=float,
@@ -190,8 +190,8 @@ def parse_args() -> argparse.Namespace:
     _add_bool_arg(
         parser,
         "use_weighted_sampler",
-        default=True,
-        help_text="enable weighted sampler (sqrt balancing) for long-tail classes",
+        default=False,
+        help_text="enable weighted sampler (sqrt balancing) for long-tail classes; default off to preserve normal prior",
     )
     parser.add_argument(
         "--sampler_power",
@@ -245,7 +245,7 @@ def main() -> None:
     if args.use_weighted_sampler:
         sampler = make_weighted_sampler(tr_y, power=args.sampler_power)
         print(
-            "Using weighted sampler for 4-class to surface rare S/V beats; CE also uses inverse-frequency weights. "
+            "Using weighted sampler for 4-class to surface rare S/V beats; CE will stay uniform to avoid double balancing. "
             f"power={args.sampler_power:.2f}"
         )
 
@@ -282,9 +282,17 @@ def main() -> None:
         f"{np.round(class_weights_np.cpu().numpy(), 4)} (mean={mean_w:.4f}, min={min_w:.4f}, max={max_w:.4f})"
     )
 
-    # Always apply mild inverse-frequency CE weights alongside the sampler to ensure S/V stay visible.
     class_weights = class_weights_np.to(device)
-    base_weights = class_weights.clone()
+    # If a weighted sampler is already balancing the batches, keep CE weights uniform to avoid
+    # over-amplifying minority classes; otherwise use the inverse-frequency weights.
+    if sampler is not None:
+        base_weights = torch.ones_like(class_weights)
+        print(
+            "Sampler active -> using uniform CE weights (sampler handles imbalance). "
+            f"Original inverse-freq weights retained for logging: {np.round(class_weights.cpu().numpy(), 4)}"
+        )
+    else:
+        base_weights = class_weights.clone()
 
     os.makedirs("artifacts", exist_ok=True)
     log_path = os.path.join(
@@ -312,6 +320,7 @@ def main() -> None:
             "config": vars(args),
             "class_counts": class_counts.tolist(),
             "class_weights": class_weights.detach().cpu().tolist(),
+            "ce_weights": base_weights.detach().cpu().tolist(),
             "data_range": [data_min, data_max],
         }
     )
