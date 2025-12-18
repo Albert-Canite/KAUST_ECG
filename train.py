@@ -400,14 +400,18 @@ def main() -> None:
 
         val_abnormal_f1 = val_metrics_mc.get("abnormal_macro_f1", val_metrics_mc["macro_f1"])
         gen_abnormal_f1 = gen_metrics_mc.get("abnormal_macro_f1", gen_metrics_mc["macro_f1"])
-        composite_score = 0.5 * val_metrics_mc["macro_f1"] + 0.5 * val_abnormal_f1
+        val_rare_f1 = val_metrics_mc.get("rare_macro_f1", val_abnormal_f1)
+        gen_rare_f1 = gen_metrics_mc.get("rare_macro_f1", gen_abnormal_f1)
+
+        # Emphasize S/V performance so "all O" or "all N" models cannot win early stopping.
+        composite_score = 0.2 * val_metrics_mc["macro_f1"] + 0.3 * val_abnormal_f1 + 0.5 * val_rare_f1
 
         scheduler.step(val_loss)
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
-            f"Val MacroF1 {val_metrics_mc['macro_f1']:.3f} (abn {val_abnormal_f1:.3f}) Acc {val_metrics_mc['accuracy']:.3f} | "
-            f"Gen MacroF1 {gen_metrics_mc['macro_f1']:.3f} (abn {gen_abnormal_f1:.3f}) Acc {gen_metrics_mc['accuracy']:.3f}"
+            f"Val MacroF1 {val_metrics_mc['macro_f1']:.3f} (abn {val_abnormal_f1:.3f} rare {val_rare_f1:.3f}) Acc {val_metrics_mc['accuracy']:.3f} | "
+            f"Gen MacroF1 {gen_metrics_mc['macro_f1']:.3f} (abn {gen_abnormal_f1:.3f} rare {gen_rare_f1:.3f}) Acc {gen_metrics_mc['accuracy']:.3f}"
         )
 
         history.append(
@@ -420,7 +424,9 @@ def main() -> None:
                 "gen_macro_f1": gen_metrics_mc["macro_f1"],
                 "gen_acc": gen_metrics_mc["accuracy"],
                 "val_abnormal_macro_f1": val_abnormal_f1,
+                "val_rare_macro_f1": val_rare_f1,
                 "gen_abnormal_macro_f1": gen_abnormal_f1,
+                "gen_rare_macro_f1": gen_rare_f1,
                 "checkpoint_score": composite_score,
             }
         )
@@ -436,6 +442,7 @@ def main() -> None:
                 "val_abnormal_macro_f1": val_abnormal_f1,
                 "gen_macro_f1": gen_metrics_mc["macro_f1"],
                 "gen_abnormal_macro_f1": gen_abnormal_f1,
+                "gen_rare_macro_f1": gen_rare_f1,
                 "gen_acc": gen_metrics_mc["accuracy"],
                 "checkpoint_score": composite_score,
             }
@@ -455,15 +462,17 @@ def main() -> None:
                 {
                     "event": "best",
                     "epoch": epoch,
-                    "val_macro_f1": val_metrics_mc["macro_f1"],
-                    "val_acc": val_metrics_mc["accuracy"],
-                    "val_abnormal_macro_f1": val_abnormal_f1,
-                    "gen_macro_f1": gen_metrics_mc["macro_f1"],
-                    "gen_abnormal_macro_f1": gen_abnormal_f1,
-                    "gen_acc": gen_metrics_mc["accuracy"],
-                    "checkpoint_score": composite_score,
-                }
-            )
+                "val_macro_f1": val_metrics_mc["macro_f1"],
+                "val_acc": val_metrics_mc["accuracy"],
+                "val_abnormal_macro_f1": val_abnormal_f1,
+                "val_rare_macro_f1": val_rare_f1,
+                "gen_macro_f1": gen_metrics_mc["macro_f1"],
+                "gen_abnormal_macro_f1": gen_abnormal_f1,
+                "gen_rare_macro_f1": gen_rare_f1,
+                "gen_acc": gen_metrics_mc["accuracy"],
+                "checkpoint_score": composite_score,
+            }
+        )
         else:
             patience_counter += 1
             if patience_counter >= args.patience and epoch >= args.min_epochs:

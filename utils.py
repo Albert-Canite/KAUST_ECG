@@ -64,9 +64,9 @@ def compute_multiclass_metrics(y_true: List[int], y_pred: List[int], num_classes
 
     macro_f1 = float(f1_score(y_true, y_pred, average="macro", zero_division=0))
 
-    # Highlight the minority classes (S, V, O) by reporting an abnormal-only
-    # macro F1. This is used downstream to guide checkpointing so models that
-    # ignore rare beats are not considered "best" despite high N accuracy.
+    # Highlight minority classes two ways:
+    #   1) abnormal_macro_f1 averages all non-N classes (S/V/O)
+    #   2) rare_macro_f1 focuses only on S/V, so O cannot mask failures on S/V
     abnormal_indices = [i for i in range(num_classes) if i != 0]
     abnormal_present = [idx for idx in abnormal_indices if idx in per_class]
     if abnormal_present:
@@ -75,10 +75,19 @@ def compute_multiclass_metrics(y_true: List[int], y_pred: List[int], num_classes
     else:
         abnormal_macro_f1 = macro_f1
 
+    rare_indices = [1, 2] if num_classes >= 3 else []
+    rare_present = [idx for idx in rare_indices if idx in per_class]
+    if rare_present:
+        rare_f1s = [per_class[idx]["f1"] for idx in rare_present]
+        rare_macro_f1 = float(np.mean(rare_f1s))
+    else:
+        rare_macro_f1 = abnormal_macro_f1
+
     return {
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "macro_f1": macro_f1,
         "abnormal_macro_f1": abnormal_macro_f1,
+        "rare_macro_f1": rare_macro_f1,
         "per_class": per_class,
     }
 
