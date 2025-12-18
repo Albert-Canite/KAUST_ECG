@@ -17,38 +17,38 @@ def compute_class_weights(
     num_classes: int | None = None,
     power: float = 1.0,
 ) -> torch.Tensor:
-    """Inverse-frequency weights normalized near mean=1 for multi-class tasks.
+    """Inverse-frequency weights anchored to the majority class.
 
-    Set ``max_ratio=None`` to disable clamping altogether when classes are
-    extremely imbalanced; otherwise weights are clipped to
-    ``[mean / max_ratio, mean * max_ratio]``. A higher cap (or no cap) is
-    necessary when rare classes are <1% of the dataset so they are not washed
-    out by the majority class during training.
+    The most frequent class is assigned weight ``1`` and rarer classes receive
+    larger weights proportional to ``(max_count / count) ** power``. We clamp
+    weights to ``[1, max_ratio]`` (when ``max_ratio`` is provided) so that
+    majority classes are never downweighted, preventing the optimizer from
+    collapsing into minority-only predictions as seen in previous runs.
     """
 
     counter = Counter(labels.tolist())
-    total = len(labels)
     weights: List[float] = []
     if num_classes is None:
         num_classes = int(np.max(labels)) + 1 if len(labels) > 0 else 0
 
     eps = 1e-8
-    # Target uniform prior so CE weights align with the sampler heuristic and
-    # actually upweight minority beats instead of downweighting moderately rare
-    # classes like "O".
-    ideal_count = max(total / float(max(num_classes, 1)), eps)
+    max_count = max((counter.get(i, 0) for i in range(num_classes)), default=0)
+    if max_count == 0:
+        return torch.tensor([], dtype=torch.float32)
+
     for i in range(num_classes):
         cnt = counter.get(i, 0)
-        base = (ideal_count / max(cnt, eps)) ** power
+        base = (max_count / max(cnt, eps)) ** power
         weights.append(base)
 
     weight_tensor = torch.tensor(weights, dtype=torch.float32)
 
+    # Preserve majority weight at 1 while limiting extreme ratios to avoid
+    # exploding gradients on ultra-rare classes.
     if max_ratio is not None and max_ratio > 0:
-        mean_w = weight_tensor.mean().clamp(min=eps)
-        min_w = mean_w / max_ratio
-        max_w = mean_w * max_ratio
-        weight_tensor = weight_tensor.clamp(min=min_w, max=max_w)
+        weight_tensor = weight_tensor.clamp(min=1.0, max=max_ratio)
+    else:
+        weight_tensor = weight_tensor.clamp(min=1.0)
 
     return weight_tensor
 

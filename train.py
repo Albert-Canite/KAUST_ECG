@@ -259,21 +259,20 @@ def main() -> None:
         power=args.class_weight_power,
     )
     raw_weights = []
-    for idx, count in enumerate(class_counts):
-        freq = count / max(total_counts, 1)
-        base = (1.0 / max(freq, 1e-8)) ** args.class_weight_power
+    max_count = max(class_counts) if len(class_counts) else 0
+    for count in class_counts:
+        base = (max_count / max(count, 1)) ** args.class_weight_power
         raw_weights.append(base)
-    mean_w = float(class_weights_np.mean()) if class_weights_np.numel() > 0 else 0.0
     clamping_on = args.class_weight_max_ratio is not None and args.class_weight_max_ratio > 0
-    min_w = mean_w / args.class_weight_max_ratio if clamping_on else float("nan")
-    max_w = mean_w * args.class_weight_max_ratio if clamping_on else float("nan")
+    min_w = 1.0
+    max_w = args.class_weight_max_ratio if clamping_on else float("inf")
     print(
-        f"Class weights computed as (1/freq)^{args.class_weight_power:.2f} (no binary abnormal boost), normalized to mean~1: "
+        f"Class weights computed vs. majority count (power={args.class_weight_power:.2f}): "
         f"raw={np.round(raw_weights, 4)}"
     )
     print(
-        f"Clamped to max_ratio={args.class_weight_max_ratio}: final weights="
-        f"{np.round(class_weights_np.cpu().numpy(), 4)} (mean={mean_w:.4f}, min={min_w:.4f}, max={max_w:.4f})"
+        f"Clamped to [1, {args.class_weight_max_ratio}] to avoid downweighting N: "
+        f"final weights={np.round(class_weights_np.cpu().numpy(), 4)} (min={min_w:.1f}, max={max_w})"
     )
 
     class_weights = class_weights_np.to(device)
