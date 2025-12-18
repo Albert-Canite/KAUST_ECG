@@ -213,8 +213,10 @@ def parse_args() -> argparse.Namespace:
     _add_bool_arg(
         parser,
         "stack_sampler_with_ce",
-        default=True,
-        help_text="keep inverse-frequency CE weights even when the weighted sampler is enabled",
+        default=False,
+        help_text=(
+            "stack inverse-frequency CE weights with the weighted sampler (disabled by default to avoid over-correction)"
+        ),
     )
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
@@ -301,14 +303,14 @@ def main() -> None:
     )
 
     class_weights = class_weights_np.to(device)
-    # By default we **stack** CE inverse-frequency weights with the sampler to make rare classes
-    # much more expensive, which helps the model escape the N/V collapse seen in previous runs.
-    # Disable stacking via --no-stack-sampler-with-ce if overshooting causes instability.
+    # Default: avoid stacking CE inverse-frequency weights on top of the sampler to prevent over-correction
+    # that was driving the model to predict only S/V. Users can re-enable stacking explicitly, but it is
+    # safer to start from uniform CE weights when the sampler already rebalances the distribution.
     if sampler is not None and not args.stack_sampler_with_ce:
         base_weights = torch.ones_like(class_weights)
         print(
             "Sampler active -> using uniform CE weights (sampler handles imbalance). "
-            f"Original inverse-freq weights retained for logging: {np.round(class_weights.cpu().numpy(), 4)}"
+            f"Inverse-freq weights retained for logging: {np.round(class_weights.cpu().numpy(), 4)}"
         )
     else:
         base_weights = class_weights.clone()
@@ -363,7 +365,7 @@ def main() -> None:
         total = 0
 
         if args.weight_warmup_epochs > 0:
-            warm_frac = min(1.0, epoch / float(args.weight_warmup_epochs))
+            warm_frac = min(1.0, max(0.0, (epoch - 1) / float(args.weight_warmup_epochs)))
             epoch_weights = torch.ones_like(base_weights) * (1 - warm_frac) + base_weights * warm_frac
             warm_frac_display = warm_frac
         else:
@@ -374,6 +376,16 @@ def main() -> None:
             print(
                 f"Epoch {epoch}: CE weight warmup alpha={warm_frac_display:.2f}, weights={epoch_weights.detach().cpu().numpy()}"
             )
+
+        _write_log(
+            {
+                "event": "epoch_start",
+                "epoch": epoch,
+                "warmup_alpha": warm_frac_display,
+                "ce_weights": epoch_weights.detach().cpu().tolist(),
+                "stack_sampler_with_ce": args.stack_sampler_with_ce,
+            }
+        )
 
         for signals, labels in train_loader:
             signals, labels = signals.to(device), labels.to(device)
