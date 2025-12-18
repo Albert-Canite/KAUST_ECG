@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 from datetime import datetime
@@ -419,7 +420,7 @@ def main() -> None:
         # 4-class monitoring: use macro F1 to drive checkpointing/early stopping
         if val_metrics_mc["macro_f1"] > best_val_macro_f1:
             best_val_macro_f1 = val_metrics_mc["macro_f1"]
-            best_state = student.state_dict()
+            best_state = copy.deepcopy(student.state_dict())
             patience_counter = 0
             print("  -> New best model saved (by 4-class MacroF1).")
             _write_log(
