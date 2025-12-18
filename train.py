@@ -181,7 +181,7 @@ def parse_args() -> argparse.Namespace:
     _add_bool_arg(
         parser,
         "use_weighted_sampler",
-        default=False,
+        default=True,
         help_text="enable weighted sampler (sqrt balancing) for long-tail classes; disable to rely on CE class weights",
     )
     parser.add_argument(
