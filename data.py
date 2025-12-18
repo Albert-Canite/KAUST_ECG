@@ -92,11 +92,39 @@ def load_records(record_ids: List[str], data_path: str, window_size: int = DEFAU
     return np.concatenate(xs), np.concatenate(ys)
 
 
-def split_dataset(data: np.ndarray, labels: np.ndarray, val_ratio: float = 0.2) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    idx = np.random.permutation(len(data))
-    data, labels = data[idx], labels[idx]
-    n_train = int((1 - val_ratio) * len(data))
-    return data[:n_train], labels[:n_train], data[n_train:], labels[n_train:]
+def split_dataset(
+    data: np.ndarray, labels: np.ndarray, val_ratio: float = 0.2
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Stratified split to keep every class in the training fold.
+
+    A random shuffle alone can drop ultra-rare classes (notably S-beats) from the
+    training split, making the model incapable of predicting them. We instead
+    split per-class, keeping at least one sample of any class with >1 examples in
+    the training set and placing up to ``val_ratio`` in the validation fold.
+    """
+
+    train_indices: List[int] = []
+    val_indices: List[int] = []
+
+    for cls in np.unique(labels):
+        cls_idx = np.where(labels == cls)[0]
+        np.random.shuffle(cls_idx)
+
+        if len(cls_idx) <= 1:
+            # With a single example, keep it for training to avoid zero-shot learning.
+            val_count = 0
+        else:
+            val_count = int(np.floor(val_ratio * len(cls_idx)))
+            val_count = max(1, min(val_count, len(cls_idx) - 1))
+
+        val_indices.extend(cls_idx[:val_count].tolist())
+        train_indices.extend(cls_idx[val_count:].tolist())
+
+    # Final shuffle so batches remain mixed across classes.
+    train_indices = np.random.permutation(train_indices)
+    val_indices = np.random.permutation(val_indices)
+
+    return data[train_indices], labels[train_indices], data[val_indices], labels[val_indices]
 
 
 class ECGBeatDataset(Dataset):

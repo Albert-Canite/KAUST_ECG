@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
@@ -257,7 +258,7 @@ def main() -> None:
 
         if val_metrics["macro_f1"] > best_val_macro_f1:
             best_val_macro_f1 = val_metrics["macro_f1"]
-            best_state = student.state_dict()
+            best_state = copy.deepcopy(student.state_dict())
             patience_counter = 0
             print("[KD] -> New best model (by 4-class MacroF1)")
         else:
