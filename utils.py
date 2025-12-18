@@ -13,16 +13,17 @@ from sklearn.metrics import accuracy_score, f1_score, precision_recall_fscore_su
 
 def compute_class_weights(
     labels: np.ndarray,
-    max_ratio: float = 5.0,
+    max_ratio: float | None = 5.0,
     num_classes: int | None = None,
     power: float = 1.0,
 ) -> torch.Tensor:
     """Inverse-frequency weights normalized near mean=1 for multi-class tasks.
 
-    Default settings use full inverse frequency (power=1.0) with a modest clamp
-    (max_ratio=5) so rare S/V beats receive noticeably larger weights without
-    overwhelming the normal prior. A separate warmup in the training loop can
-    blend these weights in gradually to avoid instability early in training.
+    Set ``max_ratio=None`` to disable clamping altogether when classes are
+    extremely imbalanced; otherwise weights are clipped to
+    ``[mean / max_ratio, mean * max_ratio]``. A higher cap (or no cap) is
+    necessary when rare classes are <1% of the dataset so they are not washed
+    out by the majority class during training.
     """
 
     counter = Counter(labels.tolist())
@@ -32,18 +33,19 @@ def compute_class_weights(
         num_classes = int(np.max(labels)) + 1 if len(labels) > 0 else 0
 
     eps = 1e-8
+    # Target uniform prior so CE weights align with the sampler heuristic and
+    # actually upweight minority beats instead of downweighting moderately rare
+    # classes like "O".
+    ideal_count = max(total / float(max(num_classes, 1)), eps)
     for i in range(num_classes):
-        freq = counter.get(i, 0) / max(total, 1)
-        base = (1.0 / max(freq, eps)) ** power
+        cnt = counter.get(i, 0)
+        base = (ideal_count / max(cnt, eps)) ** power
         weights.append(base)
 
     weight_tensor = torch.tensor(weights, dtype=torch.float32)
 
-    mean_w = weight_tensor.mean().clamp(min=eps)
-    weight_tensor = weight_tensor / mean_w
-
     if max_ratio is not None and max_ratio > 0:
-        mean_w = weight_tensor.mean()
+        mean_w = weight_tensor.mean().clamp(min=eps)
         min_w = mean_w / max_ratio
         max_w = mean_w * max_ratio
         weight_tensor = weight_tensor.clamp(min=min_w, max=max_w)
