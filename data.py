@@ -154,18 +154,70 @@ class BeatDataset:
         return X, y
 
 
-def split_train_val_records(records: List[str], val_ratio: float, seed: int) -> Tuple[List[str], List[str]]:
+def count_record_labels(data_root: str, record: str) -> Dict[int, int]:
+    """Count keepable beats per class for a single record (no waveform loading)."""
+
+    record_path = os.path.join(data_root, record)
+    try:
+        rec = wfdb.rdrecord(record_path)
+    except FileNotFoundError:
+        rec = wfdb.rdrecord(record)
+
+    signal_len = rec.sig_len
+    try:
+        ann = wfdb.rdann(record_path, "atr")
+    except FileNotFoundError:
+        ann = wfdb.rdann(record, "atr")
+
+    counts = {i: 0 for i in range(4)}
+    for sample, symbol in zip(ann.sample, ann.symbol):
+        if symbol not in SYMBOL_TO_CLASS:
+            continue
+        start = sample - 180
+        end = sample + 180
+        if start < 0 or end > signal_len:
+            continue
+        counts[SYMBOL_TO_CLASS[symbol]] += 1
+    return counts
+
+
+def _aggregate_counts(records: List[str], record_counts: Dict[str, Dict[int, int]]) -> Dict[int, int]:
+    agg = {i: 0 for i in range(4)}
+    for rec in records:
+        for k, v in record_counts[rec].items():
+            agg[k] += v
+    return agg
+
+
+def split_train_val_records(data_root: str, records: List[str], val_ratio: float, seed: int) -> Tuple[List[str], List[str]]:
     rng = random.Random(seed)
-    records = records.copy()
-    rng.shuffle(records)
+    record_counts = {rec: count_record_labels(data_root, rec) for rec in records}
+
+    total_counts = _aggregate_counts(records, record_counts)
+    if any(total_counts[c] == 0 for c in range(1, 4)):
+        raise RuntimeError("Dataset missing minority classes; please verify data root and annotations")
+
     val_size = max(1, int(len(records) * val_ratio))
-    val_records = records[:val_size]
-    train_records = records[val_size:]
-    return train_records, val_records
+    records_list = records.copy()
+
+    for _ in range(2000):
+        rng.shuffle(records_list)
+        val_candidates = records_list[:val_size]
+        train_candidates = records_list[val_size:]
+        val_counts = _aggregate_counts(val_candidates, record_counts)
+        train_counts = _aggregate_counts(train_candidates, record_counts)
+
+        if all(val_counts[c] > 0 for c in range(4)) and all(train_counts[c] > 0 for c in range(4)):
+            return train_candidates, val_candidates
+
+    raise RuntimeError(
+        "Unable to create a record-level split that retains all classes in both train and val. "
+        "Try adjusting val_ratio or seed."
+    )
 
 
 def load_datasets(data_root: str, val_ratio: float, seed: int, normalization: str = "zscore"):
-    train_records, val_records = split_train_val_records(TRAIN_RECORDS, val_ratio, seed)
+    train_records, val_records = split_train_val_records(data_root, TRAIN_RECORDS, val_ratio, seed)
     print(f"Train records: {train_records}\nVal records: {val_records}\nGeneralization records: {GENERALIZATION_RECORDS}")
     train_ds = BeatDataset(data_root, train_records, normalization)
     val_ds = BeatDataset(data_root, val_records, normalization)

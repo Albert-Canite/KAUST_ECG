@@ -21,7 +21,7 @@ python main.py
 `main.py` defaults to the MIT-BIH root `E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/`. Override with `--data_root` only if your path differs.
 
 ### Common flags
-- `--val_ratio 0.2` controls the validation split by record (fraction of TRAIN_RECORDS used for validation).
+- `--val_ratio 0.2` controls the validation split by record (fraction of TRAIN_RECORDS used for validation). A record-level stratified search ensures both Train and Val retain all four classes; if impossible for the chosen ratio/seed, the script aborts with guidance.
 - `--seed 42` sets the random seed for reproducibility.
 - `--normalization zscore` or `robust` controls beat normalization.
 - `--tau 1.0` sets the logit adjustment temperature; `--beta 0.9999` sets the effective number beta.
