@@ -636,7 +636,7 @@ def main() -> None:
         composite_before_collapse = composite_score
         collapse_flag = s_recall == 0.0
         if collapse_flag:
-            composite_score = -float("inf")
+            composite_score = 0.0
 
         scheduler.step(val_loss)
 
