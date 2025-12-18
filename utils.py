@@ -93,15 +93,36 @@ def l2_normalize(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return x / (x.norm(p=2, dim=1, keepdim=True) + eps)
 
 
-def make_weighted_sampler(labels: np.ndarray, power: float = 0.5) -> WeightedRandomSampler:
-    """Create a weighted sampler to softly upsample minority beats for 4-class training."""
+def make_weighted_sampler(
+    labels: np.ndarray,
+    power: float = 0.5,
+    max_ratio: float | None = 5.0,
+) -> tuple[WeightedRandomSampler, Dict[int, float]]:
+    """Create a weighted sampler to softly upsample minority beats for 4-class training.
+
+    ``max_ratio`` prevents ultra-rare classes from exploding the sampling weights, which
+    previously led to models collapsing to predict a single minority class. We normalize
+    weights so that the smallest class weight is 1.0, then clamp larger classes.
+    """
 
     label_list = labels.tolist()
     counts = Counter(label_list)
     num_samples = len(label_list)
-    class_weights: Dict[int, float] = {}
-    abnormal_labels = [lbl for lbl in counts.keys() if lbl != 0]
+    raw_weights: Dict[int, float] = {}
+
     for cls, cnt in counts.items():
-        class_weights[cls] = (num_samples / (len(counts) * cnt)) ** power
-    sample_weights = [class_weights[y] for y in label_list]
-    return WeightedRandomSampler(sample_weights, num_samples=num_samples, replacement=True)
+        raw_weights[cls] = (num_samples / (len(counts) * cnt)) ** power
+
+    if not raw_weights:
+        sampler = WeightedRandomSampler([], num_samples=0)
+        return sampler, {}
+
+    min_w = min(raw_weights.values())
+    scaled_weights = {cls: w / max(min_w, 1e-8) for cls, w in raw_weights.items()}
+
+    if max_ratio is not None and max_ratio > 0:
+        scaled_weights = {cls: min(w, max_ratio) for cls, w in scaled_weights.items()}
+
+    sample_weights = [scaled_weights[y] for y in label_list]
+    sampler = WeightedRandomSampler(sample_weights, num_samples=num_samples, replacement=True)
+    return sampler, scaled_weights

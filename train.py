@@ -182,8 +182,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sampler_power",
         type=float,
-        default=1.0,
+        default=0.7,
         help="inverse-frequency exponent for sampler (0.5=sqrt, 1.0=full balance)",
+    )
+    parser.add_argument(
+        "--sampler_max_ratio",
+        type=float,
+        default=6.0,
+        help="cap on class sampling weights to avoid overshooting ultra-rare beats",
     )
     _add_bool_arg(
         parser,
@@ -236,11 +242,18 @@ def main() -> None:
     train_dataset = ECGBeatDataset(tr_x, tr_y)
 
     sampler = None
+    sampler_weights = None
     if args.use_weighted_sampler:
-        sampler = make_weighted_sampler(tr_y, power=args.sampler_power)
+        sampler, sampler_weights = make_weighted_sampler(
+            tr_y, power=args.sampler_power, max_ratio=args.sampler_max_ratio
+        )
         print(
             "Using weighted sampler for 4-class to surface rare S/V beats. "
-            f"power={args.sampler_power:.2f}"
+            f"power={args.sampler_power:.2f}, max_ratio={args.sampler_max_ratio:.1f}"
+        )
+        print(
+            "Per-class sampler weights (post-clamp): "
+            f"{[round(sampler_weights.get(cid, 0.0), 3) for cid in range(NUM_CLASSES)]}"
         )
 
     train_loader = DataLoader(
@@ -321,6 +334,7 @@ def main() -> None:
             "class_counts": class_counts.tolist(),
             "class_weights": class_weights.detach().cpu().tolist(),
             "ce_weights": base_weights.detach().cpu().tolist(),
+            "sampler_weights": sampler_weights if sampler_weights is not None else None,
             "data_range": [data_min, data_max],
         }
     )
