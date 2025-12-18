@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 from datetime import datetime
@@ -163,7 +164,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--class_weight_power",
         type=float,
-        default=1.0,
+        default=0.5,
         help="inverse-frequency exponent for CE weights (0.5=sqrt, 1.0=full)",
     )
     parser.add_argument(
@@ -175,14 +176,20 @@ def parse_args() -> argparse.Namespace:
     _add_bool_arg(
         parser,
         "use_weighted_sampler",
-        default=False,
+        default=True,
         help_text="enable weighted sampler (sqrt balancing) for long-tail classes; disable to rely on CE class weights",
     )
     parser.add_argument(
         "--sampler_power",
         type=float,
-        default=1.0,
+        default=0.7,
         help="inverse-frequency exponent for sampler (0.5=sqrt, 1.0=full balance)",
+    )
+    parser.add_argument(
+        "--sampler_max_ratio",
+        type=float,
+        default=6.0,
+        help="cap on class sampling weights to avoid overshooting ultra-rare beats",
     )
     _add_bool_arg(
         parser,
@@ -235,12 +242,23 @@ def main() -> None:
     train_dataset = ECGBeatDataset(tr_x, tr_y)
 
     sampler = None
+    sampler_weights = None
+    sampler_mix = None
     if args.use_weighted_sampler:
-        sampler = make_weighted_sampler(tr_y, power=args.sampler_power)
+        sampler, sampler_weights, sampler_mix = make_weighted_sampler(
+            tr_y, power=args.sampler_power, max_ratio=args.sampler_max_ratio
+        )
         print(
             "Using weighted sampler for 4-class to surface rare S/V beats. "
-            f"power={args.sampler_power:.2f}"
+            f"power={args.sampler_power:.2f}, max_ratio={args.sampler_max_ratio:.1f}"
         )
+        print(
+            "Per-class sampler weights (post-clamp): "
+            f"{[round(sampler_weights.get(cid, 0.0), 3) for cid in range(NUM_CLASSES)]}"
+        )
+        if sampler_mix:
+            mix_pct = [round(100 * sampler_mix.get(cid, 0.0), 1) for cid in range(NUM_CLASSES)]
+            print(f"Expected batch mix from sampler (N,S,V,O): {mix_pct} %")
 
     train_loader = DataLoader(
         train_dataset,
@@ -276,21 +294,20 @@ def main() -> None:
     )
 
     class_weights = class_weights_np.to(device)
-    # Default: avoid stacking CE inverse-frequency weights on top of the sampler to prevent over-correction
-    # that was driving the model to predict only S/V. Users can re-enable stacking explicitly, but it is
-    # safer to start from uniform CE weights when the sampler already rebalances the distribution.
+    # Keep some class weighting even when the sampler is on; a soft exponent avoids over-correction
+    # while preventing the sampler from drifting to all-N/O solutions.
     if sampler is not None and not args.stack_sampler_with_ce:
-        base_weights = torch.ones_like(class_weights)
+        base_weights = torch.pow(class_weights, 0.5)
         print(
-            "Sampler active -> using uniform CE weights (sampler handles imbalance). "
-            f"Inverse-freq weights retained for logging: {np.round(class_weights.cpu().numpy(), 4)}"
+            "Sampler active -> applying mild CE reweighting (sqrt of inverse-freq) to reinforce S/V. "
+            f"Effective CE weights: {np.round(base_weights.cpu().numpy(), 4)}"
         )
     else:
         base_weights = class_weights.clone()
         if sampler is not None:
             print(
                 "Sampler active **and** CE stacking enabled -> combining sampler upsampling with "
-                f"inverse-freq CE weights: {np.round(class_weights.cpu().numpy(), 4)}"
+                f"full inverse-freq CE weights: {np.round(class_weights.cpu().numpy(), 4)}"
             )
 
     os.makedirs("artifacts", exist_ok=True)
@@ -320,13 +337,15 @@ def main() -> None:
             "class_counts": class_counts.tolist(),
             "class_weights": class_weights.detach().cpu().tolist(),
             "ce_weights": base_weights.detach().cpu().tolist(),
+            "sampler_weights": sampler_weights if sampler_weights is not None else None,
+            "sampler_mix": sampler_mix if sampler_mix is not None else None,
             "data_range": [data_min, data_max],
         }
     )
 
     print(f"Preprocessed input range: [{data_min:.3f}, {data_max:.3f}] (expected within [-1, 1])")
 
-    best_val_macro_f1 = -float("inf")
+    best_checkpoint_score = -float("inf")
     best_state = None
     patience_counter = 0
 
@@ -383,12 +402,20 @@ def main() -> None:
             student, gen_loader, device, NUM_CLASSES
         )
 
+        val_abnormal_f1 = val_metrics_mc.get("abnormal_macro_f1", val_metrics_mc["macro_f1"])
+        gen_abnormal_f1 = gen_metrics_mc.get("abnormal_macro_f1", gen_metrics_mc["macro_f1"])
+        val_rare_f1 = val_metrics_mc.get("rare_macro_f1", val_abnormal_f1)
+        gen_rare_f1 = gen_metrics_mc.get("rare_macro_f1", gen_abnormal_f1)
+
+        # Emphasize S/V performance so "all O" or "all N" models cannot win early stopping.
+        composite_score = 0.2 * val_metrics_mc["macro_f1"] + 0.3 * val_abnormal_f1 + 0.5 * val_rare_f1
+
         scheduler.step(val_loss)
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
-            f"Val MacroF1 {val_metrics_mc['macro_f1']:.3f} Acc {val_metrics_mc['accuracy']:.3f} | "
-            f"Gen MacroF1 {gen_metrics_mc['macro_f1']:.3f} Acc {gen_metrics_mc['accuracy']:.3f}"
+            f"Val MacroF1 {val_metrics_mc['macro_f1']:.3f} (abn {val_abnormal_f1:.3f} rare {val_rare_f1:.3f}) Acc {val_metrics_mc['accuracy']:.3f} | "
+            f"Gen MacroF1 {gen_metrics_mc['macro_f1']:.3f} (abn {gen_abnormal_f1:.3f} rare {gen_rare_f1:.3f}) Acc {gen_metrics_mc['accuracy']:.3f}"
         )
 
         history.append(
@@ -400,6 +427,11 @@ def main() -> None:
                 "val_acc": val_metrics_mc["accuracy"],
                 "gen_macro_f1": gen_metrics_mc["macro_f1"],
                 "gen_acc": gen_metrics_mc["accuracy"],
+                "val_abnormal_macro_f1": val_abnormal_f1,
+                "val_rare_macro_f1": val_rare_f1,
+                "gen_abnormal_macro_f1": gen_abnormal_f1,
+                "gen_rare_macro_f1": gen_rare_f1,
+                "checkpoint_score": composite_score,
             }
         )
 
@@ -411,27 +443,40 @@ def main() -> None:
                 "val_loss": val_loss,
                 "val_macro_f1": val_metrics_mc["macro_f1"],
                 "val_acc": val_metrics_mc["accuracy"],
+                "val_abnormal_macro_f1": val_abnormal_f1,
                 "gen_macro_f1": gen_metrics_mc["macro_f1"],
+                "gen_abnormal_macro_f1": gen_abnormal_f1,
+                "gen_rare_macro_f1": gen_rare_f1,
                 "gen_acc": gen_metrics_mc["accuracy"],
+                "checkpoint_score": composite_score,
             }
         )
 
-        # 4-class monitoring: use macro F1 to drive checkpointing/early stopping
-        if val_metrics_mc["macro_f1"] > best_val_macro_f1:
-            best_val_macro_f1 = val_metrics_mc["macro_f1"]
-            best_state = student.state_dict()
+        # 4-class monitoring: emphasize abnormal beats by blending macro F1
+        # with abnormal-only macro F1. This prevents degenerate "all N" models
+        # from winning early stopping when rare classes are ignored.
+        if composite_score > best_checkpoint_score:
+            best_checkpoint_score = composite_score
+            best_state = copy.deepcopy(student.state_dict())
             patience_counter = 0
-            print("  -> New best model saved (by 4-class MacroF1).")
+            print(
+                "  -> New best model saved (by blended Val MacroF1 + abnormal MacroF1)."
+            )
             _write_log(
                 {
                     "event": "best",
                     "epoch": epoch,
-                    "val_macro_f1": val_metrics_mc["macro_f1"],
-                    "val_acc": val_metrics_mc["accuracy"],
-                    "gen_macro_f1": gen_metrics_mc["macro_f1"],
-                    "gen_acc": gen_metrics_mc["accuracy"],
-                }
-            )
+                "val_macro_f1": val_metrics_mc["macro_f1"],
+                "val_acc": val_metrics_mc["accuracy"],
+                "val_abnormal_macro_f1": val_abnormal_f1,
+                "val_rare_macro_f1": val_rare_f1,
+                "gen_macro_f1": gen_metrics_mc["macro_f1"],
+                "gen_abnormal_macro_f1": gen_abnormal_f1,
+                "gen_rare_macro_f1": gen_rare_f1,
+                "gen_acc": gen_metrics_mc["accuracy"],
+                "checkpoint_score": composite_score,
+            }
+        )
         else:
             patience_counter += 1
             if patience_counter >= args.patience and epoch >= args.min_epochs:
