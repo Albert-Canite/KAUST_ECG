@@ -5,7 +5,7 @@ import argparse
 import json
 import os
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -103,7 +103,6 @@ def evaluate(
     preds: List[int] = []
     trues: List[int] = []
     probs_all: List[torch.Tensor] = []
-    sample_debug: Optional[Dict[str, torch.Tensor]] = None
     with torch.no_grad():
         for signals, labels in data_loader:
             signals, labels = signals.to(device), labels.to(device)
@@ -116,33 +115,8 @@ def evaluate(
             preds.extend(pred.cpu().tolist())
             trues.extend(labels.cpu().tolist())
             probs_all.append(prob_all.detach().cpu())
-            if sample_debug is None:
-                sample_debug = {
-                    "y_true": labels.detach().cpu(),
-                    "pred": pred.detach().cpu(),
-                    "prob_all": prob_all.detach().cpu(),
-                }
     avg_loss = total_loss / max(total, 1)
     metrics = compute_multiclass_metrics(trues, preds, num_classes)  # type: ignore[arg-type]
-
-    if sample_debug is not None:
-        unique_y = torch.unique(torch.tensor(trues))
-        print(f"[Eval] Unique y_true (4-class): {unique_y.tolist()}")
-        cm = confusion_matrix(trues, preds, labels=list(range(num_classes)))
-        print(f"[Eval] 4-class confusion matrix (rows=true, cols=pred):\n{cm}")
-        per_cls = metrics.get("per_class", {}) if isinstance(metrics, dict) else {}
-        for cid in range(num_classes):
-            mc = per_cls.get(cid, {})
-            print(
-                f"[Eval] Class {CLASS_NAMES[cid]}: precision={mc.get('precision', 0):.3f} "
-                f"recall={mc.get('recall', 0):.3f} f1={mc.get('f1', 0):.3f}"
-            )
-        print(
-            "[Eval] Sample sanity (first batch, first 10):",
-            "y_true=", sample_debug["y_true"][:10].tolist(),
-            "pred=", sample_debug["pred"][:10].tolist(),
-            "prob_first_class=", sample_debug["prob_all"][:10, 0].tolist(),
-        )
 
     stacked_probs = torch.cat(probs_all, dim=0) if probs_all else torch.empty(0, num_classes)
     return avg_loss, metrics, trues, preds, stacked_probs
@@ -201,8 +175,8 @@ def parse_args() -> argparse.Namespace:
     _add_bool_arg(
         parser,
         "use_weighted_sampler",
-        default=True,
-        help_text="enable weighted sampler (sqrt balancing) for long-tail classes; disable to use class weights only",
+        default=False,
+        help_text="enable weighted sampler (sqrt balancing) for long-tail classes; disable to rely on CE class weights",
     )
     parser.add_argument(
         "--sampler_power",
