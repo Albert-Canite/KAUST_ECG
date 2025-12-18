@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 from datetime import datetime
@@ -163,7 +164,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--class_weight_power",
         type=float,
-        default=1.0,
+        default=0.5,
         help="inverse-frequency exponent for CE weights (0.5=sqrt, 1.0=full)",
     )
     parser.add_argument(
@@ -175,7 +176,7 @@ def parse_args() -> argparse.Namespace:
     _add_bool_arg(
         parser,
         "use_weighted_sampler",
-        default=False,
+        default=True,
         help_text="enable weighted sampler (sqrt balancing) for long-tail classes; disable to rely on CE class weights",
     )
     parser.add_argument(
@@ -326,7 +327,7 @@ def main() -> None:
 
     print(f"Preprocessed input range: [{data_min:.3f}, {data_max:.3f}] (expected within [-1, 1])")
 
-    best_val_macro_f1 = -float("inf")
+    best_checkpoint_score = -float("inf")
     best_state = None
     patience_counter = 0
 
@@ -383,12 +384,16 @@ def main() -> None:
             student, gen_loader, device, NUM_CLASSES
         )
 
+        val_abnormal_f1 = val_metrics_mc.get("abnormal_macro_f1", val_metrics_mc["macro_f1"])
+        gen_abnormal_f1 = gen_metrics_mc.get("abnormal_macro_f1", gen_metrics_mc["macro_f1"])
+        composite_score = 0.5 * val_metrics_mc["macro_f1"] + 0.5 * val_abnormal_f1
+
         scheduler.step(val_loss)
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
-            f"Val MacroF1 {val_metrics_mc['macro_f1']:.3f} Acc {val_metrics_mc['accuracy']:.3f} | "
-            f"Gen MacroF1 {gen_metrics_mc['macro_f1']:.3f} Acc {gen_metrics_mc['accuracy']:.3f}"
+            f"Val MacroF1 {val_metrics_mc['macro_f1']:.3f} (abn {val_abnormal_f1:.3f}) Acc {val_metrics_mc['accuracy']:.3f} | "
+            f"Gen MacroF1 {gen_metrics_mc['macro_f1']:.3f} (abn {gen_abnormal_f1:.3f}) Acc {gen_metrics_mc['accuracy']:.3f}"
         )
 
         history.append(
@@ -400,6 +405,9 @@ def main() -> None:
                 "val_acc": val_metrics_mc["accuracy"],
                 "gen_macro_f1": gen_metrics_mc["macro_f1"],
                 "gen_acc": gen_metrics_mc["accuracy"],
+                "val_abnormal_macro_f1": val_abnormal_f1,
+                "gen_abnormal_macro_f1": gen_abnormal_f1,
+                "checkpoint_score": composite_score,
             }
         )
 
@@ -411,25 +419,35 @@ def main() -> None:
                 "val_loss": val_loss,
                 "val_macro_f1": val_metrics_mc["macro_f1"],
                 "val_acc": val_metrics_mc["accuracy"],
+                "val_abnormal_macro_f1": val_abnormal_f1,
                 "gen_macro_f1": gen_metrics_mc["macro_f1"],
+                "gen_abnormal_macro_f1": gen_abnormal_f1,
                 "gen_acc": gen_metrics_mc["accuracy"],
+                "checkpoint_score": composite_score,
             }
         )
 
-        # 4-class monitoring: use macro F1 to drive checkpointing/early stopping
-        if val_metrics_mc["macro_f1"] > best_val_macro_f1:
-            best_val_macro_f1 = val_metrics_mc["macro_f1"]
-            best_state = student.state_dict()
+        # 4-class monitoring: emphasize abnormal beats by blending macro F1
+        # with abnormal-only macro F1. This prevents degenerate "all N" models
+        # from winning early stopping when rare classes are ignored.
+        if composite_score > best_checkpoint_score:
+            best_checkpoint_score = composite_score
+            best_state = copy.deepcopy(student.state_dict())
             patience_counter = 0
-            print("  -> New best model saved (by 4-class MacroF1).")
+            print(
+                "  -> New best model saved (by blended Val MacroF1 + abnormal MacroF1)."
+            )
             _write_log(
                 {
                     "event": "best",
                     "epoch": epoch,
                     "val_macro_f1": val_metrics_mc["macro_f1"],
                     "val_acc": val_metrics_mc["accuracy"],
+                    "val_abnormal_macro_f1": val_abnormal_f1,
                     "gen_macro_f1": gen_metrics_mc["macro_f1"],
+                    "gen_abnormal_macro_f1": gen_abnormal_f1,
                     "gen_acc": gen_metrics_mc["accuracy"],
+                    "checkpoint_score": composite_score,
                 }
             )
         else:
