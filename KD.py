@@ -188,6 +188,17 @@ def load_student(args: argparse.Namespace, device: torch.device) -> Tuple[nn.Mod
     student.load_state_dict(ckpt["student_state_dict"])
     return student, config
 
+def main() -> None:
+    args = parse_args()
+    set_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+def main() -> None:
+    args = parse_args()
+    set_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
 def main() -> None:
     args = parse_args()
