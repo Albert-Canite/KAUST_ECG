@@ -25,6 +25,7 @@ from utils import (
     confusion_metrics,
     make_weighted_sampler,
     sweep_thresholds_blended,
+    sweep_thresholds_low_miss,
 )
 
 
@@ -178,6 +179,20 @@ def parse_args() -> argparse.Namespace:
         default=1.35,
         help="Miss-rate penalty applied to generalization metrics during threshold sweeps",
     )
+    _add_bool_arg(parser, "enable_low_miss_threshold", default=True, help_text="low miss driven threshold sweeps")
+    parser.add_argument(
+        "--gen_fpr_cap_low_miss",
+        type=float,
+        default=0.20,
+        help="Maximum allowable generalization FPR when selecting low-miss thresholds",
+    )
+    parser.add_argument(
+        "--threshold_grid_step",
+        type=float,
+        default=0.01,
+        help="Step size for coarse threshold grid",
+    )
+    _add_bool_arg(parser, "threshold_refine", default=True, help_text="refine thresholds near the best candidate")
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
@@ -283,9 +298,13 @@ def main() -> None:
     best_val_f1 = -float("inf")
     best_state = None
     best_threshold = 0.5
+    best_low_miss_state = None
+    best_low_miss_threshold = 0.5
+    best_low_miss_gen = None
     patience_counter = 0
 
     history: List[Dict[str, float]] = []
+    threshold_grid = np.arange(0.02, 0.9800001, args.threshold_grid_step).tolist()
 
     for epoch in range(1, args.max_epochs + 1):
         student.train()
@@ -336,7 +355,23 @@ def main() -> None:
             gen_miss_penalty=args.threshold_gen_miss_penalty,
             miss_target=args.threshold_target_miss,
             fpr_cap=args.threshold_max_fpr,
+            thresholds=threshold_grid,
         )
+
+        low_miss_thr = best_thr_epoch
+        val_metrics_low_miss = val_metrics
+        gen_metrics_low_miss = gen_metrics
+        low_miss_info: Dict[str, object] | None = None
+        if args.enable_low_miss_threshold:
+            low_miss_thr, val_metrics_low_miss, gen_metrics_low_miss, low_miss_info = sweep_thresholds_low_miss(
+                val_probs,
+                val_true,
+                gen_probs,
+                gen_true,
+                thresholds=threshold_grid,
+                gen_fpr_cap=args.gen_fpr_cap_low_miss,
+                refine=args.threshold_refine,
+            )
 
         miss_ema = 0.8 * miss_ema + 0.2 * val_metrics["miss_rate"]
 
@@ -344,9 +379,14 @@ def main() -> None:
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
-            f"Val F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}% | "
-            f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}% | Thr {best_thr_epoch:.2f}"
+            f"Balanced Thr {best_thr_epoch:.3f} | Val F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}% | "
+            f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}%"
         )
+        if args.enable_low_miss_threshold:
+            print(
+                f"  LowMiss Thr {low_miss_thr:.3f} | Val F1 {val_metrics_low_miss['f1']:.3f} Miss {val_metrics_low_miss['miss_rate'] * 100:.2f}% FPR {val_metrics_low_miss['fpr'] * 100:.2f}% | "
+                f"Gen F1 {gen_metrics_low_miss['f1']:.3f} Miss {gen_metrics_low_miss['miss_rate'] * 100:.2f}% FPR {gen_metrics_low_miss['fpr'] * 100:.2f}%"
+            )
 
         history.append(
             {
@@ -360,6 +400,13 @@ def main() -> None:
                 "gen_miss": gen_metrics["miss_rate"],
                 "gen_fpr": gen_metrics["fpr"],
                 "threshold": best_thr_epoch,
+                "low_miss_threshold": low_miss_thr,
+                "low_miss_val_f1": val_metrics_low_miss["f1"],
+                "low_miss_val_miss": val_metrics_low_miss["miss_rate"],
+                "low_miss_val_fpr": val_metrics_low_miss["fpr"],
+                "low_miss_gen_f1": gen_metrics_low_miss["f1"],
+                "low_miss_gen_miss": gen_metrics_low_miss["miss_rate"],
+                "low_miss_gen_fpr": gen_metrics_low_miss["fpr"],
             }
         )
 
@@ -376,6 +423,13 @@ def main() -> None:
                 "gen_miss": gen_metrics["miss_rate"],
                 "gen_fpr": gen_metrics["fpr"],
                 "threshold": best_thr_epoch,
+                "low_miss_threshold": low_miss_thr,
+                "low_miss_val_f1": val_metrics_low_miss["f1"],
+                "low_miss_val_miss": val_metrics_low_miss["miss_rate"],
+                "low_miss_val_fpr": val_metrics_low_miss["fpr"],
+                "low_miss_gen_f1": gen_metrics_low_miss["f1"],
+                "low_miss_gen_miss": gen_metrics_low_miss["miss_rate"],
+                "low_miss_gen_fpr": gen_metrics_low_miss["fpr"],
             }
         )
 
@@ -384,7 +438,9 @@ def main() -> None:
             best_state = student.state_dict()
             best_threshold = best_thr_epoch
             patience_counter = 0
-            print("  -> New best model saved.")
+            os.makedirs("saved_models", exist_ok=True)
+            torch.save({"student_state_dict": best_state, "threshold": best_threshold}, os.path.join("saved_models", "best_balanced.pt"))
+            print("  -> New best balanced model saved.")
             _write_log(
                 {
                     "event": "best",
@@ -396,6 +452,7 @@ def main() -> None:
                     "gen_miss": gen_metrics["miss_rate"],
                     "gen_fpr": gen_metrics["fpr"],
                     "threshold": best_thr_epoch,
+                    "type": "balanced",
                 }
             )
         else:
@@ -403,6 +460,44 @@ def main() -> None:
             if patience_counter >= args.patience and epoch >= args.min_epochs:
                 print("Early stopping triggered.")
                 break
+
+        if args.enable_low_miss_threshold and gen_metrics_low_miss["fpr"] <= args.gen_fpr_cap_low_miss:
+            update_low_miss = False
+            if best_low_miss_gen is None:
+                update_low_miss = True
+            else:
+                better_miss = gen_metrics_low_miss["miss_rate"] < best_low_miss_gen["miss_rate"]
+                miss_tie = np.isclose(gen_metrics_low_miss["miss_rate"], best_low_miss_gen["miss_rate"], atol=1e-6)
+                better_fpr = gen_metrics_low_miss["fpr"] < best_low_miss_gen["fpr"]
+                fpr_tie = np.isclose(gen_metrics_low_miss["fpr"], best_low_miss_gen["fpr"], atol=1e-6)
+                better_f1 = gen_metrics_low_miss["f1"] > best_low_miss_gen["f1"]
+                update_low_miss = better_miss or (miss_tie and better_fpr) or (miss_tie and fpr_tie and better_f1)
+
+            if update_low_miss:
+                best_low_miss_state = student.state_dict()
+                best_low_miss_threshold = low_miss_thr
+                best_low_miss_gen = gen_metrics_low_miss
+                os.makedirs("saved_models", exist_ok=True)
+                torch.save(
+                    {"student_state_dict": best_low_miss_state, "threshold": best_low_miss_threshold},
+                    os.path.join("saved_models", "best_low_miss.pt"),
+                )
+                print("  -> New best low-miss model saved.")
+                log_entry = {
+                    "event": "best",
+                    "epoch": epoch,
+                    "val_f1": val_metrics_low_miss["f1"],
+                    "val_miss": val_metrics_low_miss["miss_rate"],
+                    "val_fpr": val_metrics_low_miss["fpr"],
+                    "gen_f1": gen_metrics_low_miss["f1"],
+                    "gen_miss": gen_metrics_low_miss["miss_rate"],
+                    "gen_fpr": gen_metrics_low_miss["fpr"],
+                    "threshold": low_miss_thr,
+                    "type": "low_miss",
+                }
+                if low_miss_info is not None:
+                    log_entry["low_miss_info"] = low_miss_info
+                _write_log(log_entry)
 
     if best_state is not None:
         student.load_state_dict(best_state)
@@ -426,9 +521,24 @@ def main() -> None:
         gen_miss_penalty=args.threshold_gen_miss_penalty,
         miss_target=args.threshold_target_miss,
         fpr_cap=args.threshold_max_fpr,
+        thresholds=threshold_grid,
     )
     val_pred = (np.array(val_probs) >= best_threshold).astype(int).tolist()
     gen_pred = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
+
+    low_miss_final_thr = None
+    val_metrics_low_miss_final: Optional[Dict[str, float]] = None
+    gen_metrics_low_miss_final: Optional[Dict[str, float]] = None
+    if args.enable_low_miss_threshold:
+        low_miss_final_thr, val_metrics_low_miss_final, gen_metrics_low_miss_final, _ = sweep_thresholds_low_miss(
+            val_probs,
+            val_true,
+            gen_probs,
+            gen_true,
+            thresholds=threshold_grid,
+            gen_fpr_cap=args.gen_fpr_cap_low_miss,
+            refine=args.threshold_refine,
+        )
 
     print(
         f"Final Val@thr={best_threshold:.2f}: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, "
@@ -438,6 +548,15 @@ def main() -> None:
         f"Generalization@thr={best_threshold:.2f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, "
         f"miss={gen_metrics['miss_rate'] * 100:.2f}%, fpr={gen_metrics['fpr'] * 100:.2f}%"
     )
+    if args.enable_low_miss_threshold and low_miss_final_thr is not None and val_metrics_low_miss_final is not None and gen_metrics_low_miss_final is not None:
+        print(
+            f"LowMiss Val@thr={low_miss_final_thr:.3f}: F1={val_metrics_low_miss_final['f1']:.3f}, "
+            f"miss={val_metrics_low_miss_final['miss_rate'] * 100:.2f}%, fpr={val_metrics_low_miss_final['fpr'] * 100:.2f}%"
+        )
+        print(
+            f"LowMiss Generalization@thr={low_miss_final_thr:.3f}: F1={gen_metrics_low_miss_final['f1']:.3f}, "
+            f"miss={gen_metrics_low_miss_final['miss_rate'] * 100:.2f}%, fpr={gen_metrics_low_miss_final['fpr'] * 100:.2f}%"
+        )
 
     _write_log(
         {
@@ -451,6 +570,13 @@ def main() -> None:
             "gen_f1": gen_metrics["f1"],
             "gen_miss": gen_metrics["miss_rate"],
             "gen_fpr": gen_metrics["fpr"],
+            "low_miss_threshold": low_miss_final_thr,
+            "low_miss_val_f1": None if val_metrics_low_miss_final is None else val_metrics_low_miss_final["f1"],
+            "low_miss_val_miss": None if val_metrics_low_miss_final is None else val_metrics_low_miss_final["miss_rate"],
+            "low_miss_val_fpr": None if val_metrics_low_miss_final is None else val_metrics_low_miss_final["fpr"],
+            "low_miss_gen_f1": None if gen_metrics_low_miss_final is None else gen_metrics_low_miss_final["f1"],
+            "low_miss_gen_miss": None if gen_metrics_low_miss_final is None else gen_metrics_low_miss_final["miss_rate"],
+            "low_miss_gen_fpr": None if gen_metrics_low_miss_final is None else gen_metrics_low_miss_final["fpr"],
         }
     )
 
