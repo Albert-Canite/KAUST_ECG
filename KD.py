@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
@@ -15,8 +16,9 @@ from torch.utils.data import DataLoader
 
 from data import BEAT_LABEL_MAP, ECGBeatDataset, load_records, set_seed, split_dataset
 from models.student import SegmentAwareStudent
+from models.teacher import resnet18_1d
 from train import GENERALIZATION_RECORDS, TRAIN_RECORDS, build_student
-from utils import compute_class_weights, compute_multiclass_metrics, make_weighted_sampler
+from utils import compute_class_weights, compute_multiclass_metrics, kd_logit_loss, make_weighted_sampler
 
 
 @dataclass
@@ -78,6 +80,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--sampler_power", type=float, default=0.5)
     parser.add_argument("--student_path", type=str, default=os.path.join("saved_models", "student_model.pth"))
+    parser.add_argument("--teacher_path", type=str, default=os.path.join("saved_models", "teacher_model.pth"))
+    parser.add_argument("--kd_alpha", type=float, default=0.35, help="weight for KD logit loss vs CE")
+    parser.add_argument("--kd_temperature", type=float, default=4.0, help="temperature for KD logit loss")
+    parser.add_argument("--teacher_max_epochs", type=int, default=25)
+    parser.add_argument("--teacher_patience", type=int, default=6)
     return parser.parse_args()
 
 
@@ -194,11 +201,77 @@ def load_student(args: argparse.Namespace, device: torch.device) -> Tuple[nn.Mod
     student.load_state_dict(ckpt["student_state_dict"])
     return student, config
 
-def main() -> None:
-    args = parse_args()
-    set_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+
+def build_teacher(device: torch.device) -> nn.Module:
+    teacher = resnet18_1d(num_classes=len(set(BEAT_LABEL_MAP.values())))
+    return teacher.to(device)
+
+
+def train_teacher(
+    teacher: nn.Module,
+    loaders: DatasetBundle,
+    device: torch.device,
+    args: argparse.Namespace,
+) -> nn.Module:
+    optimizer = Adam(teacher.parameters(), lr=args.lr)
+    scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3, verbose=True)
+    base_weights = loaders.class_weights.to(device)
+
+    best_val_macro_f1 = -float("inf")
+    best_state = None
+    patience_counter = 0
+
+    for epoch in range(1, args.teacher_max_epochs + 1):
+        teacher.train()
+        running_loss = 0.0
+        total = 0
+
+        if args.weight_warmup_epochs > 0:
+            warm_frac = min(1.0, epoch / float(args.weight_warmup_epochs))
+            epoch_weights = torch.ones_like(base_weights) * (1 - warm_frac) + base_weights * warm_frac
+        else:
+            epoch_weights = base_weights.clone()
+        ce_loss_fn = nn.CrossEntropyLoss(weight=epoch_weights)
+
+        for signals, labels in loaders.train_loader:
+            signals, labels = signals.to(device), labels.to(device)
+            optimizer.zero_grad()
+            logits, _ = teacher(signals)
+            loss = ce_loss_fn(logits, labels)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(teacher.parameters(), max_norm=1.0)
+            optimizer.step()
+            running_loss += loss.item() * labels.size(0)
+            total += labels.size(0)
+
+        train_loss = running_loss / max(total, 1)
+        val_loss, val_metrics, _, _ = evaluate_with_probs(teacher, loaders.val_loader, device)
+        gen_loss, gen_metrics, _, _ = evaluate_with_probs(teacher, loaders.gen_loader, device)
+        scheduler.step(val_loss)
+
+        print(
+            f"[KD-Teacher] Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
+            f"Val MacroF1 {val_metrics['macro_f1']:.3f} Acc {val_metrics['accuracy']:.3f} | "
+            f"Gen MacroF1 {gen_metrics['macro_f1']:.3f} Acc {gen_metrics['accuracy']:.3f}"
+        )
+
+        if val_metrics["macro_f1"] > best_val_macro_f1:
+            best_val_macro_f1 = val_metrics["macro_f1"]
+            best_state = copy.deepcopy(teacher.state_dict())
+            patience_counter = 0
+            print("[KD-Teacher] -> New best teacher (by MacroF1)")
+        else:
+            patience_counter += 1
+            if patience_counter >= args.teacher_patience:
+                print("[KD-Teacher] Early stopping triggered")
+                break
+
+    if best_state is not None:
+        teacher.load_state_dict(best_state)
+    os.makedirs(os.path.dirname(args.teacher_path), exist_ok=True)
+    torch.save({"teacher_state_dict": teacher.state_dict()}, args.teacher_path)
+    print(f"[KD-Teacher] Saved teacher checkpoint to {args.teacher_path}")
+    return teacher
 
 def main() -> None:
     args = parse_args()
@@ -208,6 +281,39 @@ def main() -> None:
 
     loaders = build_dataloaders(args, device)
     student, student_config = load_student(args, device)
+
+    print("[KD] Baseline student evaluation (pre-KD)...")
+    _, base_val_metrics, _, _ = evaluate_with_probs(student, loaders.val_loader, device)
+    _, base_gen_metrics, _, _ = evaluate_with_probs(student, loaders.gen_loader, device)
+    print(
+        f"[KD] Baseline -> Val MacroF1 {base_val_metrics['macro_f1']:.3f} Acc {base_val_metrics['accuracy']:.3f} | "
+        f"Gen MacroF1 {base_gen_metrics['macro_f1']:.3f} Acc {base_gen_metrics['accuracy']:.3f}"
+    )
+
+    if os.path.exists(args.teacher_path):
+        teacher_ckpt = torch.load(args.teacher_path, map_location=device)
+        teacher = build_teacher(device)
+        teacher.load_state_dict(teacher_ckpt["teacher_state_dict"])
+        print(f"[KD] Loaded teacher checkpoint from {args.teacher_path}")
+    else:
+        print("[KD] No teacher checkpoint found -> training teacher first")
+        teacher = build_teacher(device)
+        teacher = train_teacher(teacher, loaders, device, args)
+
+    print("[KD] Teacher evaluation ...")
+    _, teacher_val_metrics, _, _ = evaluate_with_probs(teacher, loaders.val_loader, device)
+    _, teacher_gen_metrics, _, _ = evaluate_with_probs(teacher, loaders.gen_loader, device)
+    print(
+        f"[KD] Teacher -> Val MacroF1 {teacher_val_metrics['macro_f1']:.3f} Acc {teacher_val_metrics['accuracy']:.3f} | "
+        f"Gen MacroF1 {teacher_gen_metrics['macro_f1']:.3f} Acc {teacher_gen_metrics['accuracy']:.3f}"
+    )
+
+    use_kd = teacher_val_metrics["macro_f1"] > base_val_metrics["macro_f1"]
+    kd_alpha = args.kd_alpha if use_kd else 0.0
+    print(
+        f"[KD] KD gating -> use_kd={use_kd} | kd_alpha={kd_alpha:.2f} | "
+        f"reason: teacher_val_macro_f1 {teacher_val_metrics['macro_f1']:.3f} vs student {base_val_metrics['macro_f1']:.3f}"
+    )
 
     optimizer = Adam(student.parameters(), lr=args.lr)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=3, verbose=True)
@@ -219,12 +325,14 @@ def main() -> None:
 
     for epoch in range(1, args.max_epochs + 1):
         student.train()
+        teacher.eval()
         running_loss = 0.0
         total = 0
         if args.weight_warmup_epochs > 0:
             warm_frac = min(1.0, epoch / float(args.weight_warmup_epochs))
             epoch_weights = torch.ones_like(base_weights) * (1 - warm_frac) + base_weights * warm_frac
         else:
+            warm_frac = 1.0
             epoch_weights = base_weights.clone()
         ce_loss_fn = nn.CrossEntropyLoss(weight=epoch_weights)
         if epoch == 1 or (args.weight_warmup_epochs > 0 and warm_frac < 1.0 and epoch % 5 == 0):
@@ -235,8 +343,15 @@ def main() -> None:
         for signals, labels in loaders.train_loader:
             signals, labels = signals.to(device), labels.to(device)
             optimizer.zero_grad()
-            logits, _ = student(signals)
-            loss = ce_loss_fn(logits, labels)
+            student_logits, _ = student(signals)
+            ce_loss = ce_loss_fn(student_logits, labels)
+            if use_kd:
+                with torch.no_grad():
+                    teacher_logits, _ = teacher(signals)
+                kd_loss = kd_logit_loss(student_logits, teacher_logits, temperature=args.kd_temperature)
+                loss = (1 - kd_alpha) * ce_loss + kd_alpha * kd_loss
+            else:
+                loss = ce_loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
             optimizer.step()
@@ -257,7 +372,7 @@ def main() -> None:
 
         if val_metrics["macro_f1"] > best_val_macro_f1:
             best_val_macro_f1 = val_metrics["macro_f1"]
-            best_state = student.state_dict()
+            best_state = copy.deepcopy(student.state_dict())
             patience_counter = 0
             print("[KD] -> New best model (by 4-class MacroF1)")
         else:
