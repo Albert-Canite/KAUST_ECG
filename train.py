@@ -448,15 +448,24 @@ def main() -> None:
         val_rare_f1 = val_metrics_mc.get("rare_macro_f1", val_abnormal_f1)
         gen_rare_f1 = gen_metrics_mc.get("rare_macro_f1", gen_abnormal_f1)
 
-        # Emphasize S/V performance so "all O" or "all N" models cannot win early stopping.
-        composite_score = 0.2 * val_metrics_mc["macro_f1"] + 0.3 * val_abnormal_f1 + 0.5 * val_rare_f1
+        # Penalize any class collapse by tracking the minimum per-class F1.
+        val_min_f1 = min((m.get("f1", 0.0) for m in val_metrics_mc.get("per_class", {}).values()), default=0.0)
+        gen_min_f1 = min((m.get("f1", 0.0) for m in gen_metrics_mc.get("per_class", {}).values()), default=0.0)
+
+        # Encourage balanced learning across all classes; abnormal beats still matter,
+        # but ignoring any class (including O) lowers the checkpoint score.
+        composite_score = (
+            0.4 * val_metrics_mc["macro_f1"]
+            + 0.3 * val_abnormal_f1
+            + 0.3 * val_min_f1
+        )
 
         scheduler.step(val_loss)
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
-            f"Val MacroF1 {val_metrics_mc['macro_f1']:.3f} (abn {val_abnormal_f1:.3f} rare {val_rare_f1:.3f}) Acc {val_metrics_mc['accuracy']:.3f} | "
-            f"Gen MacroF1 {gen_metrics_mc['macro_f1']:.3f} (abn {gen_abnormal_f1:.3f} rare {gen_rare_f1:.3f}) Acc {gen_metrics_mc['accuracy']:.3f}"
+            f"Val MacroF1 {val_metrics_mc['macro_f1']:.3f} (abn {val_abnormal_f1:.3f} rare {val_rare_f1:.3f} min {val_min_f1:.3f}) Acc {val_metrics_mc['accuracy']:.3f} | "
+            f"Gen MacroF1 {gen_metrics_mc['macro_f1']:.3f} (abn {gen_abnormal_f1:.3f} rare {gen_rare_f1:.3f} min {gen_min_f1:.3f}) Acc {gen_metrics_mc['accuracy']:.3f}"
         )
 
         history.append(
@@ -470,8 +479,10 @@ def main() -> None:
                 "gen_acc": gen_metrics_mc["accuracy"],
                 "val_abnormal_macro_f1": val_abnormal_f1,
                 "val_rare_macro_f1": val_rare_f1,
+                "val_min_f1": val_min_f1,
                 "gen_abnormal_macro_f1": gen_abnormal_f1,
                 "gen_rare_macro_f1": gen_rare_f1,
+                "gen_min_f1": gen_min_f1,
                 "checkpoint_score": composite_score,
             }
         )
@@ -488,6 +499,8 @@ def main() -> None:
                 "gen_macro_f1": gen_metrics_mc["macro_f1"],
                 "gen_abnormal_macro_f1": gen_abnormal_f1,
                 "gen_rare_macro_f1": gen_rare_f1,
+                "val_min_f1": val_min_f1,
+                "gen_min_f1": gen_min_f1,
                 "gen_acc": gen_metrics_mc["accuracy"],
                 "checkpoint_score": composite_score,
             }
