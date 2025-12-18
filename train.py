@@ -187,7 +187,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sampler_power",
         type=float,
-        default=0.7,
+        default=0.5,
         help="inverse-frequency exponent for sampler (0.5=sqrt, 1.0=full balance)",
     )
     parser.add_argument(
@@ -195,6 +195,14 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=6.0,
         help="cap on class sampling weights to avoid overshooting ultra-rare beats",
+    )
+    parser.add_argument(
+        "--target_sampler_mix",
+        type=str,
+        default="",
+        help=(
+            "optional comma-separated target batch mix for (N,S,V,O); empty string disables and uses inverse-frequency sampler"
+        ),
     )
     _add_bool_arg(
         parser,
@@ -205,17 +213,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--target_sampler_mix",
-        type=str,
-        default="0.5,0.2,0.2,0.1",
-        help=(
-            "comma-separated target batch mix for (N,S,V,O); empty string disables and reverts to inverse-frequency sampler"
-        ),
-    )
-    parser.add_argument(
         "--loss_type",
         choices=["ce", "focal"],
-        default="focal",
+        default="ce",
         help="loss to train the student (focal improves hard S/V recall)",
     )
     parser.add_argument("--focal_gamma", type=float, default=2.0, help="gamma for focal loss")
@@ -258,6 +258,12 @@ def main() -> None:
         "Class distribution (N,S,V,O): "
         f"{class_counts.tolist()} | non-normal fraction={abnormal_ratio:.3f}"
     )
+    missing_train = [CLASS_NAMES[i] for i, cnt in enumerate(class_counts) if cnt == 0]
+    if missing_train:
+        raise RuntimeError(
+            "Training split is missing classes: "
+            f"{missing_train}. Retry with different records or disable stratified split to avoid zero-shot classes."
+        )
 
     train_dataset = ECGBeatDataset(tr_x, tr_y)
 
