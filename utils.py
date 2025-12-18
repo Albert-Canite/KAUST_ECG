@@ -106,7 +106,7 @@ def make_weighted_sampler(
     labels: np.ndarray,
     power: float = 0.5,
     max_ratio: float | None = 5.0,
-) -> tuple[WeightedRandomSampler, Dict[int, float]]:
+) -> tuple[WeightedRandomSampler, Dict[int, float], Dict[int, float]]:
     """Create a weighted sampler to softly upsample minority beats for 4-class training.
 
     ``max_ratio`` prevents ultra-rare classes from exploding the sampling weights, which
@@ -124,7 +124,7 @@ def make_weighted_sampler(
 
     if not raw_weights:
         sampler = WeightedRandomSampler([], num_samples=0)
-        return sampler, {}
+        return sampler, {}, {}
 
     min_w = min(raw_weights.values())
     scaled_weights = {cls: w / max(min_w, 1e-8) for cls, w in raw_weights.items()}
@@ -132,6 +132,13 @@ def make_weighted_sampler(
     if max_ratio is not None and max_ratio > 0:
         scaled_weights = {cls: min(w, max_ratio) for cls, w in scaled_weights.items()}
 
+    # Expected sampling proportion for diagnostics: proportional to weight * count.
+    denom = sum(scaled_weights[c] * counts[c] for c in scaled_weights)
+    if denom > 0:
+        sampler_mix = {cls: float(scaled_weights[cls] * counts[cls] / denom) for cls in scaled_weights}
+    else:
+        sampler_mix = {cls: 0.0 for cls in scaled_weights}
+
     sample_weights = [scaled_weights[y] for y in label_list]
     sampler = WeightedRandomSampler(sample_weights, num_samples=num_samples, replacement=True)
-    return sampler, scaled_weights
+    return sampler, scaled_weights, sampler_mix

@@ -243,8 +243,9 @@ def main() -> None:
 
     sampler = None
     sampler_weights = None
+    sampler_mix = None
     if args.use_weighted_sampler:
-        sampler, sampler_weights = make_weighted_sampler(
+        sampler, sampler_weights, sampler_mix = make_weighted_sampler(
             tr_y, power=args.sampler_power, max_ratio=args.sampler_max_ratio
         )
         print(
@@ -255,6 +256,9 @@ def main() -> None:
             "Per-class sampler weights (post-clamp): "
             f"{[round(sampler_weights.get(cid, 0.0), 3) for cid in range(NUM_CLASSES)]}"
         )
+        if sampler_mix:
+            mix_pct = [round(100 * sampler_mix.get(cid, 0.0), 1) for cid in range(NUM_CLASSES)]
+            print(f"Expected batch mix from sampler (N,S,V,O): {mix_pct} %")
 
     train_loader = DataLoader(
         train_dataset,
@@ -290,21 +294,20 @@ def main() -> None:
     )
 
     class_weights = class_weights_np.to(device)
-    # Default: avoid stacking CE inverse-frequency weights on top of the sampler to prevent over-correction
-    # that was driving the model to predict only S/V. Users can re-enable stacking explicitly, but it is
-    # safer to start from uniform CE weights when the sampler already rebalances the distribution.
+    # Keep some class weighting even when the sampler is on; a soft exponent avoids over-correction
+    # while preventing the sampler from drifting to all-N/O solutions.
     if sampler is not None and not args.stack_sampler_with_ce:
-        base_weights = torch.ones_like(class_weights)
+        base_weights = torch.pow(class_weights, 0.5)
         print(
-            "Sampler active -> using uniform CE weights (sampler handles imbalance). "
-            f"Inverse-freq weights retained for logging: {np.round(class_weights.cpu().numpy(), 4)}"
+            "Sampler active -> applying mild CE reweighting (sqrt of inverse-freq) to reinforce S/V. "
+            f"Effective CE weights: {np.round(base_weights.cpu().numpy(), 4)}"
         )
     else:
         base_weights = class_weights.clone()
         if sampler is not None:
             print(
                 "Sampler active **and** CE stacking enabled -> combining sampler upsampling with "
-                f"inverse-freq CE weights: {np.round(class_weights.cpu().numpy(), 4)}"
+                f"full inverse-freq CE weights: {np.round(class_weights.cpu().numpy(), 4)}"
             )
 
     os.makedirs("artifacts", exist_ok=True)
@@ -335,6 +338,7 @@ def main() -> None:
             "class_weights": class_weights.detach().cpu().tolist(),
             "ce_weights": base_weights.detach().cpu().tolist(),
             "sampler_weights": sampler_weights if sampler_weights is not None else None,
+            "sampler_mix": sampler_mix if sampler_mix is not None else None,
             "data_range": [data_min, data_max],
         }
     )
