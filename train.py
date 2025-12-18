@@ -197,6 +197,27 @@ def parse_args() -> argparse.Namespace:
         help="cap on class sampling weights to avoid overshooting ultra-rare beats",
     )
     parser.add_argument(
+        "--curriculum_epochs",
+        type=int,
+        default=6,
+        help=(
+            "use a mild balanced sampler for the first N epochs to guarantee early S/V exposure; "
+            "set to 0 to disable the curriculum stage"
+        ),
+    )
+    parser.add_argument(
+        "--curriculum_sampler_power",
+        type=float,
+        default=0.5,
+        help="inverse-frequency exponent for the curriculum sampler (0.5=sqrt balance)",
+    )
+    parser.add_argument(
+        "--curriculum_sampler_max_ratio",
+        type=float,
+        default=4.0,
+        help="cap for curriculum sampler weights to prevent runaway oversampling",
+    )
+    parser.add_argument(
         "--target_sampler_mix",
         type=str,
         default="",
@@ -271,6 +292,9 @@ def main() -> None:
     sampler_weights = None
     sampler_mix = None
     target_mix = None
+    balanced_sampler = None
+    balanced_sampler_weights = None
+    balanced_sampler_mix = None
     if args.target_sampler_mix.strip():
         target_raw = np.array([float(x) for x in args.target_sampler_mix.split(",")], dtype=float)
         if target_raw.sum() <= 0:
@@ -302,12 +326,42 @@ def main() -> None:
             mix_pct = [round(100 * sampler_mix.get(cid, 0.0), 1) for cid in range(NUM_CLASSES)]
             print(f"Expected batch mix from sampler (N,S,V,O): {mix_pct} %")
 
+    # Mild curriculum sampler to expose S/V early without forcing balance for the whole run.
+    # Only apply when the primary sampler is off to avoid stacking two resampling strategies.
+    if args.curriculum_epochs > 0 and sampler is None:
+        balanced_sampler, balanced_sampler_weights, balanced_sampler_mix = make_weighted_sampler(
+            tr_y,
+            power=args.curriculum_sampler_power,
+            max_ratio=args.curriculum_sampler_max_ratio,
+            num_classes=NUM_CLASSES,
+        )
+        print(
+            "Curriculum sampler enabled for initial epochs to ensure rare-class exposure: "
+            f"epochs=1-{args.curriculum_epochs}, power={args.curriculum_sampler_power:.2f}, "
+            f"max_ratio={args.curriculum_sampler_max_ratio:.1f}"
+        )
+        print(
+            "Curriculum sampler weights (post-clamp): "
+            f"{[round(balanced_sampler_weights.get(cid, 0.0), 3) for cid in range(NUM_CLASSES)]}"
+        )
+        if balanced_sampler_mix:
+            mix_pct = [round(100 * balanced_sampler_mix.get(cid, 0.0), 1) for cid in range(NUM_CLASSES)]
+            print(f"Expected batch mix during curriculum (N,S,V,O): {mix_pct} %")
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=sampler is None,
         sampler=sampler,
     )
+    curriculum_loader = None
+    if balanced_sampler is not None:
+        curriculum_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            sampler=balanced_sampler,
+        )
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
 
@@ -336,8 +390,9 @@ def main() -> None:
     )
 
     class_weights = class_weights_np.to(device)
-    # Keep some class weighting even when the sampler is on; a soft exponent avoids over-correction
-    # while preventing the sampler from drifting to all-N/O solutions.
+    # Keep some class weighting even when a sampler is on; a soft exponent avoids over-correction
+    # while preventing the sampler from drifting to all-N/O solutions. When the curriculum sampler
+    # is used, we stay conservative to avoid repeating earlier over-balancing failures.
     if sampler is not None and not args.stack_sampler_with_ce:
         base_weights = torch.pow(class_weights, 0.5)
         print(
@@ -351,6 +406,13 @@ def main() -> None:
                 "Sampler active **and** CE stacking enabled -> combining sampler upsampling with "
                 f"full inverse-freq CE weights: {np.round(class_weights.cpu().numpy(), 4)}"
             )
+
+    curriculum_weights = torch.pow(class_weights, 0.5)
+    if curriculum_loader is not None:
+        print(
+            "Curriculum stage CE weights (sqrt inverse-freq) to pair with mild sampler: "
+            f"{np.round(curriculum_weights.cpu().numpy(), 4)}"
+        )
 
     os.makedirs("artifacts", exist_ok=True)
     log_path = os.path.join(
@@ -398,12 +460,16 @@ def main() -> None:
         running_loss = 0.0
         total = 0
 
+        use_curriculum = curriculum_loader is not None and epoch <= args.curriculum_epochs
+        epoch_loader = curriculum_loader if use_curriculum else train_loader
+        epoch_base_weights = curriculum_weights if use_curriculum else base_weights
+
         if args.weight_warmup_epochs > 0:
             warm_frac = min(1.0, max(0.0, (epoch - 1) / float(args.weight_warmup_epochs)))
-            epoch_weights = torch.ones_like(base_weights) * (1 - warm_frac) + base_weights * warm_frac
+            epoch_weights = torch.ones_like(epoch_base_weights) * (1 - warm_frac) + epoch_base_weights * warm_frac
             warm_frac_display = warm_frac
         else:
-            epoch_weights = base_weights.clone()
+            epoch_weights = epoch_base_weights.clone()
             warm_frac_display = 1.0
         if args.loss_type == "focal":
             alpha = epoch_weights / max(epoch_weights.sum(), 1e-8)
@@ -416,17 +482,25 @@ def main() -> None:
             )
             print(f"  -> Using {args.loss_type.upper()} loss (gamma={args.focal_gamma:.2f} when focal)")
 
+        if use_curriculum and epoch == 1:
+            print(
+                "Curriculum phase active: using mild sampler and sqrt weights for early rare-class exposure"
+            )
+        if use_curriculum and epoch == args.curriculum_epochs:
+            print("Last curriculum epoch before switching to natural sampling next epoch")
+
         _write_log(
             {
                 "event": "epoch_start",
                 "epoch": epoch,
+                "use_curriculum": use_curriculum,
                 "warmup_alpha": warm_frac_display,
                 "ce_weights": epoch_weights.detach().cpu().tolist(),
                 "stack_sampler_with_ce": args.stack_sampler_with_ce,
             }
         )
 
-        for signals, labels in train_loader:
+        for signals, labels in epoch_loader:
             signals, labels = signals.to(device), labels.to(device)
             optimizer.zero_grad()
 
