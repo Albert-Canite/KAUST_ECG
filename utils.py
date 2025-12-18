@@ -54,15 +54,21 @@ def compute_class_weights(
 
 
 def compute_multiclass_metrics(y_true: List[int], y_pred: List[int], num_classes: int) -> Dict[str, object]:
+    labels_all = list(range(num_classes))
+
+    # Always evaluate against the full label set; otherwise macro F1 silently
+    # drops missing classes and makes a collapsed model look better than it is.
     precision, recall, f1, _ = precision_recall_fscore_support(
-        y_true, y_pred, labels=list(range(num_classes)), zero_division=0
+        y_true, y_pred, labels=labels_all, zero_division=0
     )
     per_class = {
         i: {"precision": float(p), "recall": float(r), "f1": float(f)}
         for i, (p, r, f) in enumerate(zip(precision, recall, f1))
     }
 
-    macro_f1 = float(f1_score(y_true, y_pred, average="macro", zero_division=0))
+    macro_f1 = float(
+        f1_score(y_true, y_pred, average="macro", labels=labels_all, zero_division=0)
+    )
 
     # Highlight minority classes two ways:
     #   1) abnormal_macro_f1 averages all non-N classes (S/V/O)
