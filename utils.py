@@ -61,9 +61,24 @@ def compute_multiclass_metrics(y_true: List[int], y_pred: List[int], num_classes
         i: {"precision": float(p), "recall": float(r), "f1": float(f)}
         for i, (p, r, f) in enumerate(zip(precision, recall, f1))
     }
+
+    macro_f1 = float(f1_score(y_true, y_pred, average="macro", zero_division=0))
+
+    # Highlight the minority classes (S, V, O) by reporting an abnormal-only
+    # macro F1. This is used downstream to guide checkpointing so models that
+    # ignore rare beats are not considered "best" despite high N accuracy.
+    abnormal_indices = [i for i in range(num_classes) if i != 0]
+    abnormal_present = [idx for idx in abnormal_indices if idx in per_class]
+    if abnormal_present:
+        abnormal_f1s = [per_class[idx]["f1"] for idx in abnormal_present]
+        abnormal_macro_f1 = float(np.mean(abnormal_f1s))
+    else:
+        abnormal_macro_f1 = macro_f1
+
     return {
         "accuracy": float(accuracy_score(y_true, y_pred)),
-        "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "macro_f1": macro_f1,
+        "abnormal_macro_f1": abnormal_macro_f1,
         "per_class": per_class,
     }
 
