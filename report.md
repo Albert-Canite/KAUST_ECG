@@ -433,3 +433,28 @@
 - **效果判断与表征方式**：
   - 若教师被门控关闭 KD，学生仅做 CE 微调，指标应与基线接近；此时 KD 效果可以通过 “KD 权重=0（教师未被接受）” 的日志明确说明，无需期待性能提升。
   - 若教师被接受，观测对比图（Val/Gen 双 ROC）与 `artifacts/kd_training_log.csv` 中阈值/指标轨迹，若 KD AUC 与 miss 明显优于基线且与教师趋势一致，则可认定 KD 起效；否则可进一步调整教师质量或 KD 权重。
+
+## v10_debug Root cause analysis (current runs still miss S/V)
+- **Observed failure**: Recent training collapses to predicting only `N` and occasionally `O`; `S`/`V` recall stays at 0–1% despite high overall accuracy driven by class `N`. Validation confusion matrices show entire `S`/`V` rows mapped to `N`/`O`, confirming minority classes are not learned.
+- **Imbalance handling now too weak**: After successive safeguards, both weighted sampling and class-weight boosts default to **off** (or heavily clamped to a max ratio of 2.0). Given MIT-BIH’s severe skew (typically <5% combined for `S`/`V`), the effective CE weights become nearly uniform and the sampler stays disabled; the model therefore trains on batches dominated by `N`, leading to near-zero gradients for `S`/`V` and argmax always favoring the majority.
+- **Over-corrections between runs**: Earlier attempts to curb “all-abnormal” collapse switched between strong abnormal emphasis and full suppression. These oscillations reset checkpointing and early stopping, but the current defaults remain on the conservative side—fully suppressing rebalancing—which explains the swing to “all-normal”.
+- **KD no longer helping minorities**: With KD warmed down and weights/sampling weakened, the teacher’s logits are not enough to pull `S`/`V` upwards; instead the student follows the dominant `N` prior. No binary folding remains, so the remaining bias is purely from insufficient minority exposure/weight.
+- **Next actionable directions**: (a) Re-enable a mild sampler (e.g., sqrt inverse-frequency) together with unclamped class weights or a higher clamp (≥4×) so `S`/`V` gradients matter; (b) keep CE weights active even when sampling is on to avoid losing minority emphasis; (c) delay KD until minority recall rises, or down-weight KD loss so CE can carve out `S`/`V` boundaries; (d) monitor per-class loss/precision–recall each epoch to stop before collapsing back to a single-class solution.
+
+## v4-class recovery playbook (requested summary & concrete edits)
+- **Feasibility**: Accurate four-class classification is achievable; N/O already reach >0.9 P/R. The remaining gap is stabilizing S/V exposure without re-triggering abnormal/normal collapse.
+- **Minimum code edits to apply** (all in four-class paths only):
+  1) `utils.py::compute_class_weights_4cls`: use `(1/freq)**0.5`, normalize mean→1.0, clamp ratio≤1.5, remove all abnormal multipliers and adaptive reweights; log per-split counts/weights once.
+  2) `train.py::build_dataloaders`: enable a gentle `WeightedRandomSampler` only when `(S+V)/total < 0.35`, with fixed `abnormal_boost≈1.2`; when sampler is on, force `ce_class_weights = torch.ones(4)` to avoid double balancing.
+  3) `train.py::train_one_epoch/evaluate`: drive checkpointing by validation Macro-F1 only; delete collapse detectors, miss/FPR rescues, and any threshold scan/ROC folds. Keep per-class PRF + 4×4 confusion matrix logging every epoch.
+  4) `train.py` CLI defaults: set `--use_class_weights` on, `--use_weighted_sampler` off (opt-in), `--class_weight_power 0.5`, `--max_class_weight_ratio 1.5`, `--sampler_abnormal_boost 1.2`; set `--no-use-kd` as default for stabilization.
+  5) `KD.py`: mirror the above defaults; KD should never change sampler/weight states. Gate KD until `kd_warmup_epochs>=10` and skip any pause/resume logic tied to miss/FPR.
+  6) **Sanity check script**: add a small CLI (e.g., `python train.py --eval_only --checkpoint ...`) that loads a checkpoint and prints per-class support/PRF over a held-out slice to ensure S/V recall >0.3 before full training.
+- **Rationale**: These edits remove binary-era residuals, limit overlapping boosts, and give S/V consistent gradient/share without collapsing N/O. Logging stays four-class only, so early stopping reflects the true objective.
+
+## v4-class weight warmup (current code changes)
+- **Stronger yet gradual weighting**: Default class weights now use full inverse frequency with a wider clamp (max_ratio=5). A linear warmup over the first 8 epochs blends from uniform to target weights so minority emphasis ramps up without immediately destabilizing N/O predictions.
+- **Consistent KD behavior**: The KD loop mirrors the same weight computation and warmup, preventing distillation from overriding the minority-focused weighting scheme.
+- **How to tune**: If S/V recall stays low, shorten the warmup or raise `--class_weight_max_ratio`; if N collapses, lengthen warmup. The sampler remains optional—when enabled it keeps CE weights uniform to avoid double balancing.
+
+4-class_debug
