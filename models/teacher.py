@@ -1,3 +1,5 @@
+from typing import List, Tuple, Type
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,7 +33,7 @@ class BasicBlock1D(nn.Module):
 
 
 class ResNet1D(nn.Module):
-    def __init__(self, block: type[BasicBlock1D], num_blocks: list[int], num_classes: int = 4) -> None:
+    def __init__(self, block: Type[BasicBlock1D], num_blocks: List[int], num_classes: int = 4) -> None:
         super().__init__()
         self.in_planes = 32
 
@@ -47,7 +49,7 @@ class ResNet1D(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool1d(1)
         self.fc = nn.Linear(256 * block.expansion, num_classes)
 
-    def _make_layer(self, block: type[BasicBlock1D], planes: int, num_blocks: int, stride: int) -> nn.Sequential:
+    def _make_layer(self, block: Type[BasicBlock1D], planes: int, num_blocks: int, stride: int) -> nn.Sequential:
         strides = [stride] + [1] * (num_blocks - 1)
         layers = []
         for stride in strides:
@@ -55,7 +57,7 @@ class ResNet1D(nn.Module):
             self.in_planes = planes * block.expansion
         return nn.Sequential(*layers)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.maxpool(out)
         out = self.layer1(out)
