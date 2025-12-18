@@ -20,7 +20,12 @@ from sklearn.metrics import confusion_matrix
 
 from data import BEAT_LABEL_MAP, ECGBeatDataset, load_records, set_seed, split_dataset
 from models.student import SegmentAwareStudent
-from utils import compute_class_weights, compute_multiclass_metrics, make_weighted_sampler
+from utils import (
+    FocalLoss,
+    compute_class_weights,
+    compute_multiclass_metrics,
+    make_weighted_sampler,
+)
 
 
 TRAIN_RECORDS = [
@@ -199,6 +204,21 @@ def parse_args() -> argparse.Namespace:
             "stack inverse-frequency CE weights with the weighted sampler (disabled by default to avoid over-correction)"
         ),
     )
+    parser.add_argument(
+        "--target_sampler_mix",
+        type=str,
+        default="0.5,0.2,0.2,0.1",
+        help=(
+            "comma-separated target batch mix for (N,S,V,O); empty string disables and reverts to inverse-frequency sampler"
+        ),
+    )
+    parser.add_argument(
+        "--loss_type",
+        choices=["ce", "focal"],
+        default="focal",
+        help="loss to train the student (focal improves hard S/V recall)",
+    )
+    parser.add_argument("--focal_gamma", type=float, default=2.0, help="gamma for focal loss")
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
@@ -244,14 +264,30 @@ def main() -> None:
     sampler = None
     sampler_weights = None
     sampler_mix = None
+    target_mix = None
+    if args.target_sampler_mix.strip():
+        target_raw = np.array([float(x) for x in args.target_sampler_mix.split(",")], dtype=float)
+        if target_raw.sum() <= 0:
+            raise ValueError("target_sampler_mix must sum to a positive value")
+        target_mix = (target_raw / target_raw.sum()).tolist()
+        if len(target_mix) != NUM_CLASSES:
+            raise ValueError(
+                f"target_sampler_mix must provide {NUM_CLASSES} values for N/S/V/O, got {len(target_mix)}"
+            )
     if args.use_weighted_sampler:
         sampler, sampler_weights, sampler_mix = make_weighted_sampler(
-            tr_y, power=args.sampler_power, max_ratio=args.sampler_max_ratio
+            tr_y,
+            power=args.sampler_power,
+            max_ratio=args.sampler_max_ratio,
+            target_mix=target_mix,
+            num_classes=NUM_CLASSES,
         )
         print(
             "Using weighted sampler for 4-class to surface rare S/V beats. "
             f"power={args.sampler_power:.2f}, max_ratio={args.sampler_max_ratio:.1f}"
         )
+        if target_mix is not None:
+            print(f"Target sampler mix (N,S,V,O): {[round(m,3) for m in target_mix]} (normalized)")
         print(
             "Per-class sampler weights (post-clamp): "
             f"{[round(sampler_weights.get(cid, 0.0), 3) for cid in range(NUM_CLASSES)]}"
@@ -363,11 +399,16 @@ def main() -> None:
         else:
             epoch_weights = base_weights.clone()
             warm_frac_display = 1.0
-        ce_loss_fn = nn.CrossEntropyLoss(weight=epoch_weights)
+        if args.loss_type == "focal":
+            alpha = epoch_weights / max(epoch_weights.sum(), 1e-8)
+            loss_fn = FocalLoss(alpha=alpha.to(device), gamma=args.focal_gamma)
+        else:
+            loss_fn = nn.CrossEntropyLoss(weight=epoch_weights)
         if epoch == 1 or (args.weight_warmup_epochs > 0 and warm_frac < 1.0 and epoch % 5 == 0):
             print(
-                f"Epoch {epoch}: CE weight warmup alpha={warm_frac_display:.2f}, weights={epoch_weights.detach().cpu().numpy()}"
+                f"Epoch {epoch}: weight warmup alpha={warm_frac_display:.2f}, weights={epoch_weights.detach().cpu().numpy()}"
             )
+            print(f"  -> Using {args.loss_type.upper()} loss (gamma={args.focal_gamma:.2f} when focal)")
 
         _write_log(
             {
@@ -384,7 +425,7 @@ def main() -> None:
             optimizer.zero_grad()
 
             logits, _ = student(signals)
-            loss = ce_loss_fn(logits, labels)
+            loss = loss_fn(logits, labels)
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)

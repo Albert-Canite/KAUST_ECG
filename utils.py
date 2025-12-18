@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -106,8 +106,15 @@ def make_weighted_sampler(
     labels: np.ndarray,
     power: float = 0.5,
     max_ratio: float | None = 5.0,
+    target_mix: Optional[List[float]] = None,
+    num_classes: Optional[int] = None,
 ) -> tuple[WeightedRandomSampler, Dict[int, float], Dict[int, float]]:
     """Create a weighted sampler to softly upsample minority beats for 4-class training.
+
+    ``target_mix`` lets us steer the expected batch proportions directly. When provided,
+    per-class weights are chosen so that ``weight * count`` matches the target mix
+    (normalized). This gently lifts S/V exposure without forcing perfect balance and still
+    respects ``max_ratio`` to prevent runaway oversampling.
 
     ``max_ratio`` prevents ultra-rare classes from exploding the sampling weights, which
     previously led to models collapsing to predict a single minority class. We normalize
@@ -119,8 +126,31 @@ def make_weighted_sampler(
     num_samples = len(label_list)
     raw_weights: Dict[int, float] = {}
 
-    for cls, cnt in counts.items():
-        raw_weights[cls] = (num_samples / (len(counts) * cnt)) ** power
+    if num_classes is None and target_mix is not None:
+        num_classes = len(target_mix)
+    if num_classes is None:
+        num_classes = max(counts.keys(), default=-1) + 1
+
+    if target_mix is not None and any(target_mix):
+        mix = np.array(target_mix, dtype=float)
+        if mix.shape[0] != num_classes:
+            raise ValueError(
+                f"target_mix length {mix.shape[0]} does not match num_classes {num_classes}"
+            )
+        if mix.sum() <= 0:
+            raise ValueError("target_mix must sum to a positive value")
+        mix = mix / mix.sum()
+
+        for cls in range(num_classes):
+            cnt = counts.get(cls, 0)
+            if cnt == 0:
+                # No samples for this class -> cannot resample it.
+                continue
+            observed_frac = cnt / float(num_samples)
+            raw_weights[cls] = (mix[cls] / max(observed_frac, 1e-8)) ** 1.0
+    else:
+        for cls, cnt in counts.items():
+            raw_weights[cls] = (num_samples / (len(counts) * cnt)) ** power
 
     if not raw_weights:
         sampler = WeightedRandomSampler([], num_samples=0)
@@ -133,12 +163,45 @@ def make_weighted_sampler(
         scaled_weights = {cls: min(w, max_ratio) for cls, w in scaled_weights.items()}
 
     # Expected sampling proportion for diagnostics: proportional to weight * count.
-    denom = sum(scaled_weights[c] * counts[c] for c in scaled_weights)
+    denom = sum(scaled_weights.get(c, 0.0) * counts.get(c, 0) for c in range(num_classes))
     if denom > 0:
-        sampler_mix = {cls: float(scaled_weights[cls] * counts[cls] / denom) for cls in scaled_weights}
+        sampler_mix = {
+            cls: float(scaled_weights.get(cls, 0.0) * counts.get(cls, 0) / denom)
+            for cls in range(num_classes)
+        }
     else:
-        sampler_mix = {cls: 0.0 for cls in scaled_weights}
+        sampler_mix = {cls: 0.0 for cls in range(num_classes)}
 
     sample_weights = [scaled_weights[y] for y in label_list]
     sampler = WeightedRandomSampler(sample_weights, num_samples=num_samples, replacement=True)
     return sampler, scaled_weights, sampler_mix
+
+
+class FocalLoss(torch.nn.Module):
+    """Multi-class focal loss with optional per-class alpha."""
+
+    def __init__(self, alpha: Optional[torch.Tensor] = None, gamma: float = 2.0, reduction: str = "mean") -> None:
+        super().__init__()
+        self.register_buffer("alpha", alpha if alpha is not None else None)
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        log_probs = F.log_softmax(logits, dim=1)
+        probs = torch.exp(log_probs)
+        targets_one_hot = F.one_hot(targets, num_classes=logits.size(1)).float()
+
+        if self.alpha is not None:
+            alpha_factor = (self.alpha + 1e-8)[targets]
+        else:
+            alpha_factor = torch.ones_like(targets, dtype=log_probs.dtype, device=logits.device)
+
+        focal_weight = alpha_factor * torch.pow(1.0 - torch.sum(probs * targets_one_hot, dim=1), self.gamma)
+        ce_loss = -torch.sum(targets_one_hot * log_probs, dim=1)
+        loss = focal_weight * ce_loss
+
+        if self.reduction == "mean":
+            return loss.mean()
+        if self.reduction == "sum":
+            return loss.sum()
+        return loss
