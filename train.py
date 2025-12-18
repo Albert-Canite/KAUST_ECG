@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 from datetime import datetime
@@ -19,7 +20,12 @@ from sklearn.metrics import confusion_matrix
 
 from data import BEAT_LABEL_MAP, ECGBeatDataset, load_records, set_seed, split_dataset
 from models.student import SegmentAwareStudent
-from utils import compute_class_weights, compute_multiclass_metrics, make_weighted_sampler
+from utils import (
+    FocalLoss,
+    compute_class_weights,
+    compute_multiclass_metrics,
+    make_weighted_sampler,
+)
 
 
 TRAIN_RECORDS = [
@@ -163,7 +169,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--class_weight_power",
         type=float,
-        default=1.0,
+        default=0.5,
         help="inverse-frequency exponent for CE weights (0.5=sqrt, 1.0=full)",
     )
     parser.add_argument(
@@ -181,8 +187,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sampler_power",
         type=float,
-        default=1.0,
+        default=0.5,
         help="inverse-frequency exponent for sampler (0.5=sqrt, 1.0=full balance)",
+    )
+    parser.add_argument(
+        "--sampler_max_ratio",
+        type=float,
+        default=6.0,
+        help="cap on class sampling weights to avoid overshooting ultra-rare beats",
+    )
+    parser.add_argument(
+        "--curriculum_epochs",
+        type=int,
+        default=6,
+        help=(
+            "use a mild balanced sampler for the first N epochs to guarantee early S/V exposure; "
+            "set to 0 to disable the curriculum stage"
+        ),
+    )
+    parser.add_argument(
+        "--curriculum_sampler_power",
+        type=float,
+        default=0.5,
+        help="inverse-frequency exponent for the curriculum sampler (0.5=sqrt balance)",
+    )
+    parser.add_argument(
+        "--curriculum_sampler_max_ratio",
+        type=float,
+        default=4.0,
+        help="cap for curriculum sampler weights to prevent runaway oversampling",
+    )
+    parser.add_argument(
+        "--target_sampler_mix",
+        type=str,
+        default="",
+        help=(
+            "optional comma-separated target batch mix for (N,S,V,O); empty string disables and uses inverse-frequency sampler"
+        ),
     )
     _add_bool_arg(
         parser,
@@ -192,6 +233,13 @@ def parse_args() -> argparse.Namespace:
             "stack inverse-frequency CE weights with the weighted sampler (disabled by default to avoid over-correction)"
         ),
     )
+    parser.add_argument(
+        "--loss_type",
+        choices=["ce", "focal"],
+        default="ce",
+        help="loss to train the student (focal improves hard S/V recall)",
+    )
+    parser.add_argument("--focal_gamma", type=float, default=2.0, help="gamma for focal loss")
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
@@ -231,16 +279,74 @@ def main() -> None:
         "Class distribution (N,S,V,O): "
         f"{class_counts.tolist()} | non-normal fraction={abnormal_ratio:.3f}"
     )
+    missing_train = [CLASS_NAMES[i] for i, cnt in enumerate(class_counts) if cnt == 0]
+    if missing_train:
+        raise RuntimeError(
+            "Training split is missing classes: "
+            f"{missing_train}. Retry with different records or disable stratified split to avoid zero-shot classes."
+        )
 
     train_dataset = ECGBeatDataset(tr_x, tr_y)
 
     sampler = None
+    sampler_weights = None
+    sampler_mix = None
+    target_mix = None
+    balanced_sampler = None
+    balanced_sampler_weights = None
+    balanced_sampler_mix = None
+    if args.target_sampler_mix.strip():
+        target_raw = np.array([float(x) for x in args.target_sampler_mix.split(",")], dtype=float)
+        if target_raw.sum() <= 0:
+            raise ValueError("target_sampler_mix must sum to a positive value")
+        target_mix = (target_raw / target_raw.sum()).tolist()
+        if len(target_mix) != NUM_CLASSES:
+            raise ValueError(
+                f"target_sampler_mix must provide {NUM_CLASSES} values for N/S/V/O, got {len(target_mix)}"
+            )
     if args.use_weighted_sampler:
-        sampler = make_weighted_sampler(tr_y, power=args.sampler_power)
+        sampler, sampler_weights, sampler_mix = make_weighted_sampler(
+            tr_y,
+            power=args.sampler_power,
+            max_ratio=args.sampler_max_ratio,
+            target_mix=target_mix,
+            num_classes=NUM_CLASSES,
+        )
         print(
             "Using weighted sampler for 4-class to surface rare S/V beats. "
-            f"power={args.sampler_power:.2f}"
+            f"power={args.sampler_power:.2f}, max_ratio={args.sampler_max_ratio:.1f}"
         )
+        if target_mix is not None:
+            print(f"Target sampler mix (N,S,V,O): {[round(m,3) for m in target_mix]} (normalized)")
+        print(
+            "Per-class sampler weights (post-clamp): "
+            f"{[round(sampler_weights.get(cid, 0.0), 3) for cid in range(NUM_CLASSES)]}"
+        )
+        if sampler_mix:
+            mix_pct = [round(100 * sampler_mix.get(cid, 0.0), 1) for cid in range(NUM_CLASSES)]
+            print(f"Expected batch mix from sampler (N,S,V,O): {mix_pct} %")
+
+    # Mild curriculum sampler to expose S/V early without forcing balance for the whole run.
+    # Only apply when the primary sampler is off to avoid stacking two resampling strategies.
+    if args.curriculum_epochs > 0 and sampler is None:
+        balanced_sampler, balanced_sampler_weights, balanced_sampler_mix = make_weighted_sampler(
+            tr_y,
+            power=args.curriculum_sampler_power,
+            max_ratio=args.curriculum_sampler_max_ratio,
+            num_classes=NUM_CLASSES,
+        )
+        print(
+            "Curriculum sampler enabled for initial epochs to ensure rare-class exposure: "
+            f"epochs=1-{args.curriculum_epochs}, power={args.curriculum_sampler_power:.2f}, "
+            f"max_ratio={args.curriculum_sampler_max_ratio:.1f}"
+        )
+        print(
+            "Curriculum sampler weights (post-clamp): "
+            f"{[round(balanced_sampler_weights.get(cid, 0.0), 3) for cid in range(NUM_CLASSES)]}"
+        )
+        if balanced_sampler_mix:
+            mix_pct = [round(100 * balanced_sampler_mix.get(cid, 0.0), 1) for cid in range(NUM_CLASSES)]
+            print(f"Expected batch mix during curriculum (N,S,V,O): {mix_pct} %")
 
     train_loader = DataLoader(
         train_dataset,
@@ -248,6 +354,14 @@ def main() -> None:
         shuffle=sampler is None,
         sampler=sampler,
     )
+    curriculum_loader = None
+    if balanced_sampler is not None:
+        curriculum_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            sampler=balanced_sampler,
+        )
     val_loader = DataLoader(ECGBeatDataset(va_x, va_y), batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(ECGBeatDataset(gen_x, gen_y), batch_size=args.batch_size, shuffle=False)
 
@@ -276,22 +390,29 @@ def main() -> None:
     )
 
     class_weights = class_weights_np.to(device)
-    # Default: avoid stacking CE inverse-frequency weights on top of the sampler to prevent over-correction
-    # that was driving the model to predict only S/V. Users can re-enable stacking explicitly, but it is
-    # safer to start from uniform CE weights when the sampler already rebalances the distribution.
+    # Keep some class weighting even when a sampler is on; a soft exponent avoids over-correction
+    # while preventing the sampler from drifting to all-N/O solutions. When the curriculum sampler
+    # is used, we stay conservative to avoid repeating earlier over-balancing failures.
     if sampler is not None and not args.stack_sampler_with_ce:
-        base_weights = torch.ones_like(class_weights)
+        base_weights = torch.pow(class_weights, 0.5)
         print(
-            "Sampler active -> using uniform CE weights (sampler handles imbalance). "
-            f"Inverse-freq weights retained for logging: {np.round(class_weights.cpu().numpy(), 4)}"
+            "Sampler active -> applying mild CE reweighting (sqrt of inverse-freq) to reinforce S/V. "
+            f"Effective CE weights: {np.round(base_weights.cpu().numpy(), 4)}"
         )
     else:
         base_weights = class_weights.clone()
         if sampler is not None:
             print(
                 "Sampler active **and** CE stacking enabled -> combining sampler upsampling with "
-                f"inverse-freq CE weights: {np.round(class_weights.cpu().numpy(), 4)}"
+                f"full inverse-freq CE weights: {np.round(class_weights.cpu().numpy(), 4)}"
             )
+
+    curriculum_weights = torch.pow(class_weights, 0.5)
+    if curriculum_loader is not None:
+        print(
+            "Curriculum stage CE weights (sqrt inverse-freq) to pair with mild sampler: "
+            f"{np.round(curriculum_weights.cpu().numpy(), 4)}"
+        )
 
     os.makedirs("artifacts", exist_ok=True)
     log_path = os.path.join(
@@ -320,13 +441,15 @@ def main() -> None:
             "class_counts": class_counts.tolist(),
             "class_weights": class_weights.detach().cpu().tolist(),
             "ce_weights": base_weights.detach().cpu().tolist(),
+            "sampler_weights": sampler_weights if sampler_weights is not None else None,
+            "sampler_mix": sampler_mix if sampler_mix is not None else None,
             "data_range": [data_min, data_max],
         }
     )
 
     print(f"Preprocessed input range: [{data_min:.3f}, {data_max:.3f}] (expected within [-1, 1])")
 
-    best_val_macro_f1 = -float("inf")
+    best_checkpoint_score = -float("inf")
     best_state = None
     patience_counter = 0
 
@@ -337,35 +460,52 @@ def main() -> None:
         running_loss = 0.0
         total = 0
 
+        use_curriculum = curriculum_loader is not None and epoch <= args.curriculum_epochs
+        epoch_loader = curriculum_loader if use_curriculum else train_loader
+        epoch_base_weights = curriculum_weights if use_curriculum else base_weights
+
         if args.weight_warmup_epochs > 0:
             warm_frac = min(1.0, max(0.0, (epoch - 1) / float(args.weight_warmup_epochs)))
-            epoch_weights = torch.ones_like(base_weights) * (1 - warm_frac) + base_weights * warm_frac
+            epoch_weights = torch.ones_like(epoch_base_weights) * (1 - warm_frac) + epoch_base_weights * warm_frac
             warm_frac_display = warm_frac
         else:
-            epoch_weights = base_weights.clone()
+            epoch_weights = epoch_base_weights.clone()
             warm_frac_display = 1.0
-        ce_loss_fn = nn.CrossEntropyLoss(weight=epoch_weights)
+        if args.loss_type == "focal":
+            alpha = epoch_weights / max(epoch_weights.sum(), 1e-8)
+            loss_fn = FocalLoss(alpha=alpha.to(device), gamma=args.focal_gamma)
+        else:
+            loss_fn = nn.CrossEntropyLoss(weight=epoch_weights)
         if epoch == 1 or (args.weight_warmup_epochs > 0 and warm_frac < 1.0 and epoch % 5 == 0):
             print(
-                f"Epoch {epoch}: CE weight warmup alpha={warm_frac_display:.2f}, weights={epoch_weights.detach().cpu().numpy()}"
+                f"Epoch {epoch}: weight warmup alpha={warm_frac_display:.2f}, weights={epoch_weights.detach().cpu().numpy()}"
             )
+            print(f"  -> Using {args.loss_type.upper()} loss (gamma={args.focal_gamma:.2f} when focal)")
+
+        if use_curriculum and epoch == 1:
+            print(
+                "Curriculum phase active: using mild sampler and sqrt weights for early rare-class exposure"
+            )
+        if use_curriculum and epoch == args.curriculum_epochs:
+            print("Last curriculum epoch before switching to natural sampling next epoch")
 
         _write_log(
             {
                 "event": "epoch_start",
                 "epoch": epoch,
+                "use_curriculum": use_curriculum,
                 "warmup_alpha": warm_frac_display,
                 "ce_weights": epoch_weights.detach().cpu().tolist(),
                 "stack_sampler_with_ce": args.stack_sampler_with_ce,
             }
         )
 
-        for signals, labels in train_loader:
+        for signals, labels in epoch_loader:
             signals, labels = signals.to(device), labels.to(device)
             optimizer.zero_grad()
 
             logits, _ = student(signals)
-            loss = ce_loss_fn(logits, labels)
+            loss = loss_fn(logits, labels)
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
@@ -383,12 +523,29 @@ def main() -> None:
             student, gen_loader, device, NUM_CLASSES
         )
 
+        val_abnormal_f1 = val_metrics_mc.get("abnormal_macro_f1", val_metrics_mc["macro_f1"])
+        gen_abnormal_f1 = gen_metrics_mc.get("abnormal_macro_f1", gen_metrics_mc["macro_f1"])
+        val_rare_f1 = val_metrics_mc.get("rare_macro_f1", val_abnormal_f1)
+        gen_rare_f1 = gen_metrics_mc.get("rare_macro_f1", gen_abnormal_f1)
+
+        # Penalize any class collapse by tracking the minimum per-class F1.
+        val_min_f1 = min((m.get("f1", 0.0) for m in val_metrics_mc.get("per_class", {}).values()), default=0.0)
+        gen_min_f1 = min((m.get("f1", 0.0) for m in gen_metrics_mc.get("per_class", {}).values()), default=0.0)
+
+        # Encourage balanced learning across all classes; abnormal beats still matter,
+        # but ignoring any class (including O) lowers the checkpoint score.
+        composite_score = (
+            0.4 * val_metrics_mc["macro_f1"]
+            + 0.3 * val_abnormal_f1
+            + 0.3 * val_min_f1
+        )
+
         scheduler.step(val_loss)
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
-            f"Val MacroF1 {val_metrics_mc['macro_f1']:.3f} Acc {val_metrics_mc['accuracy']:.3f} | "
-            f"Gen MacroF1 {gen_metrics_mc['macro_f1']:.3f} Acc {gen_metrics_mc['accuracy']:.3f}"
+            f"Val MacroF1 {val_metrics_mc['macro_f1']:.3f} (abn {val_abnormal_f1:.3f} rare {val_rare_f1:.3f} min {val_min_f1:.3f}) Acc {val_metrics_mc['accuracy']:.3f} | "
+            f"Gen MacroF1 {gen_metrics_mc['macro_f1']:.3f} (abn {gen_abnormal_f1:.3f} rare {gen_rare_f1:.3f} min {gen_min_f1:.3f}) Acc {gen_metrics_mc['accuracy']:.3f}"
         )
 
         history.append(
@@ -400,6 +557,13 @@ def main() -> None:
                 "val_acc": val_metrics_mc["accuracy"],
                 "gen_macro_f1": gen_metrics_mc["macro_f1"],
                 "gen_acc": gen_metrics_mc["accuracy"],
+                "val_abnormal_macro_f1": val_abnormal_f1,
+                "val_rare_macro_f1": val_rare_f1,
+                "val_min_f1": val_min_f1,
+                "gen_abnormal_macro_f1": gen_abnormal_f1,
+                "gen_rare_macro_f1": gen_rare_f1,
+                "gen_min_f1": gen_min_f1,
+                "checkpoint_score": composite_score,
             }
         )
 
@@ -411,27 +575,42 @@ def main() -> None:
                 "val_loss": val_loss,
                 "val_macro_f1": val_metrics_mc["macro_f1"],
                 "val_acc": val_metrics_mc["accuracy"],
+                "val_abnormal_macro_f1": val_abnormal_f1,
                 "gen_macro_f1": gen_metrics_mc["macro_f1"],
+                "gen_abnormal_macro_f1": gen_abnormal_f1,
+                "gen_rare_macro_f1": gen_rare_f1,
+                "val_min_f1": val_min_f1,
+                "gen_min_f1": gen_min_f1,
                 "gen_acc": gen_metrics_mc["accuracy"],
+                "checkpoint_score": composite_score,
             }
         )
 
-        # 4-class monitoring: use macro F1 to drive checkpointing/early stopping
-        if val_metrics_mc["macro_f1"] > best_val_macro_f1:
-            best_val_macro_f1 = val_metrics_mc["macro_f1"]
-            best_state = student.state_dict()
+        # 4-class monitoring: emphasize abnormal beats by blending macro F1
+        # with abnormal-only macro F1. This prevents degenerate "all N" models
+        # from winning early stopping when rare classes are ignored.
+        if composite_score > best_checkpoint_score:
+            best_checkpoint_score = composite_score
+            best_state = copy.deepcopy(student.state_dict())
             patience_counter = 0
-            print("  -> New best model saved (by 4-class MacroF1).")
+            print(
+                "  -> New best model saved (by blended Val MacroF1 + abnormal MacroF1)."
+            )
             _write_log(
                 {
                     "event": "best",
                     "epoch": epoch,
-                    "val_macro_f1": val_metrics_mc["macro_f1"],
-                    "val_acc": val_metrics_mc["accuracy"],
-                    "gen_macro_f1": gen_metrics_mc["macro_f1"],
-                    "gen_acc": gen_metrics_mc["accuracy"],
-                }
-            )
+                "val_macro_f1": val_metrics_mc["macro_f1"],
+                "val_acc": val_metrics_mc["accuracy"],
+                "val_abnormal_macro_f1": val_abnormal_f1,
+                "val_rare_macro_f1": val_rare_f1,
+                "gen_macro_f1": gen_metrics_mc["macro_f1"],
+                "gen_abnormal_macro_f1": gen_abnormal_f1,
+                "gen_rare_macro_f1": gen_rare_f1,
+                "gen_acc": gen_metrics_mc["accuracy"],
+                "checkpoint_score": composite_score,
+            }
+        )
         else:
             patience_counter += 1
             if patience_counter >= args.patience and epoch >= args.min_epochs:
