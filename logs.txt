@@ -1,0 +1,1039 @@
+C:\ProgramData\miniconda3\envs\PyONN\python.exe C:\Users\54544\OneDrive\Documents\GitHub\KAUST_ECG\train.py 
+Using device: cuda
+Loading MIT-BIH records ...
+Train: 59088 | Val: 14773 | Generalization: 36404
+Train class counts (N,S,V,O): [47677, 1973, 2238, 7200] | total=59088
+Val class counts (N,S,V,O): [11843, 506, 582, 1842] | total=14773
+Gen class counts (N,S,V,O): [30818, 302, 4253, 1031] | total=36404
+Class distribution (N,S,V,O): [47677, 1973, 2238, 7200] | non-normal fraction=0.193
+Using weighted sampler for 4-class to surface rare S/V beats. power=1.00
+Class weights computed as (1/freq)^1.00 (no binary abnormal boost), normalized to mean~1: raw=[ 1.2393 29.9483 26.4021  8.2067]
+Clamped to max_ratio=20.0: final weights=[0.3098 7.4871 6.6005 2.0517] (mean=4.1123, min=0.2056, max=82.2456)
+Sampler active **and** CE stacking enabled -> combining sampler upsampling with inverse-freq CE weights: [0.3098 7.4871 6.6005 2.0517]
+C:\ProgramData\miniconda3\envs\PyONN\lib\site-packages\torch\optim\lr_scheduler.py:28: UserWarning: The verbose parameter is deprecated. Please use get_last_lr() to access the learning rate.
+  warnings.warn("The verbose parameter is deprecated. Please use get_last_lr() "
+Preprocessed input range: [-1.000, 1.000] (expected within [-1, 1])
+Epoch 1: CE weight warmup alpha=1.00, weights=[0.30983493 7.4870753  6.6005363  2.0516667 ]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 11815    28     0]
+ [    0   506     0     0]
+ [    0   582     0     0]
+ [    0  1842     0     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.034 recall=1.000 f1=0.066
+[Eval] Class V: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [1, 1, 1, 1, 1, 1, 1, 1, 1, 1] prob_first_class= [0.0771862268447876, 0.07604850083589554, 0.07604850083589554, 0.05884765088558197, 0.05393277853727341, 0.08979175239801407, 0.062188923358917236, 0.06049773097038269, 0.06415650993585587, 0.06702721863985062]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 30818     0     0]
+ [    0   302     0     0]
+ [    0  4253     0     0]
+ [    0  1031     0     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.008 recall=1.000 f1=0.016
+[Eval] Class V: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 1, 1, 1, 1, 1, 1, 1, 1, 1] prob_first_class= [0.05884765088558197, 0.05884765088558197, 0.05884765088558197, 0.05884765088558197, 0.05884765088558197, 0.05884765088558197, 0.05884765088558197, 0.05884765088558197, 0.07000072300434113, 0.05884765088558197]
+Epoch 001 | TrainLoss 1.2549 | ValLoss 2.4590 | Val MacroF1 0.017 Acc 0.034 | Gen MacroF1 0.004 Acc 0.008
+  -> New best model saved (by 4-class MacroF1).
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 6935 4908    0]
+ [   0  376  130    0]
+ [   0   48  534    0]
+ [   0  750 1092    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.046 recall=0.743 f1=0.087
+[Eval] Class V: precision=0.080 recall=0.918 f1=0.147
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [1, 2, 1, 2, 2, 1, 2, 2, 2, 1] prob_first_class= [0.05154547095298767, 0.05956977978348732, 0.055079385638237, 0.044501494616270065, 0.044501516968011856, 0.061653021723032, 0.053278230130672455, 0.045903079211711884, 0.04536544159054756, 0.05132005736231804]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 20973  9845     0]
+ [    0   185   117     0]
+ [    0   432  3821     0]
+ [    0   266   765     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.008 recall=0.613 f1=0.017
+[Eval] Class V: precision=0.263 recall=0.898 f1=0.406
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 1, 2, 2, 1, 2] prob_first_class= [0.05023873224854469, 0.04980754852294922, 0.045209869742393494, 0.04688851535320282, 0.04652458429336548, 0.05006401613354683, 0.049284450709819794, 0.047831516712903976, 0.05131995677947998, 0.04862428084015846]
+Epoch 002 | TrainLoss 1.0794 | ValLoss 2.6687 | Val MacroF1 0.059 Acc 0.062 | Gen MacroF1 0.106 Acc 0.110
+  -> New best model saved (by 4-class MacroF1).
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 6654 5189    0]
+ [   0  475   31    0]
+ [   0   99  483    0]
+ [   0  703 1139    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.060 recall=0.939 f1=0.113
+[Eval] Class V: precision=0.071 recall=0.830 f1=0.130
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [1, 2, 2, 2, 1, 1, 1, 2, 2, 2] prob_first_class= [0.03965672105550766, 0.023773811757564545, 0.015825828537344933, 0.011447419412434101, 0.04245130717754364, 0.047336991876363754, 0.03798476979136467, 0.016134992241859436, 0.02263186126947403, 0.02648331969976425]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 17515 13303     0]
+ [    0   182   120     0]
+ [    0  1413  2840     0]
+ [    0   415   616     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.009 recall=0.603 f1=0.018
+[Eval] Class V: precision=0.168 recall=0.668 f1=0.269
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.037289246916770935, 0.024628546088933945, 0.026863686740398407, 0.0284678153693676, 0.029305577278137207, 0.03613780066370964, 0.025143297389149666, 0.020643429830670357, 0.0370027981698513, 0.026805881410837173]
+Epoch 003 | TrainLoss 1.0024 | ValLoss 3.0826 | Val MacroF1 0.061 Acc 0.065 | Gen MacroF1 0.072 Acc 0.083
+  -> New best model saved (by 4-class MacroF1).
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 6711 5132    0]
+ [   0  469   37    0]
+ [   0   96  486    0]
+ [   0  777 1065    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.058 recall=0.927 f1=0.110
+[Eval] Class V: precision=0.072 recall=0.835 f1=0.133
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 1, 2, 2, 1, 2, 1, 2, 2, 2] prob_first_class= [0.020364494994282722, 0.03115416318178177, 0.015502684749662876, 0.007929513230919838, 0.02796810120344162, 0.02522777020931244, 0.033174779266119, 0.020540378987789154, 0.02296133153140545, 0.026725193485617638]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 20018 10800     0]
+ [    0   197   105     0]
+ [    0  1292  2961     0]
+ [    0   444   587     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.009 recall=0.652 f1=0.018
+[Eval] Class V: precision=0.205 recall=0.696 f1=0.317
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.029079515486955643, 0.01566712185740471, 0.016603214666247368, 0.017579857259988785, 0.019754789769649506, 0.019580809399485588, 0.018043186515569687, 0.018123673275113106, 0.027216890826821327, 0.016241218894720078]
+Epoch 004 | TrainLoss 0.8963 | ValLoss 3.2283 | Val MacroF1 0.061 Acc 0.065 | Gen MacroF1 0.084 Acc 0.087
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 6374 5469    0]
+ [   0  473   33    0]
+ [   0  106  476    0]
+ [   0  837 1005    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.061 recall=0.935 f1=0.114
+[Eval] Class V: precision=0.068 recall=0.818 f1=0.126
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 1, 2, 1, 2, 2, 2] prob_first_class= [0.016493704169988632, 0.03858647122979164, 0.017793314531445503, 0.005766496527940035, 0.026415016502141953, 0.032164741307497025, 0.038504280149936676, 0.021407898515462875, 0.03366653621196747, 0.02186860702931881]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 18572 12246     0]
+ [    0   238    64     0]
+ [    0  1471  2782     0]
+ [    0   410   621     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.788 f1=0.023
+[Eval] Class V: precision=0.177 recall=0.654 f1=0.279
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.028686294332146645, 0.014336718246340752, 0.016376400366425514, 0.01859261654317379, 0.020207969471812248, 0.01885644719004631, 0.01736721582710743, 0.01952487975358963, 0.032545123249292374, 0.018233466893434525]
+Epoch 005 | TrainLoss 0.8570 | ValLoss 3.2043 | Val MacroF1 0.060 Acc 0.064 | Gen MacroF1 0.075 Acc 0.083
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 5998 5845    0]
+ [   0  457   49    0]
+ [   0   74  508    0]
+ [   0  731 1111    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.063 recall=0.903 f1=0.118
+[Eval] Class V: precision=0.068 recall=0.873 f1=0.126
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 1, 2, 1, 2, 2, 2] prob_first_class= [0.02116749808192253, 0.03514907509088516, 0.017680075019598007, 0.005843182560056448, 0.024193817749619484, 0.03290868178009987, 0.03621051833033562, 0.028556162491440773, 0.024809177964925766, 0.029851144179701805]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 17150 13668     0]
+ [    0   208    94     0]
+ [    0   883  3370     0]
+ [    0   377   654     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.689 f1=0.022
+[Eval] Class V: precision=0.189 recall=0.792 f1=0.306
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.027009962126612663, 0.02552613988518715, 0.02826124057173729, 0.02897423692047596, 0.029547544196248055, 0.02893213741481304, 0.02778654918074608, 0.02999045141041279, 0.030492834746837616, 0.028790591284632683]
+Epoch 006 | TrainLoss 0.8500 | ValLoss 3.1453 | Val MacroF1 0.061 Acc 0.065 | Gen MacroF1 0.082 Acc 0.098
+  -> New best model saved (by 4-class MacroF1).
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 6749 5094    0]
+ [   0  457   49    0]
+ [   0   74  508    0]
+ [   0  759 1083    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.057 recall=0.903 f1=0.107
+[Eval] Class V: precision=0.075 recall=0.873 f1=0.139
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 1, 2, 2, 1, 2, 1, 2, 2, 2] prob_first_class= [0.03217306733131409, 0.034018900245428085, 0.017283344641327858, 0.00706918491050601, 0.03060254268348217, 0.034981869161129, 0.03497151657938957, 0.028951911255717278, 0.024265870451927185, 0.02806754969060421]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 19285 11533     0]
+ [    0   211    91     0]
+ [    0   727  3526     0]
+ [    0   375   656     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.010 recall=0.699 f1=0.020
+[Eval] Class V: precision=0.223 recall=0.829 f1=0.352
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.024815434589982033, 0.02530025690793991, 0.029096590355038643, 0.0306564774364233, 0.02952149696648121, 0.030743615701794624, 0.029296355322003365, 0.030528269708156586, 0.028122201561927795, 0.030017158016562462]
+Epoch 007 | TrainLoss 0.8295 | ValLoss 3.1730 | Val MacroF1 0.061 Acc 0.065 | Gen MacroF1 0.093 Acc 0.103
+  -> New best model saved (by 4-class MacroF1).
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 5488 6355    0]
+ [   0  447   59    0]
+ [   0   63  519    0]
+ [   0  671 1171    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.067 recall=0.883 f1=0.125
+[Eval] Class V: precision=0.064 recall=0.892 f1=0.120
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 1, 2, 2, 1, 2, 2, 2, 2, 2] prob_first_class= [0.026983631774783134, 0.03302746266126633, 0.017535919323563576, 0.005361779127269983, 0.032186176627874374, 0.03162727132439613, 0.03611350804567337, 0.023493146523833275, 0.02247246541082859, 0.024494661018252373]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 15891 14927     0]
+ [    0   191   111     0]
+ [    0   636  3617     0]
+ [    0   339   692     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.632 f1=0.022
+[Eval] Class V: precision=0.187 recall=0.850 f1=0.307
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.02304069511592388, 0.023424535989761353, 0.025215905159711838, 0.0255416352301836, 0.028344977647066116, 0.02817346714437008, 0.027563123032450676, 0.026840215548872948, 0.030941735953092575, 0.025978820398449898]
+Epoch 008 | TrainLoss 0.8214 | ValLoss 3.1953 | Val MacroF1 0.061 Acc 0.065 | Gen MacroF1 0.082 Acc 0.105
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4292 7551    0]
+ [   0  442   64    0]
+ [   0   56  526    0]
+ [   0  544 1298    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.083 recall=0.874 f1=0.151
+[Eval] Class V: precision=0.056 recall=0.904 f1=0.105
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 1, 2, 2, 2, 2, 2] prob_first_class= [0.03033171035349369, 0.03411722928285599, 0.017378175631165504, 0.006359587889164686, 0.03672456741333008, 0.03432207554578781, 0.035799261182546616, 0.03143489360809326, 0.024443667382001877, 0.02811591699719429]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 13625 17193     0]
+ [    0   173   129     0]
+ [    0   522  3731     0]
+ [    0   291   740     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.573 f1=0.023
+[Eval] Class V: precision=0.171 recall=0.877 f1=0.286
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.022547747939825058, 0.03153335675597191, 0.0335271842777729, 0.03469263017177582, 0.03412729501724243, 0.03478698804974556, 0.03317507728934288, 0.0340280644595623, 0.03329463303089142, 0.03373526409268379]
+Epoch 009 | TrainLoss 0.8176 | ValLoss 3.1541 | Val MacroF1 0.064 Acc 0.066 | Gen MacroF1 0.077 Acc 0.107
+  -> New best model saved (by 4-class MacroF1).
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 3983 7860    0]
+ [   0  439   67    0]
+ [   0   49  533    0]
+ [   0  512 1330    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.088 recall=0.868 f1=0.160
+[Eval] Class V: precision=0.054 recall=0.916 f1=0.103
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 2, 2, 2] prob_first_class= [0.024353452026844025, 0.034751128405332565, 0.016954978927969933, 0.006200983189046383, 0.03714776784181595, 0.0315755158662796, 0.035505201667547226, 0.03189859539270401, 0.026749195531010628, 0.027583565562963486]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 12820 17998     0]
+ [    0   172   130     0]
+ [    0   458  3795     0]
+ [    0   282   749     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.013 recall=0.570 f1=0.025
+[Eval] Class V: precision=0.167 recall=0.892 f1=0.282
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.02096174843609333, 0.030085384845733643, 0.03188899904489517, 0.03291943296790123, 0.03317476809024811, 0.03369953855872154, 0.031604740768671036, 0.033767253160476685, 0.03410680592060089, 0.03304033726453781]
+Epoch 010 | TrainLoss 0.8020 | ValLoss 3.1576 | Val MacroF1 0.066 Acc 0.066 | Gen MacroF1 0.077 Acc 0.109
+  -> New best model saved (by 4-class MacroF1).
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4223 7620    0]
+ [   0  434   72    0]
+ [   0   42  540    0]
+ [   0  539 1303    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.083 recall=0.858 f1=0.151
+[Eval] Class V: precision=0.057 recall=0.928 f1=0.107
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 1, 2, 2, 2, 2, 2, 2, 2, 2] prob_first_class= [0.021209195256233215, 0.03472309559583664, 0.020425109192728996, 0.0072669051587581635, 0.03710242360830307, 0.03388591483235359, 0.035046011209487915, 0.030666442587971687, 0.023877888917922974, 0.02336721308529377]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 13850 16968     0]
+ [    0   171   131     0]
+ [    0   407  3846     0]
+ [    0   274   757     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.566 f1=0.023
+[Eval] Class V: precision=0.177 recall=0.904 f1=0.296
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.020481018349528313, 0.032054584473371506, 0.03285389393568039, 0.033633068203926086, 0.034504495561122894, 0.03328584134578705, 0.03434749320149422, 0.0342191681265831, 0.03640817478299141, 0.033968668431043625]
+Epoch 011 | TrainLoss 0.8057 | ValLoss 3.1611 | Val MacroF1 0.064 Acc 0.066 | Gen MacroF1 0.080 Acc 0.110
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4149 7694    0]
+ [   0  438   68    0]
+ [   0   38  544    0]
+ [   0  500 1342    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.085 recall=0.866 f1=0.156
+[Eval] Class V: precision=0.056 recall=0.935 f1=0.106
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 2, 2, 2] prob_first_class= [0.01883045583963394, 0.03556741401553154, 0.019124779850244522, 0.0057879225350916386, 0.03681979328393936, 0.033811070024967194, 0.03468284383416176, 0.03311743214726448, 0.022606603801250458, 0.021246572956442833]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14105 16713     0]
+ [    0   172   130     0]
+ [    0   360  3893     0]
+ [    0   271   760     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.570 f1=0.023
+[Eval] Class V: precision=0.181 recall=0.915 f1=0.302
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.019023647531867027, 0.03415876254439354, 0.03518952056765556, 0.03540027514100075, 0.03558153286576271, 0.03484250605106354, 0.034558553248643875, 0.03574499860405922, 0.0360141359269619, 0.03556476905941963]
+Epoch 012 | TrainLoss 0.7938 | ValLoss 3.1969 | Val MacroF1 0.065 Acc 0.066 | Gen MacroF1 0.081 Acc 0.112
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4144 7699    0]
+ [   0  437   69    0]
+ [   0   38  544    0]
+ [   0  480 1362    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.086 recall=0.864 f1=0.156
+[Eval] Class V: precision=0.056 recall=0.935 f1=0.106
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 2, 2, 2] prob_first_class= [0.02217307686805725, 0.036929547786712646, 0.020082930102944374, 0.007256362121552229, 0.036741167306900024, 0.031955670565366745, 0.03567621111869812, 0.034900207072496414, 0.025887753814458847, 0.01890568621456623]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 13855 16963     0]
+ [    0   170   132     0]
+ [    0   305  3948     0]
+ [    0   265   766     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.563 f1=0.023
+[Eval] Class V: precision=0.181 recall=0.928 f1=0.303
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.017943182960152626, 0.03220672905445099, 0.035406358540058136, 0.034391649067401886, 0.03625175729393959, 0.03613339364528656, 0.03431790694594383, 0.035517528653144836, 0.03546224907040596, 0.03538226708769798]
+Epoch 013 | TrainLoss 0.7920 | ValLoss 3.1892 | Val MacroF1 0.066 Acc 0.066 | Gen MacroF1 0.081 Acc 0.113
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 3700 8143    0]
+ [   0  435   71    0]
+ [   0   30  552    0]
+ [   0  412 1430    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.095 recall=0.860 f1=0.171
+[Eval] Class V: precision=0.054 recall=0.948 f1=0.102
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 2, 2, 2] prob_first_class= [0.020673155784606934, 0.03699229285120964, 0.01676558144390583, 0.00559699721634388, 0.036464519798755646, 0.03243110328912735, 0.03487575054168701, 0.034736212342977524, 0.023050466552376747, 0.019501106813549995]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 13318 17500     0]
+ [    0   166   136     0]
+ [    0   244  4009     0]
+ [    0   250   781     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.550 f1=0.023
+[Eval] Class V: precision=0.179 recall=0.943 f1=0.301
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.01719534583389759, 0.03389839082956314, 0.0360012911260128, 0.03468076512217522, 0.03608866408467293, 0.03627437353134155, 0.03565466031432152, 0.03487956523895264, 0.03684647008776665, 0.035582639276981354]
+Epoch 014 | TrainLoss 0.7877 | ValLoss 3.2141 | Val MacroF1 0.068 Acc 0.067 | Gen MacroF1 0.081 Acc 0.115
+  -> New best model saved (by 4-class MacroF1).
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 3979 7864    0]
+ [   0  442   64    0]
+ [   0   29  553    0]
+ [   0  439 1403    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.090 recall=0.874 f1=0.164
+[Eval] Class V: precision=0.056 recall=0.950 f1=0.106
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 2, 2, 2] prob_first_class= [0.02203167788684368, 0.0371527224779129, 0.021406251937150955, 0.007566375192254782, 0.03779250383377075, 0.03336475044488907, 0.03563925251364708, 0.035812292248010635, 0.025004690513014793, 0.019749106839299202]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 13751 17067     0]
+ [    0   171   131     0]
+ [    0   262  3991     0]
+ [    0   260   771     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.566 f1=0.023
+[Eval] Class V: precision=0.182 recall=0.938 f1=0.305
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.017283210530877113, 0.035934314131736755, 0.036919232457876205, 0.03476906567811966, 0.03663580119609833, 0.03694785758852959, 0.0367840901017189, 0.03542820364236832, 0.037033580243587494, 0.03620053455233574]
+Epoch 015 | TrainLoss 0.7871 | ValLoss 3.1778 | Val MacroF1 0.067 Acc 0.067 | Gen MacroF1 0.082 Acc 0.114
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4453 7390    0]
+ [   0  445   61    0]
+ [   0   30  552    0]
+ [   0  440 1402    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.083 recall=0.879 f1=0.152
+[Eval] Class V: precision=0.059 recall=0.948 f1=0.111
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 2, 2, 2] prob_first_class= [0.02037334442138672, 0.03724728152155876, 0.023633895441889763, 0.008758040145039558, 0.037890929728746414, 0.03454925864934921, 0.035767752677202225, 0.03570140153169632, 0.025315551087260246, 0.01595560647547245]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14845 15973     0]
+ [    0   176   126     0]
+ [    0   311  3942     0]
+ [    0   282   749     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.583 f1=0.022
+[Eval] Class V: precision=0.190 recall=0.927 f1=0.315
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.016681265085935593, 0.03566265106201172, 0.03732571378350258, 0.03448927029967308, 0.03715984523296356, 0.03715392202138901, 0.03704601153731346, 0.03483995050191879, 0.035963695496320724, 0.036452535539865494]
+Epoch 016 | TrainLoss 0.7787 | ValLoss 3.1934 | Val MacroF1 0.066 Acc 0.067 | Gen MacroF1 0.084 Acc 0.113
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 3569 8274    0]
+ [   0  437   69    0]
+ [   0   18  564    0]
+ [   0  291 1551    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.101 recall=0.864 f1=0.181
+[Eval] Class V: precision=0.054 recall=0.969 f1=0.102
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 2, 2, 2] prob_first_class= [0.037258487194776535, 0.03477888181805611, 0.02028079144656658, 0.007877306081354618, 0.03549305722117424, 0.038532011210918427, 0.03431493416428566, 0.035816699266433716, 0.02164670266211033, 0.02682889811694622]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 12907 17911     0]
+ [    0   163   139     0]
+ [    0   215  4038     0]
+ [    0   258   773     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.540 f1=0.024
+[Eval] Class V: precision=0.177 recall=0.949 f1=0.298
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.016569223254919052, 0.03621895611286163, 0.03713001310825348, 0.035674627870321274, 0.03096073865890503, 0.03683361038565636, 0.03846471756696701, 0.025971001014113426, 0.03878159448504448, 0.03662349283695221]
+Epoch 017 | TrainLoss 0.7650 | ValLoss 3.2090 | Val MacroF1 0.071 Acc 0.068 | Gen MacroF1 0.080 Acc 0.115
+  -> New best model saved (by 4-class MacroF1).
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 3907 7936    0]
+ [   0  445   61    0]
+ [   0   21  561    0]
+ [   0  309 1533    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.095 recall=0.879 f1=0.172
+[Eval] Class V: precision=0.056 recall=0.964 f1=0.105
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 2, 2, 2] prob_first_class= [0.035592932254076004, 0.0356525257229805, 0.021097976714372635, 0.007166064810007811, 0.03570766746997833, 0.033474523574113846, 0.03562495484948158, 0.035488445311784744, 0.023088103160262108, 0.01896391063928604]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 13161 17657     0]
+ [    0   171   131     0]
+ [    0   237  4016     0]
+ [    0   267   764     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.566 f1=0.024
+[Eval] Class V: precision=0.178 recall=0.944 f1=0.299
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.016035528853535652, 0.03135116770863533, 0.032636549323797226, 0.030043959617614746, 0.03237541764974594, 0.03355089947581291, 0.035531945526599884, 0.031093744561076164, 0.03055272437632084, 0.030765363946557045]
+Epoch 018 | TrainLoss 0.7631 | ValLoss 3.2273 | Val MacroF1 0.069 Acc 0.068 | Gen MacroF1 0.081 Acc 0.115
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4731 7112    0]
+ [   0  445   61    0]
+ [   0   19  563    0]
+ [   0  332 1510    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.081 recall=0.879 f1=0.148
+[Eval] Class V: precision=0.061 recall=0.967 f1=0.115
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.0315682515501976, 0.03765574470162392, 0.025548923760652542, 0.008841068483889103, 0.03555147349834442, 0.028597615659236908, 0.0360584519803524, 0.034699246287345886, 0.023700153455138206, 0.012650099582970142]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 15201 15617     0]
+ [    0   177   125     0]
+ [    0   259  3994     0]
+ [    0   281   750     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.586 f1=0.022
+[Eval] Class V: precision=0.195 recall=0.939 f1=0.323
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015728376805782318, 0.03229198232293129, 0.03644278272986412, 0.02838493324816227, 0.036615174263715744, 0.03673424944281578, 0.03472242131829262, 0.03274470567703247, 0.023733921349048615, 0.03356285020709038]
+Epoch 019 | TrainLoss 0.7616 | ValLoss 3.2430 | Val MacroF1 0.066 Acc 0.068 | Gen MacroF1 0.086 Acc 0.115
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4668 7175    0]
+ [   0  446   60    0]
+ [   0   20  562    0]
+ [   0  315 1527    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.082 recall=0.881 f1=0.150
+[Eval] Class V: precision=0.060 recall=0.966 f1=0.113
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.03715377300977707, 0.03737467899918556, 0.025937672704458237, 0.009320570155978203, 0.036118343472480774, 0.02403593435883522, 0.03634381294250488, 0.03503941744565964, 0.022264981642365456, 0.018667204305529594]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 15265 15553     0]
+ [    0   175   127     0]
+ [    0   254  3999     0]
+ [    0   285   746     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.579 f1=0.021
+[Eval] Class V: precision=0.196 recall=0.940 f1=0.324
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.01571374014019966, 0.03376410901546478, 0.03589068725705147, 0.033630724996328354, 0.036073144525289536, 0.03600563853979111, 0.037864506244659424, 0.0334777757525444, 0.02388547733426094, 0.033368486911058426]
+Epoch 020 | TrainLoss 0.7597 | ValLoss 3.2202 | Val MacroF1 0.066 Acc 0.068 | Gen MacroF1 0.086 Acc 0.115
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4328 7515    0]
+ [   0  442   64    0]
+ [   0   14  568    0]
+ [   0  282 1560    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.087 recall=0.874 f1=0.159
+[Eval] Class V: precision=0.059 recall=0.976 f1=0.110
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.037103913724422455, 0.03628911077976227, 0.024866225197911263, 0.008444026112556458, 0.035172149538993835, 0.0239399541169405, 0.03549092635512352, 0.03613375499844551, 0.01960744708776474, 0.014502597972750664]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14411 16407     0]
+ [    0   172   130     0]
+ [    0   191  4062     0]
+ [    0   275   756     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.570 f1=0.022
+[Eval] Class V: precision=0.190 recall=0.955 f1=0.317
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015329561196267605, 0.03142844885587692, 0.03399091586470604, 0.030819252133369446, 0.03405749052762985, 0.03296886011958122, 0.036562226712703705, 0.02580408565700054, 0.027084924280643463, 0.030121879652142525]
+Epoch 021 | TrainLoss 0.7517 | ValLoss 3.2580 | Val MacroF1 0.067 Acc 0.068 | Gen MacroF1 0.085 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4444 7399    0]
+ [   0  444   62    0]
+ [   0   13  569    0]
+ [   0  277 1565    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.086 recall=0.877 f1=0.156
+[Eval] Class V: precision=0.059 recall=0.978 f1=0.112
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.039082370698451996, 0.036828041076660156, 0.02553817443549633, 0.008031527511775494, 0.035156019032001495, 0.031225528568029404, 0.03618135675787926, 0.03627832978963852, 0.018877776339650154, 0.01790967956185341]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 15071 15747     0]
+ [    0   174   128     0]
+ [    0   194  4059     0]
+ [    0   275   756     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.576 f1=0.022
+[Eval] Class V: precision=0.196 recall=0.954 f1=0.325
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015433354303240776, 0.03451622650027275, 0.03508186340332031, 0.03467033430933952, 0.032090526074171066, 0.03637469932436943, 0.03783901408314705, 0.0255268681794405, 0.023838071152567863, 0.03364747390151024]
+Epoch 022 | TrainLoss 0.7543 | ValLoss 3.2555 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.087 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4413 7430    0]
+ [   0  444   62    0]
+ [   0   13  569    0]
+ [   0  276 1566    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.086 recall=0.877 f1=0.157
+[Eval] Class V: precision=0.059 recall=0.978 f1=0.111
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.039735097438097, 0.03598828613758087, 0.02524694800376892, 0.007613796275109053, 0.03540753200650215, 0.032888397574424744, 0.03636100888252258, 0.036395955830812454, 0.01882208324968815, 0.018965227529406548]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14867 15951     0]
+ [    0   174   128     0]
+ [    0   190  4063     0]
+ [    0   273   758     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.576 f1=0.022
+[Eval] Class V: precision=0.194 recall=0.955 f1=0.323
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015332752838730812, 0.03421551734209061, 0.03507830202579498, 0.03479843586683273, 0.030852491036057472, 0.036687467247247696, 0.037594977766275406, 0.024322664365172386, 0.02364068105816841, 0.033682893961668015]
+Epoch 023 | TrainLoss 0.7459 | ValLoss 3.2550 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.086 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4837 7006    0]
+ [   0  447   59    0]
+ [   0   20  562    0]
+ [   0  298 1544    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.080 recall=0.883 f1=0.146
+[Eval] Class V: precision=0.061 recall=0.966 f1=0.115
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.04007166996598244, 0.0388389527797699, 0.02775157429277897, 0.009682484902441502, 0.037127282470464706, 0.02647690288722515, 0.0379532128572464, 0.035569339990615845, 0.021416544914245605, 0.016738347709178925]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 15217 15601     0]
+ [    0   180   122     0]
+ [    0   235  4018     0]
+ [    0   292   739     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.596 f1=0.022
+[Eval] Class V: precision=0.196 recall=0.945 f1=0.325
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015189222991466522, 0.035242240875959396, 0.037420179694890976, 0.0329190157353878, 0.03736270219087601, 0.037855349481105804, 0.036460865288972855, 0.03326762095093727, 0.020024046301841736, 0.0354829840362072]
+Epoch 024 | TrainLoss 0.7511 | ValLoss 3.2360 | Val MacroF1 0.065 Acc 0.068 | Gen MacroF1 0.087 Acc 0.115
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4590 7253    0]
+ [   0  447   59    0]
+ [   0   19  563    0]
+ [   0  287 1555    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.084 recall=0.883 f1=0.153
+[Eval] Class V: precision=0.060 recall=0.967 f1=0.112
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.040111225098371506, 0.037164825946092606, 0.026315884664654732, 0.00872199796140194, 0.03594103083014488, 0.030714528635144234, 0.03794895485043526, 0.03588477894663811, 0.019986122846603394, 0.01660901866853237]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14646 16172     0]
+ [    0   175   127     0]
+ [    0   216  4037     0]
+ [    0   287   744     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.579 f1=0.022
+[Eval] Class V: precision=0.192 recall=0.949 f1=0.319
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015125956386327744, 0.03588671609759331, 0.03747117519378662, 0.03349284455180168, 0.03693343698978424, 0.038219060748815536, 0.0366397425532341, 0.03358590602874756, 0.020068883895874023, 0.035515036433935165]
+Epoch 025 | TrainLoss 0.7462 | ValLoss 3.2402 | Val MacroF1 0.066 Acc 0.068 | Gen MacroF1 0.085 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4509 7334    0]
+ [   0  447   59    0]
+ [   0   16  566    0]
+ [   0  284 1558    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.085 recall=0.883 f1=0.155
+[Eval] Class V: precision=0.059 recall=0.973 f1=0.112
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.03804647922515869, 0.03796221315860748, 0.027046097442507744, 0.009260202758014202, 0.03548995405435562, 0.02219519019126892, 0.0380035899579525, 0.03593315929174423, 0.02014465257525444, 0.013828777708113194]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14048 16770     0]
+ [    0   172   130     0]
+ [    0   207  4046     0]
+ [    0   286   745     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.570 f1=0.023
+[Eval] Class V: precision=0.187 recall=0.951 f1=0.312
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015069552697241306, 0.03608183562755585, 0.038029879331588745, 0.03003324568271637, 0.037757642567157745, 0.038609690964221954, 0.0367845855653286, 0.032761260867118835, 0.019954705610871315, 0.0361507311463356]
+Epoch 026 | TrainLoss 0.7405 | ValLoss 3.2498 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.084 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4588 7255    0]
+ [   0  446   60    0]
+ [   0   14  568    0]
+ [   0  281 1561    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.084 recall=0.881 f1=0.153
+[Eval] Class V: precision=0.060 recall=0.976 f1=0.113
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.04078742489218712, 0.036906566470861435, 0.025836525484919548, 0.00886673852801323, 0.035932160913944244, 0.03492751345038414, 0.03773975744843483, 0.03667500242590904, 0.01933944970369339, 0.01733444258570671]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 15028 15790     0]
+ [    0   173   129     0]
+ [    0   207  4046     0]
+ [    0   283   748     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.573 f1=0.022
+[Eval] Class V: precision=0.195 recall=0.951 f1=0.324
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015108218416571617, 0.03481946513056755, 0.03654174506664276, 0.03484153747558594, 0.035984039306640625, 0.03673446178436279, 0.037165991961956024, 0.03158823028206825, 0.02088080905377865, 0.03484455868601799]
+Epoch 027 | TrainLoss 0.7435 | ValLoss 3.2424 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.086 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4576 7267    0]
+ [   0  448   58    0]
+ [   0   16  566    0]
+ [   0  288 1554    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.084 recall=0.885 f1=0.154
+[Eval] Class V: precision=0.060 recall=0.973 f1=0.113
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.04008571803569794, 0.03789116069674492, 0.027554919943213463, 0.009026195853948593, 0.0365820974111557, 0.023899294435977936, 0.03778662905097008, 0.036139730364084244, 0.01962922513484955, 0.01375618577003479]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14377 16441     0]
+ [    0   174   128     0]
+ [    0   210  4043     0]
+ [    0   284   747     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.576 f1=0.023
+[Eval] Class V: precision=0.189 recall=0.951 f1=0.316
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.01506001129746437, 0.03583104908466339, 0.037875331938266754, 0.02933099865913391, 0.037726130336523056, 0.03813616558909416, 0.03644096478819847, 0.03193950280547142, 0.020365627482533455, 0.03608997166156769]
+Epoch 028 | TrainLoss 0.7476 | ValLoss 3.2558 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.085 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4404 7439    0]
+ [   0  446   60    0]
+ [   0   16  566    0]
+ [   0  280 1562    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.087 recall=0.881 f1=0.158
+[Eval] Class V: precision=0.059 recall=0.973 f1=0.111
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.040689945220947266, 0.03691493719816208, 0.027040503919124603, 0.00930903758853674, 0.03717247396707535, 0.029499679803848267, 0.03763215243816376, 0.03676841780543327, 0.019348913803696632, 0.016208257526159286]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14088 16730     0]
+ [    0   169   133     0]
+ [    0   206  4047     0]
+ [    0   281   750     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.560 f1=0.022
+[Eval] Class V: precision=0.187 recall=0.952 f1=0.312
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015081536024808884, 0.03585245460271835, 0.03791750967502594, 0.03371221944689751, 0.037550266832113266, 0.03782707452774048, 0.03665030747652054, 0.03238900750875473, 0.02250479906797409, 0.03627662733197212]
+Epoch 029 | TrainLoss 0.7473 | ValLoss 3.2349 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.084 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4593 7250    0]
+ [   0  449   57    0]
+ [   0   16  566    0]
+ [   0  280 1562    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.084 recall=0.887 f1=0.154
+[Eval] Class V: precision=0.060 recall=0.973 f1=0.113
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.040507733821868896, 0.03820652514696121, 0.027505459263920784, 0.008998102508485317, 0.036619219928979874, 0.02388196438550949, 0.03814912587404251, 0.035910993814468384, 0.019624676555395126, 0.015211906284093857]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14194 16624     0]
+ [    0   170   132     0]
+ [    0   205  4048     0]
+ [    0   283   748     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.563 f1=0.022
+[Eval] Class V: precision=0.188 recall=0.952 f1=0.314
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015054559335112572, 0.03677734360098839, 0.03858708590269089, 0.0314754955470562, 0.038323208689689636, 0.038889579474925995, 0.037226349115371704, 0.03363936394453049, 0.020002013072371483, 0.03693650662899017]
+Epoch 030 | TrainLoss 0.7420 | ValLoss 3.2473 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.084 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4577 7266    0]
+ [   0  448   58    0]
+ [   0   16  566    0]
+ [   0  275 1567    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.084 recall=0.885 f1=0.154
+[Eval] Class V: precision=0.060 recall=0.973 f1=0.113
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.04095470905303955, 0.03709765523672104, 0.02679060585796833, 0.009037529118359089, 0.03677311912178993, 0.03278614208102226, 0.038100432604551315, 0.03631530702114105, 0.019456448033452034, 0.01768074743449688]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14603 16215     0]
+ [    0   172   130     0]
+ [    0   204  4049     0]
+ [    0   281   750     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.570 f1=0.022
+[Eval] Class V: precision=0.191 recall=0.952 f1=0.319
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015069451183080673, 0.036414001137018204, 0.03801345080137253, 0.03471386805176735, 0.037669818848371506, 0.038244377821683884, 0.03752688691020012, 0.03348446264863014, 0.020864570513367653, 0.036475129425525665]
+Epoch 031 | TrainLoss 0.7439 | ValLoss 3.2341 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.085 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4504 7339    0]
+ [   0  449   57    0]
+ [   0   16  566    0]
+ [   0  277 1565    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.086 recall=0.887 f1=0.156
+[Eval] Class V: precision=0.059 recall=0.973 f1=0.112
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.04089842364192009, 0.037225667387247086, 0.026847917586565018, 0.009115492925047874, 0.03690497204661369, 0.02862662263214588, 0.03801114857196808, 0.036536719650030136, 0.019882846623659134, 0.016214679926633835]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14164 16654     0]
+ [    0   170   132     0]
+ [    0   206  4047     0]
+ [    0   280   751     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.563 f1=0.022
+[Eval] Class V: precision=0.188 recall=0.952 f1=0.313
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015066705644130707, 0.03554355725646019, 0.03704024478793144, 0.03223700076341629, 0.0369841642677784, 0.037335846573114395, 0.03575726971030235, 0.031242331489920616, 0.021156664937734604, 0.03586107864975929]
+Epoch 032 | TrainLoss 0.7450 | ValLoss 3.2418 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.084 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4524 7319    0]
+ [   0  449   57    0]
+ [   0   16  566    0]
+ [   0  274 1568    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.085 recall=0.887 f1=0.156
+[Eval] Class V: precision=0.060 recall=0.973 f1=0.112
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.04103938862681389, 0.03714822232723236, 0.02652016282081604, 0.00889487937092781, 0.03666210174560547, 0.02986176311969757, 0.037983935326337814, 0.0365167073905468, 0.019150709733366966, 0.016649222001433372]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14302 16516     0]
+ [    0   169   133     0]
+ [    0   201  4052     0]
+ [    0   281   750     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.011 recall=0.560 f1=0.022
+[Eval] Class V: precision=0.189 recall=0.953 f1=0.315
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.0150761678814888, 0.03619254380464554, 0.037976182997226715, 0.03349932283163071, 0.03770172968506813, 0.038280609995126724, 0.03670840710401535, 0.0326622910797596, 0.02086855098605156, 0.03647686168551445]
+Epoch 033 | TrainLoss 0.7467 | ValLoss 3.2435 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.084 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4569 7274    0]
+ [   0  449   57    0]
+ [   0   16  566    0]
+ [   0  281 1561    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.084 recall=0.887 f1=0.154
+[Eval] Class V: precision=0.060 recall=0.973 f1=0.113
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.041086070239543915, 0.03739255666732788, 0.027342086657881737, 0.009149984456598759, 0.03695378080010414, 0.027015751227736473, 0.038139019161462784, 0.03640376403927803, 0.01953497901558876, 0.015913600102066994]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14376 16442     0]
+ [    0   174   128     0]
+ [    0   212  4041     0]
+ [    0   283   748     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.576 f1=0.023
+[Eval] Class V: precision=0.189 recall=0.950 f1=0.316
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015048709698021412, 0.036160290241241455, 0.03800651803612709, 0.0323549248278141, 0.03781862556934357, 0.03831974044442177, 0.036517612636089325, 0.032244499772787094, 0.02063843421638012, 0.03647220879793167]
+Epoch 034 | TrainLoss 0.7435 | ValLoss 3.2457 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.085 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4518 7325    0]
+ [   0  449   57    0]
+ [   0   15  567    0]
+ [   0  269 1573    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.086 recall=0.887 f1=0.156
+[Eval] Class V: precision=0.060 recall=0.974 f1=0.112
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.04102548211812973, 0.0370141863822937, 0.02682756446301937, 0.008898260071873665, 0.036592062562704086, 0.02611261047422886, 0.0380251407623291, 0.036321971565485, 0.01937660202383995, 0.01565113104879856]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14176 16642     0]
+ [    0   172   130     0]
+ [    0   195  4058     0]
+ [    0   278   753     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.570 f1=0.023
+[Eval] Class V: precision=0.188 recall=0.954 f1=0.314
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.01505959965288639, 0.036418020725250244, 0.03794358670711517, 0.03158673644065857, 0.03783458098769188, 0.03845186531543732, 0.036630626767873764, 0.03245077282190323, 0.02067955583333969, 0.036579687148332596]
+Epoch 035 | TrainLoss 0.7474 | ValLoss 3.2472 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.084 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4651 7192    0]
+ [   0  448   58    0]
+ [   0   16  566    0]
+ [   0  284 1558    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.083 recall=0.885 f1=0.152
+[Eval] Class V: precision=0.060 recall=0.973 f1=0.114
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.04114599525928497, 0.037532590329647064, 0.02664083056151867, 0.008790041320025921, 0.036511652171611786, 0.027775216847658157, 0.03855487331748009, 0.036107271909713745, 0.019260063767433167, 0.015868747606873512]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14501 16317     0]
+ [    0   175   127     0]
+ [    0   206  4047     0]
+ [    0   281   750     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.579 f1=0.023
+[Eval] Class V: precision=0.191 recall=0.952 f1=0.317
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015059246681630611, 0.03709932789206505, 0.038722310215234756, 0.03198229894042015, 0.0384710319340229, 0.03926091268658638, 0.037588223814964294, 0.03369459509849548, 0.01962437480688095, 0.03703930974006653]
+Epoch 036 | TrainLoss 0.7389 | ValLoss 3.2521 | Val MacroF1 0.066 Acc 0.069 | Gen MacroF1 0.085 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4577 7266    0]
+ [   0  449   57    0]
+ [   0   15  567    0]
+ [   0  280 1562    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.084 recall=0.887 f1=0.154
+[Eval] Class V: precision=0.060 recall=0.974 f1=0.113
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.0411386638879776, 0.037290699779987335, 0.0271748136729002, 0.009029685519635677, 0.03679947182536125, 0.025084713473916054, 0.038192786276340485, 0.03621862083673477, 0.019478052854537964, 0.01569555699825287]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14280 16538     0]
+ [    0   173   129     0]
+ [    0   202  4051     0]
+ [    0   281   750     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.573 f1=0.023
+[Eval] Class V: precision=0.189 recall=0.953 f1=0.315
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015047059394419193, 0.03682844340801239, 0.03845782205462456, 0.031778864562511444, 0.03830857202410698, 0.03907260298728943, 0.03718530386686325, 0.03306616470217705, 0.02034694142639637, 0.0369955413043499]
+Epoch 037 | TrainLoss 0.7545 | ValLoss 3.2464 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.084 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4656 7187    0]
+ [   0  449   57    0]
+ [   0   16  566    0]
+ [   0  285 1557    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.083 recall=0.887 f1=0.152
+[Eval] Class V: precision=0.060 recall=0.973 f1=0.114
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.04125218093395233, 0.037523411214351654, 0.027273762971162796, 0.009132838808000088, 0.03692278265953064, 0.027759667485952377, 0.03852635249495506, 0.036184005439281464, 0.019665995612740517, 0.016281800344586372]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14559 16259     0]
+ [    0   176   126     0]
+ [    0   212  4041     0]
+ [    0   285   746     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.583 f1=0.023
+[Eval] Class V: precision=0.191 recall=0.950 f1=0.318
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015046299435198307, 0.03670826181769371, 0.038354989141225815, 0.03258171305060387, 0.03820090740919113, 0.038924895226955414, 0.03707953542470932, 0.0329868383705616, 0.019905826076865196, 0.036843497306108475]
+Epoch 038 | TrainLoss 0.7358 | ValLoss 3.2466 | Val MacroF1 0.066 Acc 0.069 | Gen MacroF1 0.085 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4623 7220    0]
+ [   0  449   57    0]
+ [   0   16  566    0]
+ [   0  285 1557    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.084 recall=0.887 f1=0.153
+[Eval] Class V: precision=0.060 recall=0.973 f1=0.113
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.04122861102223396, 0.0374252013862133, 0.02736673317849636, 0.00924064964056015, 0.037054773420095444, 0.026284854859113693, 0.038496896624565125, 0.036261945962905884, 0.01991286687552929, 0.01574588194489479]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14416 16402     0]
+ [    0   174   128     0]
+ [    0   212  4041     0]
+ [    0   284   747     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.576 f1=0.023
+[Eval] Class V: precision=0.190 recall=0.950 f1=0.316
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015044447034597397, 0.036617014557123184, 0.03816233202815056, 0.03152158856391907, 0.038007788360118866, 0.038751207292079926, 0.03686607629060745, 0.03249404951930046, 0.020183255895972252, 0.036775872111320496]
+Epoch 039 | TrainLoss 0.7469 | ValLoss 3.2458 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.085 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4635 7208    0]
+ [   0  449   57    0]
+ [   0   16  566    0]
+ [   0  285 1557    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.083 recall=0.887 f1=0.152
+[Eval] Class V: precision=0.060 recall=0.973 f1=0.114
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.04120488837361336, 0.03753683343529701, 0.02728533186018467, 0.009120860137045383, 0.03692656382918358, 0.025946902111172676, 0.03851873055100441, 0.03623242676258087, 0.019594790413975716, 0.015620353631675243]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14412 16406     0]
+ [    0   176   126     0]
+ [    0   211  4042     0]
+ [    0   285   746     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.583 f1=0.023
+[Eval] Class V: precision=0.190 recall=0.950 f1=0.316
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015046711079776287, 0.03675365820527077, 0.038421470671892166, 0.03175439313054085, 0.03825385496020317, 0.03897745534777641, 0.03710665926337242, 0.03273757919669151, 0.01996130496263504, 0.03692863509058952]
+Epoch 040 | TrainLoss 0.7377 | ValLoss 3.2493 | Val MacroF1 0.066 Acc 0.069 | Gen MacroF1 0.085 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4630 7213    0]
+ [   0  449   57    0]
+ [   0   16  566    0]
+ [   0  287 1555    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.083 recall=0.887 f1=0.153
+[Eval] Class V: precision=0.060 recall=0.973 f1=0.114
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.041192907840013504, 0.03751813620328903, 0.027317915111780167, 0.009039652533829212, 0.036938730627298355, 0.024619312956929207, 0.03845532611012459, 0.03628590330481529, 0.019418297335505486, 0.01514706201851368]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14409 16409     0]
+ [    0   176   126     0]
+ [    0   211  4042     0]
+ [    0   285   746     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.583 f1=0.023
+[Eval] Class V: precision=0.190 recall=0.950 f1=0.316
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015041317790746689, 0.0366794727742672, 0.038453951478004456, 0.03127588704228401, 0.03828706592321396, 0.03898301720619202, 0.037068381905555725, 0.032479699701070786, 0.020036684349179268, 0.036927465349435806]
+Epoch 041 | TrainLoss 0.7453 | ValLoss 3.2526 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.085 Acc 0.116
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4598 7245    0]
+ [   0  449   57    0]
+ [   0   15  567    0]
+ [   0  280 1562    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.084 recall=0.887 f1=0.154
+[Eval] Class V: precision=0.060 recall=0.974 f1=0.113
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.04123693332076073, 0.03714163601398468, 0.026979146525263786, 0.008928085677325726, 0.036793358623981476, 0.026681717485189438, 0.038308124989271164, 0.03640338405966759, 0.01913870871067047, 0.01566222682595253]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14370 16448     0]
+ [    0   175   127     0]
+ [    0   202  4051     0]
+ [    0   281   750     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.579 f1=0.023
+[Eval] Class V: precision=0.190 recall=0.953 f1=0.316
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015054328367114067, 0.036581773310899734, 0.03832484781742096, 0.03225560113787651, 0.03817043453454971, 0.03883349522948265, 0.03692666441202164, 0.032477740198373795, 0.020287342369556427, 0.03681570291519165]
+Epoch 042 | TrainLoss 0.7417 | ValLoss 3.2514 | Val MacroF1 0.067 Acc 0.069 | Gen MacroF1 0.085 Acc 0.116
+Early stopping triggered.
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4598 7245    0]
+ [   0  449   57    0]
+ [   0   15  567    0]
+ [   0  280 1562    0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.084 recall=0.887 f1=0.154
+[Eval] Class V: precision=0.060 recall=0.974 f1=0.113
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [0, 0, 0, 2, 0, 0, 0, 0, 1, 0] pred= [2, 2, 2, 2, 2, 2, 2, 1, 2, 2] prob_first_class= [0.04123693332076073, 0.03714163601398468, 0.026979146525263786, 0.008928085677325726, 0.036793358623981476, 0.026681717485189438, 0.038308124989271164, 0.03640338405966759, 0.01913870871067047, 0.01566222682595253]
+[Eval] Unique y_true (4-class): [0, 1, 2, 3]
+[Eval] 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14370 16448     0]
+ [    0   175   127     0]
+ [    0   202  4051     0]
+ [    0   281   750     0]]
+[Eval] Class N: precision=0.000 recall=0.000 f1=0.000
+[Eval] Class S: precision=0.012 recall=0.579 f1=0.023
+[Eval] Class V: precision=0.190 recall=0.953 f1=0.316
+[Eval] Class O: precision=0.000 recall=0.000 f1=0.000
+[Eval] Sample sanity (first batch, first 10): y_true= [3, 0, 0, 0, 0, 0, 0, 0, 0, 0] pred= [1, 2, 2, 2, 2, 2, 2, 2, 1, 2] prob_first_class= [0.015054328367114067, 0.036581773310899734, 0.03832484781742096, 0.03225560113787651, 0.03817043453454971, 0.03883349522948265, 0.03692666441202164, 0.032477740198373795, 0.020287342369556427, 0.03681570291519165]
+Validation multi-class: Acc=0.069, MacroF1=0.067
+Generalization multi-class: Acc=0.116, MacroF1=0.085
+Validation 4-class confusion matrix (rows=true, cols=pred):
+[[   0 4598 7245    0]
+ [   0  449   57    0]
+ [   0   15  567    0]
+ [   0  280 1562    0]]
+Val class N: precision=0.000 recall=0.000 f1=0.000
+Val class S: precision=0.084 recall=0.887 f1=0.154
+Val class V: precision=0.060 recall=0.974 f1=0.113
+Val class O: precision=0.000 recall=0.000 f1=0.000
+Generalization 4-class confusion matrix (rows=true, cols=pred):
+[[    0 14370 16448     0]
+ [    0   175   127     0]
+ [    0   202  4051     0]
+ [    0   281   750     0]]
+Gen class N: precision=0.000 recall=0.000 f1=0.000
+Gen class S: precision=0.012 recall=0.579 f1=0.023
+Gen class V: precision=0.190 recall=0.953 f1=0.316
+Gen class O: precision=0.000 recall=0.000 f1=0.000
+Saved student checkpoint to saved_models\student_model.pth
+Saved training curves and confusion matrices to ./artifacts
+Training log saved to artifacts\training_log_20251218_135630.jsonl
+
+Process finished with exit code 0
