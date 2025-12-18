@@ -16,8 +16,9 @@ This project trains a lightweight segment-aware 1D CNN to classify ECG beats int
 
 ## Quickstart
 ```bash
-python main.py --data_root "E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/"
+python main.py
 ```
+`main.py` defaults to the MIT-BIH root `E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/`. Override with `--data_root` only if your path differs.
 
 ### Common flags
 - `--val_ratio 0.2` controls the validation split by record (fraction of TRAIN_RECORDS used for validation).

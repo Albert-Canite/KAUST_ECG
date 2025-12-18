@@ -71,7 +71,12 @@ def maybe_save_checkpoint(path: str, model: nn.Module, optimizer: torch.optim.Op
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Segment-aware ECG four-class training")
-    parser.add_argument("--data_root", type=str, required=True, help="Root directory of MIT-BIH records")
+    parser.add_argument(
+        "--data_root",
+        type=str,
+        default="E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/",
+        help="Root directory of MIT-BIH records",
+    )
     parser.add_argument("--val_ratio", type=float, default=0.2, help="Validation ratio (by records) from TRAIN_RECORDS")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--normalization", type=str, default="zscore", choices=["zscore", "robust"], help="Beat normalization type")
