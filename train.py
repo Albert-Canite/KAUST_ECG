@@ -221,7 +221,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target_sampler_mix",
         type=str,
-        default="",
+        default="0.5,0.15,0.15,0.2",
         help=(
             "optional comma-separated target batch mix for (N,S,V,O); empty string disables and uses inverse-frequency sampler"
         ),
@@ -246,7 +246,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--loss_type",
         choices=["ce", "focal"],
-        default="ce",
+        default="focal",
         help="loss to train the student (focal improves hard S/V recall)",
     )
     parser.add_argument("--focal_gamma", type=float, default=2.0, help="gamma for focal loss")
