@@ -552,6 +552,44 @@ def main() -> None:
                     log_entry["low_miss_info"] = low_miss_info
                 _write_log(log_entry)
 
+        if args.enable_low_miss_threshold and low_miss_caps_met:
+            update_low_miss = False
+            if best_low_miss_gen is None:
+                update_low_miss = True
+            else:
+                better_miss = gen_metrics_low_miss["miss_rate"] < best_low_miss_gen["miss_rate"]
+                miss_tie = np.isclose(gen_metrics_low_miss["miss_rate"], best_low_miss_gen["miss_rate"], atol=1e-6)
+                better_fpr = gen_metrics_low_miss["fpr"] < best_low_miss_gen["fpr"]
+                fpr_tie = np.isclose(gen_metrics_low_miss["fpr"], best_low_miss_gen["fpr"], atol=1e-6)
+                better_f1 = gen_metrics_low_miss["f1"] > best_low_miss_gen["f1"]
+                update_low_miss = better_miss or (miss_tie and better_fpr) or (miss_tie and fpr_tie and better_f1)
+
+            if update_low_miss:
+                best_low_miss_state = student.state_dict()
+                best_low_miss_threshold = low_miss_thr
+                best_low_miss_gen = gen_metrics_low_miss
+                os.makedirs("saved_models", exist_ok=True)
+                torch.save(
+                    {"student_state_dict": best_low_miss_state, "threshold": best_low_miss_threshold},
+                    os.path.join("saved_models", "best_low_miss.pt"),
+                )
+                print("  -> New best low-miss model saved.")
+                log_entry = {
+                    "event": "best",
+                    "epoch": epoch,
+                    "val_f1": val_metrics_low_miss["f1"],
+                    "val_miss": val_metrics_low_miss["miss_rate"],
+                    "val_fpr": val_metrics_low_miss["fpr"],
+                    "gen_f1": gen_metrics_low_miss["f1"],
+                    "gen_miss": gen_metrics_low_miss["miss_rate"],
+                    "gen_fpr": gen_metrics_low_miss["fpr"],
+                    "threshold": low_miss_thr,
+                    "type": "low_miss",
+                }
+                if low_miss_info is not None:
+                    log_entry["low_miss_info"] = low_miss_info
+                _write_log(log_entry)
+
     if best_state is not None:
         student.load_state_dict(best_state)
 
