@@ -32,18 +32,19 @@ def compute_class_weights(
         num_classes = int(np.max(labels)) + 1 if len(labels) > 0 else 0
 
     eps = 1e-8
+    # Target uniform prior so CE weights align with the sampler heuristic and
+    # actually upweight minority beats instead of downweighting moderately rare
+    # classes like "O".
+    ideal_count = max(total / float(max(num_classes, 1)), eps)
     for i in range(num_classes):
-        freq = counter.get(i, 0) / max(total, 1)
-        base = (1.0 / max(freq, eps)) ** power
+        cnt = counter.get(i, 0)
+        base = (ideal_count / max(cnt, eps)) ** power
         weights.append(base)
 
     weight_tensor = torch.tensor(weights, dtype=torch.float32)
 
-    mean_w = weight_tensor.mean().clamp(min=eps)
-    weight_tensor = weight_tensor / mean_w
-
     if max_ratio is not None and max_ratio > 0:
-        mean_w = weight_tensor.mean()
+        mean_w = weight_tensor.mean().clamp(min=eps)
         min_w = mean_w / max_ratio
         max_w = mean_w * max_ratio
         weight_tensor = weight_tensor.clamp(min=min_w, max=max_w)
