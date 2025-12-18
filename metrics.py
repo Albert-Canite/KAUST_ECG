@@ -1,6 +1,8 @@
 from typing import Dict, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 
 
@@ -37,3 +39,14 @@ def format_metrics(tag: str, stats: Dict) -> str:
         f"[{tag}] Confusion Matrix:\n{stats['confusion']}",
     ]
     return "\n".join(lines)
+
+
+def plot_confusion_matrix(cm: np.ndarray, path: str, title: str) -> None:
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=["N", "S", "V", "O"], yticklabels=["N", "S", "V", "O"])
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()

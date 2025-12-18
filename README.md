@@ -4,7 +4,7 @@ This project trains a lightweight segment-aware 1D CNN to classify ECG beats int
 
 ## Requirements
 - Python 3.8
-- `wfdb`, `numpy`, `scikit-learn`, `torch` (tested with PyTorch >= 1.10), `tqdm`
+- `wfdb`, `numpy`, `scikit-learn`, `torch` (tested with PyTorch >= 1.10), `tqdm`, `matplotlib`, `seaborn`
 
 ## Directory
 - `main.py`: entrypoint for training and evaluation
@@ -26,4 +26,4 @@ python main.py
 - `--normalization zscore` or `robust` controls beat normalization.
 - `--tau 1.0` sets the logit adjustment temperature; `--beta 0.9999` sets the effective number beta.
 
-The script automatically evaluates on the held-out generalization records (`GENERALIZATION_RECORDS`) every epoch and saves `best.pt`, `last.pt`, and `results.json`.
+The script automatically evaluates on the held-out generalization records (`GENERALIZATION_RECORDS`) every epoch. Artifacts such as `best.pt`, `last.pt`, `results.json`, `train.log`, metric curves (`metrics_tracking.png`), and the best validation/generalization confusion matrices are saved to the `outputs/` directory.
