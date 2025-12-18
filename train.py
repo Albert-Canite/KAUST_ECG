@@ -180,7 +180,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout_rate", type=float, default=0.2)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
-    parser.add_argument("--class_weight_max_ratio", type=float, default=5.0)
+    parser.add_argument(
+        "--class_weight_max_ratio",
+        type=float,
+        default=20.0,
+        help="cap for CE class weights; set to 0 or omit to disable clamping for extreme imbalance",
+    )
     parser.add_argument(
         "--class_weight_power",
         type=float,
@@ -190,20 +195,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_warmup_epochs",
         type=int,
-        default=8,
-        help="epochs to linearly warm class weights from uniform to target inverse-frequency weights",
+        default=0,
+        help="epochs to linearly warm class weights from uniform to target inverse-frequency weights (0 disables)",
     )
     _add_bool_arg(
         parser,
         "use_weighted_sampler",
-        default=False,
-        help_text="enable weighted sampler (sqrt balancing) for long-tail classes; default off to preserve normal prior",
+        default=True,
+        help_text="enable weighted sampler (sqrt balancing) for long-tail classes; disable to use class weights only",
     )
     parser.add_argument(
         "--sampler_power",
         type=float,
-        default=0.5,
+        default=1.0,
         help="inverse-frequency exponent for sampler (0.5=sqrt, 1.0=full balance)",
+    )
+    _add_bool_arg(
+        parser,
+        "stack_sampler_with_ce",
+        default=True,
+        help_text="keep inverse-frequency CE weights even when the weighted sampler is enabled",
     )
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
@@ -251,7 +262,7 @@ def main() -> None:
     if args.use_weighted_sampler:
         sampler = make_weighted_sampler(tr_y, power=args.sampler_power)
         print(
-            "Using weighted sampler for 4-class to surface rare S/V beats; CE will stay uniform to avoid double balancing. "
+            "Using weighted sampler for 4-class to surface rare S/V beats. "
             f"power={args.sampler_power:.2f}"
         )
 
@@ -277,8 +288,9 @@ def main() -> None:
         base = (1.0 / max(freq, 1e-8)) ** args.class_weight_power
         raw_weights.append(base)
     mean_w = float(class_weights_np.mean()) if class_weights_np.numel() > 0 else 0.0
-    min_w = mean_w / args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
-    max_w = mean_w * args.class_weight_max_ratio if args.class_weight_max_ratio else float("nan")
+    clamping_on = args.class_weight_max_ratio is not None and args.class_weight_max_ratio > 0
+    min_w = mean_w / args.class_weight_max_ratio if clamping_on else float("nan")
+    max_w = mean_w * args.class_weight_max_ratio if clamping_on else float("nan")
     print(
         f"Class weights computed as (1/freq)^{args.class_weight_power:.2f} (no binary abnormal boost), normalized to mean~1: "
         f"raw={np.round(raw_weights, 4)}"
@@ -289,9 +301,10 @@ def main() -> None:
     )
 
     class_weights = class_weights_np.to(device)
-    # If a weighted sampler is already balancing the batches, keep CE weights uniform to avoid
-    # over-amplifying minority classes; otherwise use the inverse-frequency weights.
-    if sampler is not None:
+    # By default we **stack** CE inverse-frequency weights with the sampler to make rare classes
+    # much more expensive, which helps the model escape the N/V collapse seen in previous runs.
+    # Disable stacking via --no-stack-sampler-with-ce if overshooting causes instability.
+    if sampler is not None and not args.stack_sampler_with_ce:
         base_weights = torch.ones_like(class_weights)
         print(
             "Sampler active -> using uniform CE weights (sampler handles imbalance). "
@@ -299,6 +312,11 @@ def main() -> None:
         )
     else:
         base_weights = class_weights.clone()
+        if sampler is not None:
+            print(
+                "Sampler active **and** CE stacking enabled -> combining sampler upsampling with "
+                f"inverse-freq CE weights: {np.round(class_weights.cpu().numpy(), 4)}"
+            )
 
     os.makedirs("artifacts", exist_ok=True)
     log_path = os.path.join(
@@ -347,12 +365,14 @@ def main() -> None:
         if args.weight_warmup_epochs > 0:
             warm_frac = min(1.0, epoch / float(args.weight_warmup_epochs))
             epoch_weights = torch.ones_like(base_weights) * (1 - warm_frac) + base_weights * warm_frac
+            warm_frac_display = warm_frac
         else:
             epoch_weights = base_weights.clone()
+            warm_frac_display = 1.0
         ce_loss_fn = nn.CrossEntropyLoss(weight=epoch_weights)
         if epoch == 1 or (args.weight_warmup_epochs > 0 and warm_frac < 1.0 and epoch % 5 == 0):
             print(
-                f"Epoch {epoch}: CE weight warmup alpha={warm_frac:.2f}, weights={epoch_weights.detach().cpu().numpy()}"
+                f"Epoch {epoch}: CE weight warmup alpha={warm_frac_display:.2f}, weights={epoch_weights.detach().cpu().numpy()}"
             )
 
         for signals, labels in train_loader:

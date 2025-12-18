@@ -1,8 +1,40 @@
-# Four-class collapse investigation
+# 四分类崩塌的排查与改动说明（中文版）
 
-## What was wrong
-- `compute_class_weights` normalized inverse-frequency weights by their own mean, then clamped around that mean. With the actual class counts (e.g., N≈48k, S≈2k, V≈2k, O≈7k), this normalization **cut the "O" weight below 1.0** and only mildly boosted the rare "S"/"V" classes. Cross-entropy therefore penalized mistakes on class 3 less than on the majority class and was far weaker than the sampler heuristic, so the model learned to behave almost like a binary N/V classifier and never produced "S"/"O" predictions (as seen in the provided confusion matrices).
-- The sampler used a different balancing rule (`num_samples / (num_classes * count)`) so CE weights and the sampler pulled in opposite directions, further destabilizing class learning.
+## 1. 现象回顾
+- 训练和验证/泛化的混淆矩阵显示模型几乎只输出 N 和 V，S 与 O 的召回率长期为 0。
+- 早停前的 Macro-F1 维持在 0.3 左右，验证集准确率 0.79~0.87，典型的类别偏移/决策边界坍塌症状。
 
-## Fix
-- Reworked `compute_class_weights` to match the sampler’s uniform-prior assumption: weights now scale with `ideal_count / class_count` (optionally exponentiated) before clamping. This consistently upweights all minority classes (including "O") and aligns CE loss balancing with the sampler.
+## 2. 已确认的逻辑问题
+1) **交叉熵权重归一化+过度截断**
+   - 旧版 `compute_class_weights` 先按逆频率求权重，再除以自身均值并用较低上限 (`max_ratio=5`) 截断。
+   - 在真实分布下 (N≈48k, S≈2k, V≈2k, O≈7k)，O 的权重被压到 <1，S/V 也仅有轻微提升，导致 CE 损失对稀有类几乎不敏感。
+2) **采样器与 CE 权重假设冲突**
+   - 采样器使用 `num_samples/(num_classes*count)`，等价于假设均匀先验；而 CE 权重在归一化和截断后反向削弱了稀有类，两者拉扯，网络早期学到的决策面更偏向 N/V。
+3) **早期均匀权重/采样关闭**
+   - 之前 CE 权重从均匀开始热身、采样器默认关闭，前几个 epoch 被大量 N 样本主导。一旦输出层收缩到 N/V 子问题，后期再加权也难以恢复 S/O。
+4) **采样+权重叠加不足**
+   - 即便开启采样器，默认只做平方根级别的上采样且 CE 设为均匀，力度可能不足以抵消 1:20~1:40 的严重长尾，模型依然可能在早期陷入两类解。
+
+## 3. 本轮代码改动
+- **更激进的再平衡力度**：
+  - 采样器默认指数改为 1.0（完全按逆频率上采样）。
+  - 新增 `--stack-sampler-with-ce / --no-stack-sampler-with-ce`，默认叠加 CE 逆频率权重与采样器，让稀有类的梯度/损失同时被放大；若出现过拟合可用 `--no-stack-sampler-with-ce` 关闭。
+- **保持上一轮修复**：
+  - `compute_class_weights` 与采样器假设一致（均匀先验），并允许通过 `max_ratio=None/0` 关闭截断；默认上限 20，避免 O 类被压低。
+  - 关闭 CE 热身（默认为 0），并默认开启加权采样器。
+
+## 4. 模型规模是否过小？
+- 当前崩塌主要由数据再平衡逻辑触发，而非网络容量不足：
+  - 训练/验证集存在所有 4 类，且 V 能有一定召回，说明特征表达能力足以区分部分异常节律。
+  - 失衡后 S/O 的梯度极小或几乎看不到正样本，模型自然只学到 N/V 二类边界。
+- 因此优先确保**梯度能覆盖稀有类**：叠加采样+权重是最直接的修复；若仍不足，可进一步：
+  - 将 `class_weight_max_ratio` 设为 0 以完全取消截断；
+  - 提升 `sampler_power` (>1 会更激进)；
+  - 检查数据标签映射/加载是否丢失 S/O（可打印类别计数确认）。
+
+## 5. 如何验证修复
+1) 运行训练时保留默认设置（叠加采样+CE 权重，采样指数 1.0）。
+2) 在日志中关注：
+   - 早期 epoch 的采样器提示与 CE 权重打印，确认稀有类权重 > N 类。
+   - 验证集混淆矩阵中 S/O 是否开始出现非零召回；Macro-F1 是否显著高于 0.3。
+3) 若仍无提升，尝试：`--class_weight_max_ratio 0 --sampler_power 1.2` 并保留叠加，或检查数据预处理是否遗漏心拍。 
