@@ -150,10 +150,8 @@ def make_weighted_sampler(
         for cls in range(num_classes):
             cnt = counts.get(cls, 0)
             if cnt == 0:
-                # No samples for this class -> cannot resample it.
                 continue
-            observed_frac = cnt / float(num_samples)
-            raw_weights[cls] = (mix[cls] / max(observed_frac, 1e-8)) ** 1.0
+            raw_weights[cls] = mix[cls] / float(cnt)
     else:
         for cls, cnt in counts.items():
             raw_weights[cls] = (num_samples / (len(counts) * cnt)) ** power
