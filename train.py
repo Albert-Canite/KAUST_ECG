@@ -255,6 +255,30 @@ def parse_args() -> argparse.Namespace:
         help="Post-training step size for strict threshold grid",
     )
     _add_bool_arg(parser, "threshold_refine", default=True, help_text="refine thresholds near the best candidate")
+    parser.add_argument(
+        "--epoch_threshold_target_miss",
+        type=float,
+        default=None,
+        help="Training-epoch miss target (None disables miss constraint during epoch sweeps)",
+    )
+    parser.add_argument(
+        "--epoch_threshold_max_fpr",
+        type=float,
+        default=None,
+        help="Training-epoch FPR cap (None disables FPR constraint during epoch sweeps)",
+    )
+    parser.add_argument(
+        "--epoch_gen_fpr_cap_low_miss",
+        type=float,
+        default=1.0,
+        help="Training-epoch generalization FPR cap for low-miss selection",
+    )
+    parser.add_argument(
+        "--epoch_gen_miss_target_then_fpr",
+        type=float,
+        default=1.0,
+        help="Training-epoch generalization miss target for miss-then-FPR selection",
+    )
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
@@ -422,8 +446,8 @@ def main() -> None:
             miss_penalty=args.threshold_miss_penalty,
             gen_recall_gain=args.threshold_gen_recall_gain,
             gen_miss_penalty=args.threshold_gen_miss_penalty,
-            miss_target=args.threshold_target_miss,
-            fpr_cap=args.threshold_max_fpr,
+            miss_target=args.epoch_threshold_target_miss,
+            fpr_cap=args.epoch_threshold_max_fpr,
             thresholds=threshold_grid,
         )
 
@@ -442,7 +466,7 @@ def main() -> None:
                 gen_probs,
                 gen_true,
                 thresholds=threshold_grid,
-                gen_fpr_cap=args.gen_fpr_cap_low_miss,
+                gen_fpr_cap=args.epoch_gen_fpr_cap_low_miss,
                 refine=args.threshold_refine,
                 fpr_beta=args.low_miss_fpr_beta,
                 val_fpr_beta=args.low_miss_val_fpr_beta,
@@ -454,16 +478,14 @@ def main() -> None:
                 gen_probs,
                 gen_true,
                 thresholds=threshold_grid,
-                gen_miss_target=args.gen_miss_target_then_fpr,
-                gen_fpr_cap=args.gen_fpr_cap_low_miss,
+                gen_miss_target=args.epoch_gen_miss_target_then_fpr,
+                gen_fpr_cap=args.epoch_gen_fpr_cap_low_miss,
                 refine=args.threshold_refine,
             )
 
         low_miss_caps_met = False
         if args.enable_low_miss_threshold:
-            low_miss_caps_met = (
-                gen_metrics_low_miss["fpr"] <= args.gen_fpr_cap_low_miss
-            )
+            low_miss_caps_met = gen_metrics_low_miss["fpr"] <= args.epoch_gen_fpr_cap_low_miss
             if low_miss_caps_met:
                 if best_low_miss_miss_seen is None or gen_metrics_low_miss["miss_rate"] < best_low_miss_miss_seen - 1e-8:
                     best_low_miss_miss_seen = gen_metrics_low_miss["miss_rate"]
@@ -483,7 +505,7 @@ def main() -> None:
             f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}%"
         )
         if args.enable_low_miss_threshold:
-            gen_cap_flag = " ok" if gen_metrics_low_miss["fpr"] <= args.gen_fpr_cap_low_miss else " cap"
+            gen_cap_flag = " ok" if gen_metrics_low_miss["fpr"] <= args.epoch_gen_fpr_cap_low_miss else " cap"
             print(
                 f"  LowMiss Thr {low_miss_thr:.3f} | Val F1 {val_metrics_low_miss['f1']:.3f} Miss {val_metrics_low_miss['miss_rate'] * 100:.2f}% FPR {val_metrics_low_miss['fpr'] * 100:.2f}% | "
                 f"Gen F1 {gen_metrics_low_miss['f1']:.3f} Miss {gen_metrics_low_miss['miss_rate'] * 100:.2f}% FPR {gen_metrics_low_miss['fpr'] * 100:.2f}%{gen_cap_flag}"
@@ -638,7 +660,7 @@ def main() -> None:
                     log_entry["low_miss_info"] = low_miss_info
                 _write_log(log_entry)
 
-        if args.enable_miss_then_fpr_threshold and gen_metrics_miss_then_fpr["miss_rate"] <= args.gen_miss_target_then_fpr:
+        if args.enable_miss_then_fpr_threshold and gen_metrics_miss_then_fpr["miss_rate"] <= args.epoch_gen_miss_target_then_fpr:
             update_miss_then_fpr = False
             if best_miss_then_fpr_gen is None or best_miss_then_fpr_val is None:
                 update_miss_then_fpr = True
