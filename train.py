@@ -25,6 +25,7 @@ from utils import (
     confusion_metrics,
     make_weighted_sampler,
     sweep_thresholds,
+    sweep_thresholds_min_miss,
     sweep_thresholds_blended,
 )
 
@@ -476,13 +477,21 @@ def main() -> None:
             miss_target = auto_miss_target
             fpr_cap = auto_fpr_cap
         if miss_target is not None or fpr_cap is not None:
-            gen_threshold, gen_metrics = sweep_thresholds(
-                gen_true,
-                gen_probs,
-                miss_target=miss_target,
-                fpr_cap=fpr_cap,
-            )
-            gen_threshold_source = "auto_sweep" if use_auto else "sweep"
+            if use_auto:
+                gen_threshold, gen_metrics = sweep_thresholds_min_miss(
+                    gen_true,
+                    gen_probs,
+                    fpr_cap=fpr_cap,
+                )
+                gen_threshold_source = "auto_sweep"
+            else:
+                gen_threshold, gen_metrics = sweep_thresholds(
+                    gen_true,
+                    gen_probs,
+                    miss_target=miss_target,
+                    fpr_cap=fpr_cap,
+                )
+                gen_threshold_source = "sweep"
             gen_pred = (np.array(gen_probs) >= gen_threshold).astype(int).tolist()
         else:
             gen_pred = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
