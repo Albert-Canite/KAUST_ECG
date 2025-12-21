@@ -24,6 +24,7 @@ from utils import (
     compute_class_weights,
     confusion_metrics,
     make_weighted_sampler,
+    build_threshold_grid,
     sweep_thresholds,
     sweep_thresholds_min_fpr,
     sweep_thresholds_min_miss,
@@ -510,16 +511,19 @@ def main() -> None:
     gen_low_miss_thr, gen_low_miss_metrics = sweep_thresholds_min_miss(
         gen_true,
         gen_probs,
-        fpr_cap=args.gen_threshold_max_fpr,
+        thresholds=build_threshold_grid(gen_probs, best_threshold, window=0.2),
+        fpr_cap=0.12,
     )
     gen_balanced_thr, gen_balanced_metrics = sweep_thresholds(
         gen_true,
         gen_probs,
+        thresholds=build_threshold_grid(gen_probs, best_threshold, window=0.2),
     )
     gen_low_fpr_thr, gen_low_fpr_metrics = sweep_thresholds_min_fpr(
         gen_true,
         gen_probs,
-        miss_cap=args.gen_threshold_target_miss,
+        thresholds=build_threshold_grid(gen_probs, best_threshold, window=0.2),
+        miss_cap=0.05,
     )
 
     _write_log(

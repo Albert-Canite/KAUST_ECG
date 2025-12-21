@@ -218,6 +218,22 @@ def sweep_thresholds_min_fpr(
     return best_thr, best_metrics
 
 
+def build_threshold_grid(
+    probs: List[float],
+    threshold_center: float,
+    window: float = 0.2,
+    num_points: int = 41,
+) -> List[float]:
+    """Build a local threshold grid around a center, clamped to [0.0, 1.0]."""
+
+    lower = max(0.0, threshold_center - window)
+    upper = min(1.0, threshold_center + window)
+    dense = np.linspace(lower, upper, num=num_points)
+    quantiles = np.quantile(probs, q=np.linspace(0.05, 0.95, num=11))
+    thresholds = np.unique(np.concatenate([dense, quantiles])).tolist()
+    return thresholds
+
+
 def sweep_thresholds_adaptive(
     y_true: List[int],
     probs: List[float],
