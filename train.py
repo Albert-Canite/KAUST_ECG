@@ -24,6 +24,7 @@ from utils import (
     compute_class_weights,
     confusion_metrics,
     make_weighted_sampler,
+    sweep_thresholds,
     sweep_thresholds_blended,
 )
 
@@ -177,6 +178,36 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.35,
         help="Miss-rate penalty applied to generalization metrics during threshold sweeps",
+    )
+    parser.add_argument(
+        "--gen_threshold",
+        type=float,
+        default=None,
+        help="Explicit threshold override for generalization metrics",
+    )
+    parser.add_argument(
+        "--gen_threshold_target_miss",
+        type=float,
+        default=None,
+        help="Target miss rate for sweeping a generalization-only threshold (defaults to val miss * gen_threshold_tighten_factor)",
+    )
+    parser.add_argument(
+        "--gen_threshold_max_fpr",
+        type=float,
+        default=None,
+        help="Max FPR allowed when sweeping a generalization-only threshold (defaults to max(val fpr, threshold_max_fpr))",
+    )
+    parser.add_argument(
+        "--gen_threshold_tighten_factor",
+        type=float,
+        default=0.7,
+        help="Scale factor (<1 tightens miss target) applied to val miss for auto gen threshold sweep",
+    )
+    parser.add_argument(
+        "--gen_threshold_fpr_relax_factor",
+        type=float,
+        default=1.25,
+        help="Scale factor (>1 relaxes auto gen FPR cap) applied to max(val fpr, threshold_max_fpr)",
     )
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
@@ -428,21 +459,50 @@ def main() -> None:
         fpr_cap=args.threshold_max_fpr,
     )
     val_pred = (np.array(val_probs) >= best_threshold).astype(int).tolist()
-    gen_pred = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
+    gen_threshold = best_threshold
+    gen_threshold_source = "blended"
+    if args.gen_threshold is not None:
+        gen_threshold = args.gen_threshold
+        gen_threshold_source = "manual"
+        gen_pred = (np.array(gen_probs) >= gen_threshold).astype(int).tolist()
+        gen_metrics = confusion_metrics(gen_true, gen_pred)
+    else:
+        auto_miss_target = max(0.0, val_metrics["miss_rate"] * args.gen_threshold_tighten_factor)
+        auto_fpr_cap = max(val_metrics["fpr"], args.threshold_max_fpr) * args.gen_threshold_fpr_relax_factor
+        miss_target = args.gen_threshold_target_miss
+        fpr_cap = args.gen_threshold_max_fpr
+        use_auto = miss_target is None and fpr_cap is None
+        if use_auto:
+            miss_target = auto_miss_target
+            fpr_cap = auto_fpr_cap
+        if miss_target is not None or fpr_cap is not None:
+            gen_threshold, gen_metrics = sweep_thresholds(
+                gen_true,
+                gen_probs,
+                miss_target=miss_target,
+                fpr_cap=fpr_cap,
+            )
+            gen_threshold_source = "auto_sweep" if use_auto else "sweep"
+            gen_pred = (np.array(gen_probs) >= gen_threshold).astype(int).tolist()
+        else:
+            gen_pred = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
 
     print(
         f"Final Val@thr={best_threshold:.2f}: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, "
         f"miss={val_metrics['miss_rate'] * 100:.2f}%, fpr={val_metrics['fpr'] * 100:.2f}%"
     )
     print(
-        f"Generalization@thr={best_threshold:.2f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, "
+        f"Generalization@thr={gen_threshold:.2f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, "
         f"miss={gen_metrics['miss_rate'] * 100:.2f}%, fpr={gen_metrics['fpr'] * 100:.2f}%"
     )
+    print(f"Generalization threshold source: {gen_threshold_source}")
 
     _write_log(
         {
             "event": "final",
             "best_threshold": best_threshold,
+            "gen_threshold": gen_threshold,
+            "gen_threshold_source": gen_threshold_source,
             "val_loss": val_loss,
             "val_f1": val_metrics["f1"],
             "val_miss": val_metrics["miss_rate"],
@@ -467,6 +527,7 @@ def main() -> None:
             "student_state_dict": student.state_dict(),
             "config": vars(args),
             "best_threshold": best_threshold,
+            "gen_threshold": gen_threshold,
         },
         save_path,
     )
