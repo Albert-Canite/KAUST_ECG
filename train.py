@@ -200,8 +200,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gen_threshold_tighten_factor",
         type=float,
-        default=0.85,
+        default=0.7,
         help="Scale factor (<1 tightens miss target) applied to val miss for auto gen threshold sweep",
+    )
+    parser.add_argument(
+        "--gen_threshold_fpr_relax_factor",
+        type=float,
+        default=1.25,
+        help="Scale factor (>1 relaxes auto gen FPR cap) applied to max(val fpr, threshold_max_fpr)",
     )
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
@@ -462,7 +468,7 @@ def main() -> None:
         gen_metrics = confusion_metrics(gen_true, gen_pred)
     else:
         auto_miss_target = max(0.0, val_metrics["miss_rate"] * args.gen_threshold_tighten_factor)
-        auto_fpr_cap = max(val_metrics["fpr"], args.threshold_max_fpr)
+        auto_fpr_cap = max(val_metrics["fpr"], args.threshold_max_fpr) * args.gen_threshold_fpr_relax_factor
         miss_target = args.gen_threshold_target_miss
         fpr_cap = args.gen_threshold_max_fpr
         use_auto = miss_target is None and fpr_cap is None
@@ -489,8 +495,7 @@ def main() -> None:
         f"Generalization@thr={gen_threshold:.2f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, "
         f"miss={gen_metrics['miss_rate'] * 100:.2f}%, fpr={gen_metrics['fpr'] * 100:.2f}%"
     )
-    if gen_threshold_source != "blended":
-        print(f"Generalization threshold source: {gen_threshold_source}")
+    print(f"Generalization threshold source: {gen_threshold_source}")
 
     _write_log(
         {
