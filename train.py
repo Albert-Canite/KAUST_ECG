@@ -27,6 +27,7 @@ from utils import (
     sweep_thresholds_blended,
     sweep_thresholds_low_miss,
     sweep_thresholds_miss_then_fpr,
+    sweep_thresholds_three_level,
 )
 
 
@@ -223,6 +224,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.01,
         help="Step size for coarse threshold grid",
+    )
+    parser.add_argument(
+        "--threshold_sweep_miss_cap",
+        type=float,
+        default=0.05,
+        help="Miss-rate cap for post-training threshold sweeps",
+    )
+    parser.add_argument(
+        "--threshold_sweep_fpr_cap",
+        type=float,
+        default=0.12,
+        help="FPR cap for post-training threshold sweeps",
     )
     _add_bool_arg(parser, "threshold_refine", default=True, help_text="refine thresholds near the best candidate")
     parser.add_argument("--seed", type=int, default=42)
@@ -737,6 +750,39 @@ def main() -> None:
             f"miss={gen_metrics_miss_then_fpr_final['miss_rate'] * 100:.2f}%, fpr={gen_metrics_miss_then_fpr_final['fpr'] * 100:.2f}%{warn_flag}"
         )
 
+    sweep_thresholds_out, sweep_val_metrics, sweep_gen_metrics, sweep_info = sweep_thresholds_three_level(
+        val_probs,
+        val_true,
+        gen_probs,
+        gen_true,
+        thresholds=threshold_grid,
+        miss_cap=args.threshold_sweep_miss_cap,
+        fpr_cap=args.threshold_sweep_fpr_cap,
+    )
+    sweep_warning = ""
+    if sweep_info.get("warning"):
+        sweep_warning = f" ({sweep_info['warning']})"
+    print(
+        f"ConstrainedSweep miss<{args.threshold_sweep_miss_cap * 100:.0f}% "
+        f"fpr<{args.threshold_sweep_fpr_cap * 100:.0f}%{sweep_warning}"
+    )
+    for name, label in [
+        ("high_miss_low_fpr", "HighMiss/LowFPR"),
+        ("balanced", "Balanced"),
+        ("low_miss_high_fpr", "LowMiss/HighFPR"),
+    ]:
+        thr = sweep_thresholds_out[name]
+        val_m = sweep_val_metrics[name]
+        gen_m = sweep_gen_metrics[name]
+        print(
+            f"  {label} Val@thr={thr:.3f}: F1={val_m['f1']:.3f}, miss={val_m['miss_rate'] * 100:.2f}%, "
+            f"fpr={val_m['fpr'] * 100:.2f}%"
+        )
+        print(
+            f"  {label} Generalization@thr={thr:.3f}: F1={gen_m['f1']:.3f}, miss={gen_m['miss_rate'] * 100:.2f}%, "
+            f"fpr={gen_m['fpr'] * 100:.2f}%"
+        )
+
     _write_log(
         {
             "event": "final",
@@ -763,6 +809,10 @@ def main() -> None:
             "miss_then_fpr_gen_f1": None if gen_metrics_miss_then_fpr_final is None else gen_metrics_miss_then_fpr_final["f1"],
             "miss_then_fpr_gen_miss": None if gen_metrics_miss_then_fpr_final is None else gen_metrics_miss_then_fpr_final["miss_rate"],
             "miss_then_fpr_gen_fpr": None if gen_metrics_miss_then_fpr_final is None else gen_metrics_miss_then_fpr_final["fpr"],
+            "constrained_sweep_thresholds": sweep_thresholds_out,
+            "constrained_sweep_val": sweep_val_metrics,
+            "constrained_sweep_gen": sweep_gen_metrics,
+            "constrained_sweep_info": sweep_info,
         }
     )
 
