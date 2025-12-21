@@ -175,6 +175,49 @@ def sweep_thresholds_min_miss(
     return best_thr, best_metrics
 
 
+def sweep_thresholds_min_fpr(
+    y_true: List[int],
+    probs: List[float],
+    thresholds: List[float] | None = None,
+    miss_cap: float | None = None,
+) -> Tuple[float, Dict[str, float]]:
+    """Choose the threshold that minimizes FPR (with optional miss-rate cap).
+
+    If no threshold meets the miss-rate cap, fall back to the lowest FPR overall.
+    Ties are broken by lower miss rate, then higher F1.
+    """
+
+    if thresholds is None:
+        dense = np.linspace(0.02, 0.98, num=25)
+        quantiles = np.quantile(probs, q=np.linspace(0.05, 0.95, num=19))
+        thresholds = np.unique(np.concatenate([dense, quantiles])).tolist()
+
+    probs_arr = np.array(probs)
+    y_true_list = list(y_true)
+
+    best_thr = 0.5
+    best_metrics: Dict[str, float] = {}
+
+    def _key(metrics: Dict[str, float]) -> Tuple[float, float, float]:
+        return (metrics["fpr"], metrics["miss_rate"], -metrics["f1"])
+
+    candidates: List[Tuple[float, Dict[str, float]]] = []
+    all_records: List[Tuple[float, Dict[str, float]]] = []
+
+    for thr in thresholds:
+        preds = (probs_arr >= thr).astype(int).tolist()
+        metrics = confusion_metrics(y_true_list, preds)
+        all_records.append((float(thr), metrics))
+        if miss_cap is None or metrics["miss_rate"] <= miss_cap:
+            candidates.append((float(thr), metrics))
+
+    search_pool = candidates if candidates else all_records
+    if search_pool:
+        best_thr, best_metrics = min(search_pool, key=lambda x: _key(x[1]))
+
+    return best_thr, best_metrics
+
+
 def sweep_thresholds_adaptive(
     y_true: List[int],
     probs: List[float],

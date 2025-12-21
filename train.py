@@ -25,6 +25,7 @@ from utils import (
     confusion_metrics,
     make_weighted_sampler,
     sweep_thresholds,
+    sweep_thresholds_min_fpr,
     sweep_thresholds_min_miss,
     sweep_thresholds_blended,
 )
@@ -520,6 +521,11 @@ def main() -> None:
             "gen_f1": gen_metrics["f1"],
             "gen_miss": gen_metrics["miss_rate"],
             "gen_fpr": gen_metrics["fpr"],
+            "gen_threshold_options": {
+                "low_miss": {"threshold": gen_low_miss_thr, "metrics": gen_low_miss_metrics},
+                "balanced": {"threshold": gen_balanced_thr, "metrics": gen_balanced_metrics},
+                "low_fpr": {"threshold": gen_low_fpr_thr, "metrics": gen_low_fpr_metrics},
+            },
         }
     )
 
@@ -529,6 +535,34 @@ def main() -> None:
     np.save(os.path.join("artifacts", "val_labels.npy"), np.array(val_true))
     np.save(os.path.join("artifacts", "gen_labels.npy"), np.array(gen_true))
 
+    gen_low_miss_thr, gen_low_miss_metrics = sweep_thresholds_min_miss(
+        gen_true,
+        gen_probs,
+        fpr_cap=args.gen_threshold_max_fpr,
+    )
+    gen_balanced_thr, gen_balanced_metrics = sweep_thresholds(
+        gen_true,
+        gen_probs,
+    )
+    gen_low_fpr_thr, gen_low_fpr_metrics = sweep_thresholds_min_fpr(
+        gen_true,
+        gen_probs,
+        miss_cap=args.gen_threshold_target_miss,
+    )
+
+    print(
+        f"Gen low-miss@thr={gen_low_miss_thr:.2f}: F1={gen_low_miss_metrics['f1']:.3f}, "
+        f"miss={gen_low_miss_metrics['miss_rate'] * 100:.2f}%, fpr={gen_low_miss_metrics['fpr'] * 100:.2f}%"
+    )
+    print(
+        f"Gen balanced@thr={gen_balanced_thr:.2f}: F1={gen_balanced_metrics['f1']:.3f}, "
+        f"miss={gen_balanced_metrics['miss_rate'] * 100:.2f}%, fpr={gen_balanced_metrics['fpr'] * 100:.2f}%"
+    )
+    print(
+        f"Gen low-fpr@thr={gen_low_fpr_thr:.2f}: F1={gen_low_fpr_metrics['f1']:.3f}, "
+        f"miss={gen_low_fpr_metrics['miss_rate'] * 100:.2f}%, fpr={gen_low_fpr_metrics['fpr'] * 100:.2f}%"
+    )
+
     os.makedirs("saved_models", exist_ok=True)
     save_path = os.path.join("saved_models", "student_model.pth")
     torch.save(
@@ -537,6 +571,11 @@ def main() -> None:
             "config": vars(args),
             "best_threshold": best_threshold,
             "gen_threshold": gen_threshold,
+            "gen_threshold_options": {
+                "low_miss": {"threshold": gen_low_miss_thr, "metrics": gen_low_miss_metrics},
+                "balanced": {"threshold": gen_balanced_thr, "metrics": gen_balanced_metrics},
+                "low_fpr": {"threshold": gen_low_fpr_thr, "metrics": gen_low_fpr_metrics},
+            },
         },
         save_path,
     )
