@@ -507,6 +507,21 @@ def main() -> None:
     )
     print(f"Generalization threshold source: {gen_threshold_source}")
 
+    gen_low_miss_thr, gen_low_miss_metrics = sweep_thresholds_min_miss(
+        gen_true,
+        gen_probs,
+        fpr_cap=args.gen_threshold_max_fpr,
+    )
+    gen_balanced_thr, gen_balanced_metrics = sweep_thresholds(
+        gen_true,
+        gen_probs,
+    )
+    gen_low_fpr_thr, gen_low_fpr_metrics = sweep_thresholds_min_fpr(
+        gen_true,
+        gen_probs,
+        miss_cap=args.gen_threshold_target_miss,
+    )
+
     _write_log(
         {
             "event": "final",
@@ -534,21 +549,6 @@ def main() -> None:
     np.save(os.path.join("artifacts", "gen_probs.npy"), np.array(gen_probs))
     np.save(os.path.join("artifacts", "val_labels.npy"), np.array(val_true))
     np.save(os.path.join("artifacts", "gen_labels.npy"), np.array(gen_true))
-
-    gen_low_miss_thr, gen_low_miss_metrics = sweep_thresholds_min_miss(
-        gen_true,
-        gen_probs,
-        fpr_cap=args.gen_threshold_max_fpr,
-    )
-    gen_balanced_thr, gen_balanced_metrics = sweep_thresholds(
-        gen_true,
-        gen_probs,
-    )
-    gen_low_fpr_thr, gen_low_fpr_metrics = sweep_thresholds_min_fpr(
-        gen_true,
-        gen_probs,
-        miss_cap=args.gen_threshold_target_miss,
-    )
 
     print(
         f"Gen low-miss@thr={gen_low_miss_thr:.2f}: F1={gen_low_miss_metrics['f1']:.3f}, "
