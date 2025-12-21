@@ -154,8 +154,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--class_weight_abnormal", type=float, default=1.35)
     parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
     parser.add_argument("--generalization_score_weight", type=float, default=0.35)
-    parser.add_argument("--threshold_target_miss", type=float, default=0.10)
-    parser.add_argument("--threshold_max_fpr", type=float, default=0.10)
+    parser.add_argument("--threshold_target_miss", type=float, default=0.05)
+    parser.add_argument("--threshold_max_fpr", type=float, default=0.12)
     parser.add_argument(
         "--threshold_recall_gain",
         type=float,
@@ -184,7 +184,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gen_fpr_cap_low_miss",
         type=float,
-        default=0.15,
+        default=0.12,
         help="Maximum allowable generalization FPR when selecting low-miss thresholds",
     )
     parser.add_argument(
@@ -208,7 +208,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gen_miss_target_then_fpr",
         type=float,
-        default=0.035,
+        default=0.05,
         help="Target generalization miss for miss-then-FPR selection",
     )
     parser.add_argument(
@@ -221,7 +221,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--threshold_grid_step",
         type=float,
-        default=0.01,
+        default=0.005,
         help="Step size for coarse threshold grid",
     )
     _add_bool_arg(parser, "threshold_refine", default=True, help_text="refine thresholds near the best candidate")
