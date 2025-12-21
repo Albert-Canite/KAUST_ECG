@@ -455,14 +455,13 @@ def sweep_thresholds_miss_then_fpr(
     gen_labels: List[int],
     thresholds: List[float] | None = None,
     gen_miss_target: float = 0.035,
-    gen_fpr_cap: float = 0.12,
+    gen_fpr_cap: float = 0.15,
     refine: bool = True,
-    refine_step: float = 0.001,
+    refine_step: float = 0.002,
 ) -> Tuple[float, Dict[str, float], Dict[str, float], Dict[str, object]]:
     """Select thresholds that first meet a miss target then minimize FPR.
 
-    Primary filtering keeps thresholds with generalization miss within gen_miss_target
-    and generalization FPR within gen_fpr_cap.
+    Primary filtering keeps thresholds with generalization miss within gen_miss_target.
     If no threshold satisfies the miss target, the selection falls back to the
     low-miss strategy or the minimum miss under the FPR cap and records a warning.
     Within the filtered set the order is: minimize gen FPR, then maximize gen F1,
@@ -489,7 +488,7 @@ def sweep_thresholds_miss_then_fpr(
 
         for thr in thr_list:
             val_metrics, gen_metrics = _eval(thr)
-            in_target = gen_metrics["miss_rate"] <= gen_miss_target and gen_metrics["fpr"] <= gen_fpr_cap
+            in_target = gen_metrics["miss_rate"] <= gen_miss_target
             candidates.append(
                 {
                     "threshold": float(thr),
