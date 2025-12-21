@@ -583,6 +583,112 @@ def sweep_thresholds_miss_then_fpr(
     return best_thr, best_val_metrics, best_gen_metrics, info
 
 
+def sweep_thresholds_three_level(
+    val_probs: List[float],
+    val_labels: List[int],
+    gen_probs: List[float],
+    gen_labels: List[int],
+    thresholds: List[float] | None = None,
+    miss_cap: float = 0.05,
+    fpr_cap: float = 0.12,
+) -> Tuple[Dict[str, float], Dict[str, Dict[str, float]], Dict[str, Dict[str, float]], Dict[str, object]]:
+    """Return three threshold tiers under miss/FPR caps for generalization metrics.
+
+    Tiers:
+        - high_miss_low_fpr: minimize gen FPR (allowing higher miss within cap).
+        - balanced: trade-off using a blended score of F1, miss, and FPR.
+        - low_miss_high_fpr: minimize gen miss (allowing higher FPR within cap).
+    """
+
+    if thresholds is None:
+        thresholds = _generate_threshold_grid()
+
+    val_arr = np.array(val_probs)
+    gen_arr = np.array(gen_probs)
+
+    candidates: List[Dict[str, object]] = []
+    for thr in thresholds:
+        val_preds = (val_arr >= thr).astype(int).tolist()
+        gen_preds = (gen_arr >= thr).astype(int).tolist()
+        val_metrics = confusion_metrics(val_labels, val_preds)
+        gen_metrics = confusion_metrics(gen_labels, gen_preds)
+        candidates.append(
+            {
+                "threshold": float(thr),
+                "val_metrics": val_metrics,
+                "gen_metrics": gen_metrics,
+            }
+        )
+
+    constrained = [
+        c
+        for c in candidates
+        if c["gen_metrics"]["miss_rate"] <= miss_cap and c["gen_metrics"]["fpr"] <= fpr_cap
+    ]
+    warning = None
+    if not constrained:
+        warning = "no threshold satisfied miss/fpr caps; using unconstrained candidates"
+        constrained = candidates
+
+    def _pick_high_miss_low_fpr(entries: List[Dict[str, object]]) -> Dict[str, object]:
+        return sorted(
+            entries,
+            key=lambda c: (
+                c["gen_metrics"]["fpr"],
+                -c["gen_metrics"]["miss_rate"],
+                -c["gen_metrics"]["f1"],
+                c["val_metrics"]["fpr"],
+            ),
+        )[0]
+
+    def _pick_balanced(entries: List[Dict[str, object]]) -> Dict[str, object]:
+        def _score(c: Dict[str, object]) -> float:
+            gen = c["gen_metrics"]
+            miss_norm = gen["miss_rate"] / max(miss_cap, 1e-8)
+            fpr_norm = gen["fpr"] / max(fpr_cap, 1e-8)
+            return gen["f1"] - 0.5 * miss_norm - 0.5 * fpr_norm
+
+        return max(
+            entries,
+            key=lambda c: (
+                _score(c),
+                c["gen_metrics"]["f1"],
+                -c["gen_metrics"]["miss_rate"],
+                -c["gen_metrics"]["fpr"],
+            ),
+        )
+
+    def _pick_low_miss_high_fpr(entries: List[Dict[str, object]]) -> Dict[str, object]:
+        return sorted(
+            entries,
+            key=lambda c: (
+                c["gen_metrics"]["miss_rate"],
+                -c["gen_metrics"]["fpr"],
+                -c["gen_metrics"]["f1"],
+                c["val_metrics"]["fpr"],
+            ),
+        )[0]
+
+    selections = {
+        "high_miss_low_fpr": _pick_high_miss_low_fpr(constrained),
+        "balanced": _pick_balanced(constrained),
+        "low_miss_high_fpr": _pick_low_miss_high_fpr(constrained),
+    }
+
+    thresholds_out = {k: float(v["threshold"]) for k, v in selections.items()}
+    val_metrics_out = {k: v["val_metrics"] for k, v in selections.items()}
+    gen_metrics_out = {k: v["gen_metrics"] for k, v in selections.items()}
+    info = {
+        "miss_cap": miss_cap,
+        "fpr_cap": fpr_cap,
+        "warning": warning,
+        "candidates": len(candidates),
+        "constrained_candidates": len(constrained),
+    }
+
+    return thresholds_out, val_metrics_out, gen_metrics_out, info
+
+
 def kd_logit_loss(student_logits: torch.Tensor, teacher_logits: torch.Tensor, temperature: float) -> torch.Tensor:
     log_p_s = F.log_softmax(student_logits / temperature, dim=1)
     p_t = F.softmax(teacher_logits.detach() / temperature, dim=1)
