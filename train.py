@@ -511,18 +511,18 @@ def main() -> None:
     gen_low_miss_thr, gen_low_miss_metrics = sweep_thresholds_min_miss(
         gen_true,
         gen_probs,
-        thresholds=build_threshold_grid(gen_probs, best_threshold, window=0.2),
+        thresholds=build_threshold_grid(gen_probs, best_threshold, window=0.2, num_points=201),
         fpr_cap=0.12,
     )
     gen_balanced_thr, gen_balanced_metrics = sweep_thresholds(
         gen_true,
         gen_probs,
-        thresholds=build_threshold_grid(gen_probs, best_threshold, window=0.2),
+        thresholds=build_threshold_grid(gen_probs, best_threshold, window=0.2, num_points=201),
     )
     gen_low_fpr_thr, gen_low_fpr_metrics = sweep_thresholds_min_fpr(
         gen_true,
         gen_probs,
-        thresholds=build_threshold_grid(gen_probs, best_threshold, window=0.2),
+        thresholds=build_threshold_grid(gen_probs, best_threshold, window=0.2, num_points=201),
         miss_cap=0.05,
     )
 
