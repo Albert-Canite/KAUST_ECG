@@ -583,6 +583,130 @@ def sweep_thresholds_miss_then_fpr(
     return best_thr, best_val_metrics, best_gen_metrics, info
 
 
+def sweep_thresholds_three_level(
+    val_probs: List[float],
+    val_labels: List[int],
+    gen_probs: List[float],
+    gen_labels: List[int],
+    thresholds: List[float] | None = None,
+    balanced_miss_cap: float = 0.05,
+    balanced_fpr_cap: float = 0.12,
+    low_miss_fpr_cap: float = 0.20,
+    low_fpr_miss_cap: float = 0.10,
+) -> Tuple[Dict[str, float], Dict[str, Dict[str, float]], Dict[str, Dict[str, float]], Dict[str, object]]:
+    """Return three threshold tiers under miss/FPR caps for generalization metrics.
+
+    Tiers:
+        - high_miss_low_fpr: minimize gen FPR with miss <= low_fpr_miss_cap.
+        - balanced: maximize balanced score with miss <= balanced_miss_cap and fpr <= balanced_fpr_cap.
+        - low_miss_high_fpr: minimize gen miss with fpr <= low_miss_fpr_cap.
+    """
+
+    if thresholds is None:
+        thresholds = _generate_threshold_grid()
+
+    val_arr = np.array(val_probs)
+    gen_arr = np.array(gen_probs)
+
+    candidates: List[Dict[str, object]] = []
+    for thr in thresholds:
+        val_preds = (val_arr >= thr).astype(int).tolist()
+        gen_preds = (gen_arr >= thr).astype(int).tolist()
+        val_metrics = confusion_metrics(val_labels, val_preds)
+        gen_metrics = confusion_metrics(gen_labels, gen_preds)
+        candidates.append(
+            {
+                "threshold": float(thr),
+                "val_metrics": val_metrics,
+                "gen_metrics": gen_metrics,
+            }
+        )
+
+    balanced_candidates = [
+        c
+        for c in candidates
+        if c["gen_metrics"]["miss_rate"] <= balanced_miss_cap
+        and c["gen_metrics"]["fpr"] <= balanced_fpr_cap
+    ]
+    low_miss_candidates = [c for c in candidates if c["gen_metrics"]["fpr"] <= low_miss_fpr_cap]
+    low_fpr_candidates = [c for c in candidates if c["gen_metrics"]["miss_rate"] <= low_fpr_miss_cap]
+
+    warning = None
+    if not balanced_candidates:
+        warning = "no threshold satisfied balanced miss/fpr caps; using unconstrained candidates for balanced tier"
+        balanced_candidates = candidates
+    if not low_miss_candidates:
+        warning = (
+            (warning + " | ") if warning else ""
+        ) + "no threshold satisfied low-miss fpr cap; using unconstrained candidates for low-miss tier"
+        low_miss_candidates = candidates
+    if not low_fpr_candidates:
+        warning = (
+            (warning + " | ") if warning else ""
+        ) + "no threshold satisfied low-fpr miss cap; using unconstrained candidates for low-fpr tier"
+        low_fpr_candidates = candidates
+
+    def _pick_high_miss_low_fpr(entries: List[Dict[str, object]]) -> Dict[str, object]:
+        return sorted(
+            entries,
+            key=lambda c: (
+                c["gen_metrics"]["fpr"],
+                -c["gen_metrics"]["miss_rate"],
+                -c["gen_metrics"]["f1"],
+            ),
+        )[0]
+
+    def _pick_balanced(entries: List[Dict[str, object]]) -> Dict[str, object]:
+        def _score(c: Dict[str, object]) -> float:
+            gen = c["gen_metrics"]
+            miss_norm = gen["miss_rate"] / max(balanced_miss_cap, 1e-8)
+            fpr_norm = gen["fpr"] / max(balanced_fpr_cap, 1e-8)
+            return gen["f1"] - 0.5 * miss_norm - 0.5 * fpr_norm
+
+        return max(
+            entries,
+            key=lambda c: (
+                _score(c),
+                c["gen_metrics"]["f1"],
+                -c["gen_metrics"]["miss_rate"],
+                -c["gen_metrics"]["fpr"],
+            ),
+        )
+
+    def _pick_low_miss_high_fpr(entries: List[Dict[str, object]]) -> Dict[str, object]:
+        return sorted(
+            entries,
+            key=lambda c: (
+                c["gen_metrics"]["miss_rate"],
+                -c["gen_metrics"]["fpr"],
+                -c["gen_metrics"]["f1"],
+            ),
+        )[0]
+
+    selections = {
+        "high_miss_low_fpr": _pick_high_miss_low_fpr(low_fpr_candidates),
+        "balanced": _pick_balanced(balanced_candidates),
+        "low_miss_high_fpr": _pick_low_miss_high_fpr(low_miss_candidates),
+    }
+
+    thresholds_out = {k: float(v["threshold"]) for k, v in selections.items()}
+    val_metrics_out = {k: v["val_metrics"] for k, v in selections.items()}
+    gen_metrics_out = {k: v["gen_metrics"] for k, v in selections.items()}
+    info = {
+        "balanced_miss_cap": balanced_miss_cap,
+        "balanced_fpr_cap": balanced_fpr_cap,
+        "low_miss_fpr_cap": low_miss_fpr_cap,
+        "low_fpr_miss_cap": low_fpr_miss_cap,
+        "warning": warning,
+        "candidates": len(candidates),
+        "balanced_candidates": len(balanced_candidates),
+        "low_miss_candidates": len(low_miss_candidates),
+        "low_fpr_candidates": len(low_fpr_candidates),
+    }
+
+    return thresholds_out, val_metrics_out, gen_metrics_out, info
+
+
 def kd_logit_loss(student_logits: torch.Tensor, teacher_logits: torch.Tensor, temperature: float) -> torch.Tensor:
     log_p_s = F.log_softmax(student_logits / temperature, dim=1)
     p_t = F.softmax(teacher_logits.detach() / temperature, dim=1)
