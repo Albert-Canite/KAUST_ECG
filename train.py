@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 from datetime import datetime
@@ -24,7 +25,6 @@ from utils import (
     compute_class_weights,
     confusion_metrics,
     make_weighted_sampler,
-    build_threshold_grid,
     sweep_thresholds,
     sweep_thresholds_min_fpr,
     sweep_thresholds_min_miss,
@@ -379,7 +379,8 @@ def main() -> None:
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
             f"Val F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}% | "
-            f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}% | Thr {best_thr_epoch:.2f}"
+            f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}% | "
+            f"Thr {best_thr_epoch:.4f}"
         )
 
         history.append(
@@ -499,32 +500,104 @@ def main() -> None:
             gen_pred = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
 
     print(
-        f"Final Val@thr={best_threshold:.2f}: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, "
+        f"Final Val@thr={best_threshold:.4f}: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, "
         f"miss={val_metrics['miss_rate'] * 100:.2f}%, fpr={val_metrics['fpr'] * 100:.2f}%"
     )
     print(
-        f"Generalization@thr={gen_threshold:.2f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, "
+        f"Generalization@thr={gen_threshold:.4f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, "
         f"miss={gen_metrics['miss_rate'] * 100:.2f}%, fpr={gen_metrics['fpr'] * 100:.2f}%"
     )
     print(f"Generalization threshold source: {gen_threshold_source}")
 
-    gen_low_miss_thr, gen_low_miss_metrics = sweep_thresholds_min_miss(
-        gen_true,
-        gen_probs,
-        thresholds=build_threshold_grid(gen_probs, best_threshold, window=0.2, num_points=201),
-        fpr_cap=0.12,
+    def _collect_threshold_records(
+        y_true: List[int],
+        probs: List[float],
+        thresholds: List[float],
+    ) -> List[Dict[str, object]]:
+        y_true_arr = np.array(y_true)
+        probs_arr = np.array(probs)
+        records: List[Dict[str, object]] = []
+        for thr in thresholds:
+            preds = (probs_arr >= thr).astype(int).tolist()
+            metrics = confusion_metrics(y_true_arr.tolist(), preds)
+            roc_score = metrics["sensitivity"] - metrics["fpr"]
+            records.append(
+                {
+                    "threshold": float(thr),
+                    "metrics": metrics,
+                    "roc": roc_score,
+                }
+            )
+        return records
+
+    fine_step = 0.0001
+    fine_thresholds = np.round(np.arange(0.0, 1.0 + fine_step / 2, fine_step), 4).tolist()
+    gen_records = _collect_threshold_records(gen_true, gen_probs, fine_thresholds)
+
+    low_miss_candidates = [r for r in gen_records if r["metrics"]["fpr"] < 0.2]
+    low_miss_top10 = sorted(
+        low_miss_candidates,
+        key=lambda r: (
+            r["metrics"]["miss_rate"],
+            r["metrics"]["fpr"],
+            -r["metrics"]["sensitivity"],
+        ),
+    )[:10]
+
+    low_fpr_candidates = [r for r in gen_records if r["metrics"]["miss_rate"] < 0.1]
+    low_fpr_top10 = sorted(
+        low_fpr_candidates,
+        key=lambda r: (
+            r["metrics"]["fpr"],
+            r["metrics"]["miss_rate"],
+            -r["metrics"]["sensitivity"],
+        ),
+    )[:10]
+
+    balanced_pool = low_miss_top10 + low_fpr_top10
+    if not balanced_pool:
+        balanced_pool = gen_records
+    balanced_record = max(
+        balanced_pool,
+        key=lambda r: (
+            r["roc"],
+            -r["metrics"]["miss_rate"],
+            -r["metrics"]["fpr"],
+        ),
     )
-    gen_balanced_thr, gen_balanced_metrics = sweep_thresholds(
-        gen_true,
-        gen_probs,
-        thresholds=build_threshold_grid(gen_probs, best_threshold, window=0.2, num_points=201),
-    )
-    gen_low_fpr_thr, gen_low_fpr_metrics = sweep_thresholds_min_fpr(
-        gen_true,
-        gen_probs,
-        thresholds=build_threshold_grid(gen_probs, best_threshold, window=0.2, num_points=201),
-        miss_cap=0.05,
-    )
+
+    coarse_step = 0.001
+    coarse_thresholds = np.round(np.arange(0.0, 1.0 + coarse_step / 2, coarse_step), 3).tolist()
+    coarse_records = _collect_threshold_records(gen_true, gen_probs, coarse_thresholds)
+    sweep_csv_path = os.path.join("artifacts", "gen_threshold_sweep.csv")
+    with open(sweep_csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["threshold", "miss_rate", "fpr"])
+        for record in coarse_records:
+            metrics = record["metrics"]
+            writer.writerow(
+                [
+                    f"{record['threshold']:.3f}",
+                    f"{metrics['miss_rate']:.6f}",
+                    f"{metrics['fpr']:.6f}",
+                ]
+            )
+    print(f"Saved gen threshold sweep CSV to {sweep_csv_path}")
+
+    if low_miss_top10:
+        gen_low_miss_thr = low_miss_top10[0]["threshold"]
+        gen_low_miss_metrics = low_miss_top10[0]["metrics"]
+    else:
+        gen_low_miss_thr = balanced_record["threshold"]
+        gen_low_miss_metrics = balanced_record["metrics"]
+    gen_balanced_thr = balanced_record["threshold"]
+    gen_balanced_metrics = balanced_record["metrics"]
+    if low_fpr_top10:
+        gen_low_fpr_thr = low_fpr_top10[0]["threshold"]
+        gen_low_fpr_metrics = low_fpr_top10[0]["metrics"]
+    else:
+        gen_low_fpr_thr = balanced_record["threshold"]
+        gen_low_fpr_metrics = balanced_record["metrics"]
 
     _write_log(
         {
@@ -545,6 +618,35 @@ def main() -> None:
                 "balanced": {"threshold": gen_balanced_thr, "metrics": gen_balanced_metrics},
                 "low_fpr": {"threshold": gen_low_fpr_thr, "metrics": gen_low_fpr_metrics},
             },
+            "gen_threshold_sweep": {
+                "sweep_csv": sweep_csv_path,
+                "low_miss_candidate_count": len(low_miss_candidates),
+                "low_miss_top10": [
+                    {
+                        "threshold": r["threshold"],
+                        "miss_rate": r["metrics"]["miss_rate"],
+                        "fpr": r["metrics"]["fpr"],
+                        "roc": r["roc"],
+                    }
+                    for r in low_miss_top10
+                ],
+                "low_fpr_candidate_count": len(low_fpr_candidates),
+                "low_fpr_top10": [
+                    {
+                        "threshold": r["threshold"],
+                        "miss_rate": r["metrics"]["miss_rate"],
+                        "fpr": r["metrics"]["fpr"],
+                        "roc": r["roc"],
+                    }
+                    for r in low_fpr_top10
+                ],
+                "balanced": {
+                    "threshold": gen_balanced_thr,
+                    "miss_rate": gen_balanced_metrics["miss_rate"],
+                    "fpr": gen_balanced_metrics["fpr"],
+                    "roc": balanced_record["roc"],
+                },
+            },
         }
     )
 
@@ -554,16 +656,36 @@ def main() -> None:
     np.save(os.path.join("artifacts", "val_labels.npy"), np.array(val_true))
     np.save(os.path.join("artifacts", "gen_labels.npy"), np.array(gen_true))
 
+    print("Gen sweep (low-miss, FPR < 20%) top10:")
+    if low_miss_top10:
+        for idx, record in enumerate(low_miss_top10, start=1):
+            metrics = record["metrics"]
+            print(
+                f"  {idx:02d}. thr={record['threshold']:.4f} "
+                f"miss={metrics['miss_rate']:.4f} fpr={metrics['fpr']:.4f} roc={record['roc']:.4f}"
+            )
+    else:
+        print("  (no thresholds met FPR < 20% constraint)")
+    print("Gen sweep (low-fpr, miss < 10%) top10:")
+    if low_fpr_top10:
+        for idx, record in enumerate(low_fpr_top10, start=1):
+            metrics = record["metrics"]
+            print(
+                f"  {idx:02d}. thr={record['threshold']:.4f} "
+                f"miss={metrics['miss_rate']:.4f} fpr={metrics['fpr']:.4f} roc={record['roc']:.4f}"
+            )
+    else:
+        print("  (no thresholds met miss < 10% constraint)")
     print(
-        f"Gen low-miss@thr={gen_low_miss_thr:.2f}: F1={gen_low_miss_metrics['f1']:.3f}, "
+        f"Gen low-miss@thr={gen_low_miss_thr:.4f}: F1={gen_low_miss_metrics['f1']:.3f}, "
         f"miss={gen_low_miss_metrics['miss_rate'] * 100:.2f}%, fpr={gen_low_miss_metrics['fpr'] * 100:.2f}%"
     )
     print(
-        f"Gen balanced@thr={gen_balanced_thr:.2f}: F1={gen_balanced_metrics['f1']:.3f}, "
+        f"Gen balanced@thr={gen_balanced_thr:.4f}: F1={gen_balanced_metrics['f1']:.3f}, "
         f"miss={gen_balanced_metrics['miss_rate'] * 100:.2f}%, fpr={gen_balanced_metrics['fpr'] * 100:.2f}%"
     )
     print(
-        f"Gen low-fpr@thr={gen_low_fpr_thr:.2f}: F1={gen_low_fpr_metrics['f1']:.3f}, "
+        f"Gen low-fpr@thr={gen_low_fpr_thr:.4f}: F1={gen_low_fpr_metrics['f1']:.3f}, "
         f"miss={gen_low_fpr_metrics['miss_rate'] * 100:.2f}%, fpr={gen_low_fpr_metrics['fpr'] * 100:.2f}%"
     )
 
