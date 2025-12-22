@@ -598,7 +598,8 @@ def sweep_thresholds_three_level(
 
     Tiers:
         - high_miss_low_fpr: minimize gen FPR with miss <= low_fpr_miss_cap.
-        - balanced: maximize balanced score with miss <= balanced_miss_cap and fpr <= balanced_fpr_cap.
+        - balanced: select max ROC score (TPR - FPR) from top low-miss/low-FPR candidates when available,
+          otherwise maximize balanced score with miss <= balanced_miss_cap and fpr <= balanced_fpr_cap.
         - low_miss_high_fpr: minimize gen miss with fpr <= low_miss_fpr_cap.
     """
 
@@ -607,6 +608,9 @@ def sweep_thresholds_three_level(
 
     val_arr = np.array(val_probs)
     gen_arr = np.array(gen_probs)
+
+    def _roc_score(metrics: Dict[str, float]) -> float:
+        return metrics["sensitivity"] - metrics["fpr"]
 
     candidates: List[Dict[str, object]] = []
     for thr in thresholds:
@@ -646,6 +650,51 @@ def sweep_thresholds_three_level(
         ) + "no threshold satisfied low-fpr miss cap; using unconstrained candidates for low-fpr tier"
         low_fpr_candidates = candidates
 
+    def _top_low_miss(entries: List[Dict[str, object]], limit: int = 10) -> List[Dict[str, object]]:
+        sorted_entries = sorted(
+            entries,
+            key=lambda c: (
+                c["gen_metrics"]["miss_rate"],
+                c["gen_metrics"]["fpr"],
+                -_roc_score(c["gen_metrics"]),
+                -c["gen_metrics"]["f1"],
+            ),
+        )
+        return [
+            {
+                "threshold": float(c["threshold"]),
+                "gen_miss": c["gen_metrics"]["miss_rate"],
+                "gen_fpr": c["gen_metrics"]["fpr"],
+                "gen_f1": c["gen_metrics"]["f1"],
+                "roc": _roc_score(c["gen_metrics"]),
+            }
+            for c in sorted_entries[:limit]
+        ]
+
+    def _top_low_fpr(entries: List[Dict[str, object]], limit: int = 10) -> List[Dict[str, object]]:
+        sorted_entries = sorted(
+            entries,
+            key=lambda c: (
+                c["gen_metrics"]["fpr"],
+                c["gen_metrics"]["miss_rate"],
+                -_roc_score(c["gen_metrics"]),
+                -c["gen_metrics"]["f1"],
+            ),
+        )
+        return [
+            {
+                "threshold": float(c["threshold"]),
+                "gen_miss": c["gen_metrics"]["miss_rate"],
+                "gen_fpr": c["gen_metrics"]["fpr"],
+                "gen_f1": c["gen_metrics"]["f1"],
+                "roc": _roc_score(c["gen_metrics"]),
+            }
+            for c in sorted_entries[:limit]
+        ]
+
+    low_miss_top = _top_low_miss(low_miss_candidates)
+    low_fpr_top = _top_low_fpr(low_fpr_candidates)
+
     def _pick_high_miss_low_fpr(entries: List[Dict[str, object]]) -> Dict[str, object]:
         return sorted(
             entries,
@@ -683,9 +732,26 @@ def sweep_thresholds_three_level(
             ),
         )[0]
 
+    balanced_source = "balanced_caps"
+    top_thresholds = {entry["threshold"] for entry in low_miss_top + low_fpr_top}
+    combined_top = [c for c in candidates if any(np.isclose(c["threshold"], t, atol=1e-8) for t in top_thresholds)]
+    if combined_top:
+        balanced_source = "top20_roc"
+        balanced_selection = max(
+            combined_top,
+            key=lambda c: (
+                _roc_score(c["gen_metrics"]),
+                c["gen_metrics"]["f1"],
+                -c["gen_metrics"]["miss_rate"],
+                -c["gen_metrics"]["fpr"],
+            ),
+        )
+    else:
+        balanced_selection = _pick_balanced(balanced_candidates)
+
     selections = {
         "high_miss_low_fpr": _pick_high_miss_low_fpr(low_fpr_candidates),
-        "balanced": _pick_balanced(balanced_candidates),
+        "balanced": balanced_selection,
         "low_miss_high_fpr": _pick_low_miss_high_fpr(low_miss_candidates),
     }
 
@@ -702,6 +768,9 @@ def sweep_thresholds_three_level(
         "balanced_candidates": len(balanced_candidates),
         "low_miss_candidates": len(low_miss_candidates),
         "low_fpr_candidates": len(low_fpr_candidates),
+        "low_miss_top": low_miss_top,
+        "low_fpr_top": low_fpr_top,
+        "balanced_source": balanced_source,
     }
 
     return thresholds_out, val_metrics_out, gen_metrics_out, info

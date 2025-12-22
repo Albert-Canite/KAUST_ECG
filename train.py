@@ -480,11 +480,11 @@ def main() -> None:
     gen_pred = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
 
     print(
-        f"Final Val@thr={best_threshold:.2f}: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, "
+        f"Final Val@thr={best_threshold:.4f}: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, "
         f"miss={val_metrics['miss_rate'] * 100:.2f}%, fpr={val_metrics['fpr'] * 100:.2f}%"
     )
     print(
-        f"Generalization@thr={best_threshold:.2f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, "
+        f"Generalization@thr={best_threshold:.4f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, "
         f"miss={gen_metrics['miss_rate'] * 100:.2f}%, fpr={gen_metrics['fpr'] * 100:.2f}%"
     )
     sweep_grid = np.arange(0.02, 0.9800001, args.threshold_sweep_step).tolist()
@@ -527,44 +527,19 @@ def main() -> None:
             f"fpr={gen_m['fpr'] * 100:.2f}%"
         )
 
-    sweep_grid = np.arange(0.02, 0.9800001, args.threshold_sweep_step).tolist()
-    sweep_thresholds_out, sweep_val_metrics, sweep_gen_metrics, sweep_info = sweep_thresholds_three_level(
-        val_probs,
-        val_true,
-        gen_probs,
-        gen_true,
-        thresholds=sweep_grid,
-        balanced_miss_cap=args.threshold_sweep_balanced_miss_cap,
-        balanced_fpr_cap=args.threshold_sweep_balanced_fpr_cap,
-        low_miss_fpr_cap=args.threshold_sweep_low_miss_fpr_cap,
-        low_fpr_miss_cap=args.threshold_sweep_low_fpr_miss_cap,
-    )
-    sweep_warning = ""
-    if sweep_info.get("warning"):
-        sweep_warning = f" ({sweep_info['warning']})"
-    print(
-        "ConstrainedSweep "
-        f"Balanced miss<{args.threshold_sweep_balanced_miss_cap * 100:.0f}% "
-        f"fpr<{args.threshold_sweep_balanced_fpr_cap * 100:.0f}% | "
-        f"LowMiss fpr<{args.threshold_sweep_low_miss_fpr_cap * 100:.0f}% | "
-        f"LowFPR miss<{args.threshold_sweep_low_fpr_miss_cap * 100:.0f}% | "
-        f"step={args.threshold_sweep_step:.4f}{sweep_warning}"
-    )
-    for name, label in [
-        ("high_miss_low_fpr", "HighMiss/LowFPR"),
-        ("balanced", "Balanced"),
-        ("low_miss_high_fpr", "LowMiss/HighFPR"),
-    ]:
-        thr = sweep_thresholds_out[name]
-        val_m = sweep_val_metrics[name]
-        gen_m = sweep_gen_metrics[name]
+    low_miss_top = sweep_info.get("low_miss_top", [])
+    low_fpr_top = sweep_info.get("low_fpr_top", [])
+    print(f"Top LowMiss thresholds (gen FPR<{args.threshold_sweep_low_miss_fpr_cap * 100:.0f}%):")
+    for entry in low_miss_top:
         print(
-            f"  {label} Val@thr={thr:.4f}: F1={val_m['f1']:.3f}, miss={val_m['miss_rate'] * 100:.2f}%, "
-            f"fpr={val_m['fpr'] * 100:.2f}%"
+            f"  thr={entry['threshold']:.4f} miss={entry['gen_miss'] * 100:.2f}% "
+            f"fpr={entry['gen_fpr'] * 100:.2f}% ROC={entry['roc']:.4f}"
         )
+    print(f"Top LowFPR thresholds (gen miss<{args.threshold_sweep_low_fpr_miss_cap * 100:.0f}%):")
+    for entry in low_fpr_top:
         print(
-            f"  {label} Generalization@thr={thr:.4f}: F1={gen_m['f1']:.3f}, miss={gen_m['miss_rate'] * 100:.2f}%, "
-            f"fpr={gen_m['fpr'] * 100:.2f}%"
+            f"  thr={entry['threshold']:.4f} miss={entry['gen_miss'] * 100:.2f}% "
+            f"fpr={entry['gen_fpr'] * 100:.2f}% ROC={entry['roc']:.4f}"
         )
 
     _write_log(
@@ -673,7 +648,7 @@ def main() -> None:
                 metrics["fpr"],
                 metrics["sensitivity"],
                 color=color_map.get(key, "black"),
-                label=f"{label_map.get(key, key)} thr={thr:.3f}",
+                label=f"{label_map.get(key, key)} thr={thr:.4f}",
                 zorder=5,
             )
 
