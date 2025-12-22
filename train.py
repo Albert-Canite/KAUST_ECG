@@ -772,6 +772,16 @@ def main() -> None:
     np.save(os.path.join("artifacts", "val_labels.npy"), np.array(val_true))
     np.save(os.path.join("artifacts", "gen_labels.npy"), np.array(gen_true))
 
+    sweep_csv_path = os.path.join("artifacts", "best_model_threshold_sweep.csv")
+    with open(sweep_csv_path, "w", encoding="utf-8") as f:
+        f.write("threshold,miss_rate,fpr\n")
+        for step in range(0, 1001):
+            thr = step / 1000.0
+            preds = (np.array(gen_probs) >= thr).astype(int).tolist()
+            metrics = confusion_metrics(gen_true, preds)
+            f.write(f"{thr:.3f},{metrics['miss_rate']:.6f},{metrics['fpr']:.6f}\n")
+    print(f"Saved threshold sweep metrics to {sweep_csv_path}")
+
     os.makedirs("saved_models", exist_ok=True)
     save_path = os.path.join("saved_models", "student_model.pth")
     torch.save(
