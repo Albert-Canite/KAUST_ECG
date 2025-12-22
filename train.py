@@ -527,6 +527,46 @@ def main() -> None:
             f"fpr={gen_m['fpr'] * 100:.2f}%"
         )
 
+    sweep_grid = np.arange(0.02, 0.9800001, args.threshold_sweep_step).tolist()
+    sweep_thresholds_out, sweep_val_metrics, sweep_gen_metrics, sweep_info = sweep_thresholds_three_level(
+        val_probs,
+        val_true,
+        gen_probs,
+        gen_true,
+        thresholds=sweep_grid,
+        balanced_miss_cap=args.threshold_sweep_balanced_miss_cap,
+        balanced_fpr_cap=args.threshold_sweep_balanced_fpr_cap,
+        low_miss_fpr_cap=args.threshold_sweep_low_miss_fpr_cap,
+        low_fpr_miss_cap=args.threshold_sweep_low_fpr_miss_cap,
+    )
+    sweep_warning = ""
+    if sweep_info.get("warning"):
+        sweep_warning = f" ({sweep_info['warning']})"
+    print(
+        "ConstrainedSweep "
+        f"Balanced miss<{args.threshold_sweep_balanced_miss_cap * 100:.0f}% "
+        f"fpr<{args.threshold_sweep_balanced_fpr_cap * 100:.0f}% | "
+        f"LowMiss fpr<{args.threshold_sweep_low_miss_fpr_cap * 100:.0f}% | "
+        f"LowFPR miss<{args.threshold_sweep_low_fpr_miss_cap * 100:.0f}% | "
+        f"step={args.threshold_sweep_step:.4f}{sweep_warning}"
+    )
+    for name, label in [
+        ("high_miss_low_fpr", "HighMiss/LowFPR"),
+        ("balanced", "Balanced"),
+        ("low_miss_high_fpr", "LowMiss/HighFPR"),
+    ]:
+        thr = sweep_thresholds_out[name]
+        val_m = sweep_val_metrics[name]
+        gen_m = sweep_gen_metrics[name]
+        print(
+            f"  {label} Val@thr={thr:.4f}: F1={val_m['f1']:.3f}, miss={val_m['miss_rate'] * 100:.2f}%, "
+            f"fpr={val_m['fpr'] * 100:.2f}%"
+        )
+        print(
+            f"  {label} Generalization@thr={thr:.4f}: F1={gen_m['f1']:.3f}, miss={gen_m['miss_rate'] * 100:.2f}%, "
+            f"fpr={gen_m['fpr'] * 100:.2f}%"
+        )
+
     _write_log(
         {
             "event": "final",
