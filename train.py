@@ -529,11 +529,11 @@ def main() -> None:
             )
         return records
 
-    fine_step = 0.0001
+    fine_step = 0.001
     fine_thresholds = np.round(np.arange(0.0, 1.0 + fine_step / 2, fine_step), 4).tolist()
     gen_records = _collect_threshold_records(gen_true, gen_probs, fine_thresholds)
 
-    low_miss_candidates = [r for r in gen_records if r["metrics"]["fpr"] < 0.2]
+    low_miss_candidates = [r for r in gen_records if r["metrics"]["fpr"] < 0.15]
     if not low_miss_candidates:
         low_miss_candidates = gen_records
     low_miss_top10 = sorted(
@@ -545,7 +545,7 @@ def main() -> None:
         ),
     )[:10]
 
-    low_fpr_candidates = [r for r in gen_records if r["metrics"]["miss_rate"] < 0.1]
+    low_fpr_candidates = [r for r in gen_records if r["metrics"]["miss_rate"] < 0.6]
     if not low_fpr_candidates:
         low_fpr_candidates = gen_records
     low_fpr_top10 = sorted(
