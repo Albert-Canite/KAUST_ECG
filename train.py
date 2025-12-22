@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 from datetime import datetime
@@ -529,13 +530,11 @@ def main() -> None:
             )
         return records
 
-    fine_step = 0.001
+    fine_step = 0.0001
     fine_thresholds = np.round(np.arange(0.0, 1.0 + fine_step / 2, fine_step), 4).tolist()
     gen_records = _collect_threshold_records(gen_true, gen_probs, fine_thresholds)
 
-    low_miss_candidates = [r for r in gen_records if r["metrics"]["fpr"] < 0.15]
-    if not low_miss_candidates:
-        low_miss_candidates = gen_records
+    low_miss_candidates = [r for r in gen_records if r["metrics"]["fpr"] < 0.2]
     low_miss_top10 = sorted(
         low_miss_candidates,
         key=lambda r: (
@@ -545,9 +544,7 @@ def main() -> None:
         ),
     )[:10]
 
-    low_fpr_candidates = [r for r in gen_records if r["metrics"]["miss_rate"] < 0.6]
-    if not low_fpr_candidates:
-        low_fpr_candidates = gen_records
+    low_fpr_candidates = [r for r in gen_records if r["metrics"]["miss_rate"] < 0.1]
     low_fpr_top10 = sorted(
         low_fpr_candidates,
         key=lambda r: (
@@ -558,6 +555,8 @@ def main() -> None:
     )[:10]
 
     balanced_pool = low_miss_top10 + low_fpr_top10
+    if not balanced_pool:
+        balanced_pool = gen_records
     balanced_record = max(
         balanced_pool,
         key=lambda r: (
@@ -567,12 +566,38 @@ def main() -> None:
         ),
     )
 
-    gen_low_miss_thr = low_miss_top10[0]["threshold"]
-    gen_low_miss_metrics = low_miss_top10[0]["metrics"]
+    coarse_step = 0.001
+    coarse_thresholds = np.round(np.arange(0.0, 1.0 + coarse_step / 2, coarse_step), 3).tolist()
+    coarse_records = _collect_threshold_records(gen_true, gen_probs, coarse_thresholds)
+    sweep_csv_path = os.path.join("artifacts", "gen_threshold_sweep.csv")
+    with open(sweep_csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["threshold", "miss_rate", "fpr"])
+        for record in coarse_records:
+            metrics = record["metrics"]
+            writer.writerow(
+                [
+                    f"{record['threshold']:.3f}",
+                    f"{metrics['miss_rate']:.6f}",
+                    f"{metrics['fpr']:.6f}",
+                ]
+            )
+    print(f"Saved gen threshold sweep CSV to {sweep_csv_path}")
+
+    if low_miss_top10:
+        gen_low_miss_thr = low_miss_top10[0]["threshold"]
+        gen_low_miss_metrics = low_miss_top10[0]["metrics"]
+    else:
+        gen_low_miss_thr = balanced_record["threshold"]
+        gen_low_miss_metrics = balanced_record["metrics"]
     gen_balanced_thr = balanced_record["threshold"]
     gen_balanced_metrics = balanced_record["metrics"]
-    gen_low_fpr_thr = low_fpr_top10[0]["threshold"]
-    gen_low_fpr_metrics = low_fpr_top10[0]["metrics"]
+    if low_fpr_top10:
+        gen_low_fpr_thr = low_fpr_top10[0]["threshold"]
+        gen_low_fpr_metrics = low_fpr_top10[0]["metrics"]
+    else:
+        gen_low_fpr_thr = balanced_record["threshold"]
+        gen_low_fpr_metrics = balanced_record["metrics"]
 
     _write_log(
         {
@@ -594,6 +619,8 @@ def main() -> None:
                 "low_fpr": {"threshold": gen_low_fpr_thr, "metrics": gen_low_fpr_metrics},
             },
             "gen_threshold_sweep": {
+                "sweep_csv": sweep_csv_path,
+                "low_miss_candidate_count": len(low_miss_candidates),
                 "low_miss_top10": [
                     {
                         "threshold": r["threshold"],
@@ -603,6 +630,7 @@ def main() -> None:
                     }
                     for r in low_miss_top10
                 ],
+                "low_fpr_candidate_count": len(low_fpr_candidates),
                 "low_fpr_top10": [
                     {
                         "threshold": r["threshold"],
@@ -629,19 +657,25 @@ def main() -> None:
     np.save(os.path.join("artifacts", "gen_labels.npy"), np.array(gen_true))
 
     print("Gen sweep (low-miss, FPR < 20%) top10:")
-    for idx, record in enumerate(low_miss_top10, start=1):
-        metrics = record["metrics"]
-        print(
-            f"  {idx:02d}. thr={record['threshold']:.4f} "
-            f"miss={metrics['miss_rate']:.4f} fpr={metrics['fpr']:.4f} roc={record['roc']:.4f}"
-        )
+    if low_miss_top10:
+        for idx, record in enumerate(low_miss_top10, start=1):
+            metrics = record["metrics"]
+            print(
+                f"  {idx:02d}. thr={record['threshold']:.4f} "
+                f"miss={metrics['miss_rate']:.4f} fpr={metrics['fpr']:.4f} roc={record['roc']:.4f}"
+            )
+    else:
+        print("  (no thresholds met FPR < 20% constraint)")
     print("Gen sweep (low-fpr, miss < 10%) top10:")
-    for idx, record in enumerate(low_fpr_top10, start=1):
-        metrics = record["metrics"]
-        print(
-            f"  {idx:02d}. thr={record['threshold']:.4f} "
-            f"miss={metrics['miss_rate']:.4f} fpr={metrics['fpr']:.4f} roc={record['roc']:.4f}"
-        )
+    if low_fpr_top10:
+        for idx, record in enumerate(low_fpr_top10, start=1):
+            metrics = record["metrics"]
+            print(
+                f"  {idx:02d}. thr={record['threshold']:.4f} "
+                f"miss={metrics['miss_rate']:.4f} fpr={metrics['fpr']:.4f} roc={record['roc']:.4f}"
+            )
+    else:
+        print("  (no thresholds met miss < 10% constraint)")
     print(
         f"Gen low-miss@thr={gen_low_miss_thr:.4f}: F1={gen_low_miss_metrics['f1']:.3f}, "
         f"miss={gen_low_miss_metrics['miss_rate'] * 100:.2f}%, fpr={gen_low_miss_metrics['fpr'] * 100:.2f}%"
