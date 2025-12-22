@@ -653,7 +653,6 @@ def sweep_thresholds_three_level(
                 c["gen_metrics"]["fpr"],
                 -c["gen_metrics"]["miss_rate"],
                 -c["gen_metrics"]["f1"],
-                c["val_metrics"]["fpr"],
             ),
         )[0]
 
@@ -681,7 +680,6 @@ def sweep_thresholds_three_level(
                 c["gen_metrics"]["miss_rate"],
                 -c["gen_metrics"]["fpr"],
                 -c["gen_metrics"]["f1"],
-                c["val_metrics"]["fpr"],
             ),
         )[0]
 

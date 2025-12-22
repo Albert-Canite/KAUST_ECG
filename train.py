@@ -226,6 +226,12 @@ def parse_args() -> argparse.Namespace:
         help="Step size for coarse threshold grid",
     )
     parser.add_argument(
+        "--threshold_sweep_step",
+        type=float,
+        default=0.0001,
+        help="Step size for post-training threshold sweeps",
+    )
+    parser.add_argument(
         "--threshold_sweep_balanced_miss_cap",
         type=float,
         default=0.05,
@@ -762,12 +768,13 @@ def main() -> None:
             f"miss={gen_metrics_miss_then_fpr_final['miss_rate'] * 100:.2f}%, fpr={gen_metrics_miss_then_fpr_final['fpr'] * 100:.2f}%{warn_flag}"
         )
 
+    sweep_grid = np.arange(0.02, 0.9800001, args.threshold_sweep_step).tolist()
     sweep_thresholds_out, sweep_val_metrics, sweep_gen_metrics, sweep_info = sweep_thresholds_three_level(
         val_probs,
         val_true,
         gen_probs,
         gen_true,
-        thresholds=threshold_grid,
+        thresholds=sweep_grid,
         balanced_miss_cap=args.threshold_sweep_balanced_miss_cap,
         balanced_fpr_cap=args.threshold_sweep_balanced_fpr_cap,
         low_miss_fpr_cap=args.threshold_sweep_low_miss_fpr_cap,
@@ -781,7 +788,8 @@ def main() -> None:
         f"Balanced miss<{args.threshold_sweep_balanced_miss_cap * 100:.0f}% "
         f"fpr<{args.threshold_sweep_balanced_fpr_cap * 100:.0f}% | "
         f"LowMiss fpr<{args.threshold_sweep_low_miss_fpr_cap * 100:.0f}% | "
-        f"LowFPR miss<{args.threshold_sweep_low_fpr_miss_cap * 100:.0f}%{sweep_warning}"
+        f"LowFPR miss<{args.threshold_sweep_low_fpr_miss_cap * 100:.0f}% | "
+        f"step={args.threshold_sweep_step:.4f}{sweep_warning}"
     )
     for name, label in [
         ("high_miss_low_fpr", "HighMiss/LowFPR"),
@@ -792,11 +800,11 @@ def main() -> None:
         val_m = sweep_val_metrics[name]
         gen_m = sweep_gen_metrics[name]
         print(
-            f"  {label} Val@thr={thr:.3f}: F1={val_m['f1']:.3f}, miss={val_m['miss_rate'] * 100:.2f}%, "
+            f"  {label} Val@thr={thr:.4f}: F1={val_m['f1']:.3f}, miss={val_m['miss_rate'] * 100:.2f}%, "
             f"fpr={val_m['fpr'] * 100:.2f}%"
         )
         print(
-            f"  {label} Generalization@thr={thr:.3f}: F1={gen_m['f1']:.3f}, miss={gen_m['miss_rate'] * 100:.2f}%, "
+            f"  {label} Generalization@thr={thr:.4f}: F1={gen_m['f1']:.3f}, miss={gen_m['miss_rate'] * 100:.2f}%, "
             f"fpr={gen_m['fpr'] * 100:.2f}%"
         )
 
@@ -891,6 +899,46 @@ def main() -> None:
         fig.savefig(os.path.join("artifacts", f"roc_{name.lower()}.png"))
         plt.close(fig)
 
+    def _save_threshold_roc(
+        y_true: List[int],
+        probs: List[float],
+        thresholds: Dict[str, float],
+        name: str,
+    ) -> None:
+        fpr, tpr, _ = roc_curve(y_true, probs)
+        roc_auc = auc(fpr, tpr)
+        fig, ax = plt.subplots(figsize=(5, 4))
+        ax.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
+        ax.plot([0, 1], [0, 1], "k--", alpha=0.4)
+
+        color_map = {
+            "high_miss_low_fpr": "tab:blue",
+            "balanced": "tab:orange",
+            "low_miss_high_fpr": "tab:green",
+        }
+        label_map = {
+            "high_miss_low_fpr": "HighMiss/LowFPR",
+            "balanced": "Balanced",
+            "low_miss_high_fpr": "LowMiss/HighFPR",
+        }
+        for key, thr in thresholds.items():
+            preds = (np.array(probs) >= thr).astype(int).tolist()
+            metrics = confusion_metrics(y_true, preds)
+            ax.scatter(
+                metrics["fpr"],
+                metrics["sensitivity"],
+                color=color_map.get(key, "black"),
+                label=f"{label_map.get(key, key)} thr={thr:.3f}",
+                zorder=5,
+            )
+
+        ax.set_xlabel("False Positive Rate")
+        ax.set_ylabel("True Positive Rate")
+        ax.set_title(f"ROC Threshold Comparison - {name}")
+        ax.legend()
+        fig.savefig(os.path.join("artifacts", f"roc_thresholds_{name.lower()}.png"))
+        plt.close(fig)
+
     def _save_confusion(y_true: List[int], y_pred: List[int], name: str) -> None:
         cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
         fig, ax = plt.subplots(figsize=(4, 4))
@@ -910,6 +958,7 @@ def main() -> None:
     _save_training_curves()
     _save_roc(val_true, val_probs, "Val")
     _save_roc(gen_true, gen_probs, "Generalization")
+    _save_threshold_roc(gen_true, gen_probs, sweep_thresholds_out, "Generalization")
     _save_confusion(val_true, val_pred, "Val")
     _save_confusion(gen_true, gen_pred, "Generalization")
     print("Saved training curves, ROC curves, and confusion matrices to ./artifacts")
