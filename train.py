@@ -5,7 +5,7 @@ import argparse
 import json
 import os
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -24,8 +24,11 @@ from utils import (
     compute_class_weights,
     confusion_metrics,
     make_weighted_sampler,
+    build_threshold_grid,
+    sweep_thresholds,
+    sweep_thresholds_min_fpr,
+    sweep_thresholds_min_miss,
     sweep_thresholds_blended,
-    sweep_thresholds_three_level,
 )
 
 
@@ -180,47 +183,34 @@ def parse_args() -> argparse.Namespace:
         help="Miss-rate penalty applied to generalization metrics during threshold sweeps",
     )
     parser.add_argument(
-        "--early_stop_metric",
-        type=str,
-        choices=["balanced"],
-        default="balanced",
-        help="Early stopping metric preference",
+        "--gen_threshold",
+        type=float,
+        default=None,
+        help="Explicit threshold override for generalization metrics",
     )
     parser.add_argument(
-        "--threshold_grid_step",
+        "--gen_threshold_target_miss",
         type=float,
-        default=0.01,
-        help="Step size for coarse threshold grid",
+        default=None,
+        help="Target miss rate for sweeping a generalization-only threshold (defaults to val miss * gen_threshold_tighten_factor)",
     )
     parser.add_argument(
-        "--threshold_sweep_step",
+        "--gen_threshold_max_fpr",
         type=float,
-        default=0.0001,
-        help="Step size for post-training threshold sweeps",
+        default=None,
+        help="Max FPR allowed when sweeping a generalization-only threshold (defaults to max(val fpr, threshold_max_fpr))",
     )
     parser.add_argument(
-        "--threshold_sweep_balanced_miss_cap",
+        "--gen_threshold_tighten_factor",
         type=float,
-        default=0.05,
-        help="Miss-rate cap for balanced post-training threshold sweep",
+        default=0.7,
+        help="Scale factor (<1 tightens miss target) applied to val miss for auto gen threshold sweep",
     )
     parser.add_argument(
-        "--threshold_sweep_balanced_fpr_cap",
+        "--gen_threshold_fpr_relax_factor",
         type=float,
-        default=0.12,
-        help="FPR cap for balanced post-training threshold sweep",
-    )
-    parser.add_argument(
-        "--threshold_sweep_low_miss_fpr_cap",
-        type=float,
-        default=0.20,
-        help="FPR cap for low-miss/high-FPR threshold sweep",
-    )
-    parser.add_argument(
-        "--threshold_sweep_low_fpr_miss_cap",
-        type=float,
-        default=0.10,
-        help="Miss-rate cap for high-miss/low-FPR threshold sweep",
+        default=1.25,
+        help="Scale factor (>1 relaxes auto gen FPR cap) applied to max(val fpr, threshold_max_fpr)",
     )
     parser.add_argument("--seed", type=int, default=42)
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
@@ -330,7 +320,6 @@ def main() -> None:
     patience_counter = 0
 
     history: List[Dict[str, float]] = []
-    threshold_grid = np.arange(0.02, 0.9800001, args.threshold_grid_step).tolist()
 
     for epoch in range(1, args.max_epochs + 1):
         student.train()
@@ -381,7 +370,6 @@ def main() -> None:
             gen_miss_penalty=args.threshold_gen_miss_penalty,
             miss_target=args.threshold_target_miss,
             fpr_cap=args.threshold_max_fpr,
-            thresholds=threshold_grid,
         )
 
         miss_ema = 0.8 * miss_ema + 0.2 * val_metrics["miss_rate"]
@@ -390,9 +378,10 @@ def main() -> None:
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
-            f"Balanced Thr {best_thr_epoch:.3f} | Val F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}% | "
-            f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}%"
+            f"Val F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}% | "
+            f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}% | Thr {best_thr_epoch:.2f}"
         )
+
         history.append(
             {
                 "epoch": epoch,
@@ -429,6 +418,7 @@ def main() -> None:
             best_state = student.state_dict()
             best_threshold = best_thr_epoch
             patience_counter = 0
+            print("  -> New best model saved.")
             _write_log(
                 {
                     "event": "best",
@@ -440,17 +430,13 @@ def main() -> None:
                     "gen_miss": gen_metrics["miss_rate"],
                     "gen_fpr": gen_metrics["fpr"],
                     "threshold": best_thr_epoch,
-                    "type": "balanced",
                 }
             )
         else:
             patience_counter += 1
-
-        allow_stop = patience_counter >= args.patience and epoch >= args.min_epochs
-
-        if allow_stop:
-            print("Early stopping triggered.")
-            break
+            if patience_counter >= args.patience and epoch >= args.min_epochs:
+                print("Early stopping triggered.")
+                break
 
     if best_state is not None:
         student.load_state_dict(best_state)
@@ -474,78 +460,78 @@ def main() -> None:
         gen_miss_penalty=args.threshold_gen_miss_penalty,
         miss_target=args.threshold_target_miss,
         fpr_cap=args.threshold_max_fpr,
-        thresholds=threshold_grid,
     )
     val_pred = (np.array(val_probs) >= best_threshold).astype(int).tolist()
-    gen_pred = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
+    gen_threshold = best_threshold
+    gen_threshold_source = "blended"
+    if args.gen_threshold is not None:
+        gen_threshold = args.gen_threshold
+        gen_threshold_source = "manual"
+        gen_pred = (np.array(gen_probs) >= gen_threshold).astype(int).tolist()
+        gen_metrics = confusion_metrics(gen_true, gen_pred)
+    else:
+        auto_miss_target = max(0.0, val_metrics["miss_rate"] * args.gen_threshold_tighten_factor)
+        auto_fpr_cap = max(val_metrics["fpr"], args.threshold_max_fpr) * args.gen_threshold_fpr_relax_factor
+        miss_target = args.gen_threshold_target_miss
+        fpr_cap = args.gen_threshold_max_fpr
+        use_auto = miss_target is None and fpr_cap is None
+        if use_auto:
+            miss_target = auto_miss_target
+            fpr_cap = auto_fpr_cap
+        if miss_target is not None or fpr_cap is not None:
+            if use_auto:
+                gen_threshold, gen_metrics = sweep_thresholds_min_miss(
+                    gen_true,
+                    gen_probs,
+                    fpr_cap=fpr_cap,
+                )
+                gen_threshold_source = "auto_sweep"
+            else:
+                gen_threshold, gen_metrics = sweep_thresholds(
+                    gen_true,
+                    gen_probs,
+                    miss_target=miss_target,
+                    fpr_cap=fpr_cap,
+                )
+                gen_threshold_source = "sweep"
+            gen_pred = (np.array(gen_probs) >= gen_threshold).astype(int).tolist()
+        else:
+            gen_pred = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
 
     print(
-        f"Final Val@thr={best_threshold:.4f}: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, "
+        f"Final Val@thr={best_threshold:.2f}: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, "
         f"miss={val_metrics['miss_rate'] * 100:.2f}%, fpr={val_metrics['fpr'] * 100:.2f}%"
     )
     print(
-        f"Generalization@thr={best_threshold:.4f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, "
+        f"Generalization@thr={gen_threshold:.2f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, "
         f"miss={gen_metrics['miss_rate'] * 100:.2f}%, fpr={gen_metrics['fpr'] * 100:.2f}%"
     )
-    sweep_grid = np.arange(0.02, 0.9800001, args.threshold_sweep_step).tolist()
-    sweep_thresholds_out, sweep_val_metrics, sweep_gen_metrics, sweep_info = sweep_thresholds_three_level(
-        val_probs,
-        val_true,
-        gen_probs,
-        gen_true,
-        thresholds=sweep_grid,
-        balanced_miss_cap=args.threshold_sweep_balanced_miss_cap,
-        balanced_fpr_cap=args.threshold_sweep_balanced_fpr_cap,
-        low_miss_fpr_cap=args.threshold_sweep_low_miss_fpr_cap,
-        low_fpr_miss_cap=args.threshold_sweep_low_fpr_miss_cap,
-    )
-    sweep_warning = ""
-    if sweep_info.get("warning"):
-        sweep_warning = f" ({sweep_info['warning']})"
-    print(
-        "ConstrainedSweep "
-        f"Balanced miss<{args.threshold_sweep_balanced_miss_cap * 100:.0f}% "
-        f"fpr<{args.threshold_sweep_balanced_fpr_cap * 100:.0f}% | "
-        f"LowMiss fpr<{args.threshold_sweep_low_miss_fpr_cap * 100:.0f}% | "
-        f"LowFPR miss<{args.threshold_sweep_low_fpr_miss_cap * 100:.0f}% | "
-        f"step={args.threshold_sweep_step:.4f}{sweep_warning}"
-    )
-    for name, label in [
-        ("high_miss_low_fpr", "HighMiss/LowFPR"),
-        ("balanced", "Balanced"),
-        ("low_miss_high_fpr", "LowMiss/HighFPR"),
-    ]:
-        thr = sweep_thresholds_out[name]
-        val_m = sweep_val_metrics[name]
-        gen_m = sweep_gen_metrics[name]
-        print(
-            f"  {label} Val@thr={thr:.4f}: F1={val_m['f1']:.3f}, miss={val_m['miss_rate'] * 100:.2f}%, "
-            f"fpr={val_m['fpr'] * 100:.2f}%"
-        )
-        print(
-            f"  {label} Generalization@thr={thr:.4f}: F1={gen_m['f1']:.3f}, miss={gen_m['miss_rate'] * 100:.2f}%, "
-            f"fpr={gen_m['fpr'] * 100:.2f}%"
-        )
+    print(f"Generalization threshold source: {gen_threshold_source}")
 
-    low_miss_top = sweep_info.get("low_miss_top", [])
-    low_fpr_top = sweep_info.get("low_fpr_top", [])
-    print(f"Top LowMiss thresholds (gen FPR<{args.threshold_sweep_low_miss_fpr_cap * 100:.0f}%):")
-    for entry in low_miss_top:
-        print(
-            f"  thr={entry['threshold']:.4f} miss={entry['gen_miss'] * 100:.2f}% "
-            f"fpr={entry['gen_fpr'] * 100:.2f}% ROC={entry['roc']:.4f}"
-        )
-    print(f"Top LowFPR thresholds (gen miss<{args.threshold_sweep_low_fpr_miss_cap * 100:.0f}%):")
-    for entry in low_fpr_top:
-        print(
-            f"  thr={entry['threshold']:.4f} miss={entry['gen_miss'] * 100:.2f}% "
-            f"fpr={entry['gen_fpr'] * 100:.2f}% ROC={entry['roc']:.4f}"
-        )
+    gen_low_miss_thr, gen_low_miss_metrics = sweep_thresholds_min_miss(
+        gen_true,
+        gen_probs,
+        thresholds=build_threshold_grid(gen_probs, best_threshold, window=0.2, num_points=201),
+        fpr_cap=0.12,
+    )
+    gen_balanced_thr, gen_balanced_metrics = sweep_thresholds(
+        gen_true,
+        gen_probs,
+        thresholds=build_threshold_grid(gen_probs, best_threshold, window=0.2, num_points=201),
+    )
+    gen_low_fpr_thr, gen_low_fpr_metrics = sweep_thresholds_min_fpr(
+        gen_true,
+        gen_probs,
+        thresholds=build_threshold_grid(gen_probs, best_threshold, window=0.2, num_points=201),
+        miss_cap=0.05,
+    )
 
     _write_log(
         {
             "event": "final",
             "best_threshold": best_threshold,
+            "gen_threshold": gen_threshold,
+            "gen_threshold_source": gen_threshold_source,
             "val_loss": val_loss,
             "val_f1": val_metrics["f1"],
             "val_miss": val_metrics["miss_rate"],
@@ -554,10 +540,11 @@ def main() -> None:
             "gen_f1": gen_metrics["f1"],
             "gen_miss": gen_metrics["miss_rate"],
             "gen_fpr": gen_metrics["fpr"],
-            "constrained_sweep_thresholds": sweep_thresholds_out,
-            "constrained_sweep_val": sweep_val_metrics,
-            "constrained_sweep_gen": sweep_gen_metrics,
-            "constrained_sweep_info": sweep_info,
+            "gen_threshold_options": {
+                "low_miss": {"threshold": gen_low_miss_thr, "metrics": gen_low_miss_metrics},
+                "balanced": {"threshold": gen_balanced_thr, "metrics": gen_balanced_metrics},
+                "low_fpr": {"threshold": gen_low_fpr_thr, "metrics": gen_low_fpr_metrics},
+            },
         }
     )
 
@@ -567,6 +554,19 @@ def main() -> None:
     np.save(os.path.join("artifacts", "val_labels.npy"), np.array(val_true))
     np.save(os.path.join("artifacts", "gen_labels.npy"), np.array(gen_true))
 
+    print(
+        f"Gen low-miss@thr={gen_low_miss_thr:.2f}: F1={gen_low_miss_metrics['f1']:.3f}, "
+        f"miss={gen_low_miss_metrics['miss_rate'] * 100:.2f}%, fpr={gen_low_miss_metrics['fpr'] * 100:.2f}%"
+    )
+    print(
+        f"Gen balanced@thr={gen_balanced_thr:.2f}: F1={gen_balanced_metrics['f1']:.3f}, "
+        f"miss={gen_balanced_metrics['miss_rate'] * 100:.2f}%, fpr={gen_balanced_metrics['fpr'] * 100:.2f}%"
+    )
+    print(
+        f"Gen low-fpr@thr={gen_low_fpr_thr:.2f}: F1={gen_low_fpr_metrics['f1']:.3f}, "
+        f"miss={gen_low_fpr_metrics['miss_rate'] * 100:.2f}%, fpr={gen_low_fpr_metrics['fpr'] * 100:.2f}%"
+    )
+
     os.makedirs("saved_models", exist_ok=True)
     save_path = os.path.join("saved_models", "student_model.pth")
     torch.save(
@@ -574,6 +574,12 @@ def main() -> None:
             "student_state_dict": student.state_dict(),
             "config": vars(args),
             "best_threshold": best_threshold,
+            "gen_threshold": gen_threshold,
+            "gen_threshold_options": {
+                "low_miss": {"threshold": gen_low_miss_thr, "metrics": gen_low_miss_metrics},
+                "balanced": {"threshold": gen_balanced_thr, "metrics": gen_balanced_metrics},
+                "low_fpr": {"threshold": gen_low_fpr_thr, "metrics": gen_low_fpr_metrics},
+            },
         },
         save_path,
     )
@@ -619,46 +625,6 @@ def main() -> None:
         fig.savefig(os.path.join("artifacts", f"roc_{name.lower()}.png"))
         plt.close(fig)
 
-    def _save_threshold_roc(
-        y_true: List[int],
-        probs: List[float],
-        thresholds: Dict[str, float],
-        name: str,
-    ) -> None:
-        fpr, tpr, _ = roc_curve(y_true, probs)
-        roc_auc = auc(fpr, tpr)
-        fig, ax = plt.subplots(figsize=(5, 4))
-        ax.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
-        ax.plot([0, 1], [0, 1], "k--", alpha=0.4)
-
-        color_map = {
-            "high_miss_low_fpr": "tab:blue",
-            "balanced": "tab:orange",
-            "low_miss_high_fpr": "tab:green",
-        }
-        label_map = {
-            "high_miss_low_fpr": "HighMiss/LowFPR",
-            "balanced": "Balanced",
-            "low_miss_high_fpr": "LowMiss/HighFPR",
-        }
-        for key, thr in thresholds.items():
-            preds = (np.array(probs) >= thr).astype(int).tolist()
-            metrics = confusion_metrics(y_true, preds)
-            ax.scatter(
-                metrics["fpr"],
-                metrics["sensitivity"],
-                color=color_map.get(key, "black"),
-                label=f"{label_map.get(key, key)} thr={thr:.4f}",
-                zorder=5,
-            )
-
-        ax.set_xlabel("False Positive Rate")
-        ax.set_ylabel("True Positive Rate")
-        ax.set_title(f"ROC Threshold Comparison - {name}")
-        ax.legend()
-        fig.savefig(os.path.join("artifacts", f"roc_thresholds_{name.lower()}.png"))
-        plt.close(fig)
-
     def _save_confusion(y_true: List[int], y_pred: List[int], name: str) -> None:
         cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
         fig, ax = plt.subplots(figsize=(4, 4))
@@ -678,7 +644,6 @@ def main() -> None:
     _save_training_curves()
     _save_roc(val_true, val_probs, "Val")
     _save_roc(gen_true, gen_probs, "Generalization")
-    _save_threshold_roc(gen_true, gen_probs, sweep_thresholds_out, "Generalization")
     _save_confusion(val_true, val_pred, "Val")
     _save_confusion(gen_true, gen_pred, "Generalization")
     print("Saved training curves, ROC curves, and confusion matrices to ./artifacts")
