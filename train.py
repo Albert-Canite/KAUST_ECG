@@ -226,16 +226,28 @@ def parse_args() -> argparse.Namespace:
         help="Step size for coarse threshold grid",
     )
     parser.add_argument(
-        "--threshold_sweep_miss_cap",
+        "--threshold_sweep_balanced_miss_cap",
         type=float,
         default=0.05,
-        help="Miss-rate cap for post-training threshold sweeps",
+        help="Miss-rate cap for balanced post-training threshold sweep",
     )
     parser.add_argument(
-        "--threshold_sweep_fpr_cap",
+        "--threshold_sweep_balanced_fpr_cap",
         type=float,
         default=0.12,
-        help="FPR cap for post-training threshold sweeps",
+        help="FPR cap for balanced post-training threshold sweep",
+    )
+    parser.add_argument(
+        "--threshold_sweep_low_miss_fpr_cap",
+        type=float,
+        default=0.20,
+        help="FPR cap for low-miss/high-FPR threshold sweep",
+    )
+    parser.add_argument(
+        "--threshold_sweep_low_fpr_miss_cap",
+        type=float,
+        default=0.10,
+        help="Miss-rate cap for high-miss/low-FPR threshold sweep",
     )
     _add_bool_arg(parser, "threshold_refine", default=True, help_text="refine thresholds near the best candidate")
     parser.add_argument("--seed", type=int, default=42)
@@ -756,15 +768,20 @@ def main() -> None:
         gen_probs,
         gen_true,
         thresholds=threshold_grid,
-        miss_cap=args.threshold_sweep_miss_cap,
-        fpr_cap=args.threshold_sweep_fpr_cap,
+        balanced_miss_cap=args.threshold_sweep_balanced_miss_cap,
+        balanced_fpr_cap=args.threshold_sweep_balanced_fpr_cap,
+        low_miss_fpr_cap=args.threshold_sweep_low_miss_fpr_cap,
+        low_fpr_miss_cap=args.threshold_sweep_low_fpr_miss_cap,
     )
     sweep_warning = ""
     if sweep_info.get("warning"):
         sweep_warning = f" ({sweep_info['warning']})"
     print(
-        f"ConstrainedSweep miss<{args.threshold_sweep_miss_cap * 100:.0f}% "
-        f"fpr<{args.threshold_sweep_fpr_cap * 100:.0f}%{sweep_warning}"
+        "ConstrainedSweep "
+        f"Balanced miss<{args.threshold_sweep_balanced_miss_cap * 100:.0f}% "
+        f"fpr<{args.threshold_sweep_balanced_fpr_cap * 100:.0f}% | "
+        f"LowMiss fpr<{args.threshold_sweep_low_miss_fpr_cap * 100:.0f}% | "
+        f"LowFPR miss<{args.threshold_sweep_low_fpr_miss_cap * 100:.0f}%{sweep_warning}"
     )
     for name, label in [
         ("high_miss_low_fpr", "HighMiss/LowFPR"),

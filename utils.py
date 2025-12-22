@@ -589,15 +589,17 @@ def sweep_thresholds_three_level(
     gen_probs: List[float],
     gen_labels: List[int],
     thresholds: List[float] | None = None,
-    miss_cap: float = 0.05,
-    fpr_cap: float = 0.12,
+    balanced_miss_cap: float = 0.05,
+    balanced_fpr_cap: float = 0.12,
+    low_miss_fpr_cap: float = 0.20,
+    low_fpr_miss_cap: float = 0.10,
 ) -> Tuple[Dict[str, float], Dict[str, Dict[str, float]], Dict[str, Dict[str, float]], Dict[str, object]]:
     """Return three threshold tiers under miss/FPR caps for generalization metrics.
 
     Tiers:
-        - high_miss_low_fpr: minimize gen FPR (allowing higher miss within cap).
-        - balanced: trade-off using a blended score of F1, miss, and FPR.
-        - low_miss_high_fpr: minimize gen miss (allowing higher FPR within cap).
+        - high_miss_low_fpr: minimize gen FPR with miss <= low_fpr_miss_cap.
+        - balanced: maximize balanced score with miss <= balanced_miss_cap and fpr <= balanced_fpr_cap.
+        - low_miss_high_fpr: minimize gen miss with fpr <= low_miss_fpr_cap.
     """
 
     if thresholds is None:
@@ -620,15 +622,29 @@ def sweep_thresholds_three_level(
             }
         )
 
-    constrained = [
+    balanced_candidates = [
         c
         for c in candidates
-        if c["gen_metrics"]["miss_rate"] <= miss_cap and c["gen_metrics"]["fpr"] <= fpr_cap
+        if c["gen_metrics"]["miss_rate"] <= balanced_miss_cap
+        and c["gen_metrics"]["fpr"] <= balanced_fpr_cap
     ]
+    low_miss_candidates = [c for c in candidates if c["gen_metrics"]["fpr"] <= low_miss_fpr_cap]
+    low_fpr_candidates = [c for c in candidates if c["gen_metrics"]["miss_rate"] <= low_fpr_miss_cap]
+
     warning = None
-    if not constrained:
-        warning = "no threshold satisfied miss/fpr caps; using unconstrained candidates"
-        constrained = candidates
+    if not balanced_candidates:
+        warning = "no threshold satisfied balanced miss/fpr caps; using unconstrained candidates for balanced tier"
+        balanced_candidates = candidates
+    if not low_miss_candidates:
+        warning = (
+            (warning + " | ") if warning else ""
+        ) + "no threshold satisfied low-miss fpr cap; using unconstrained candidates for low-miss tier"
+        low_miss_candidates = candidates
+    if not low_fpr_candidates:
+        warning = (
+            (warning + " | ") if warning else ""
+        ) + "no threshold satisfied low-fpr miss cap; using unconstrained candidates for low-fpr tier"
+        low_fpr_candidates = candidates
 
     def _pick_high_miss_low_fpr(entries: List[Dict[str, object]]) -> Dict[str, object]:
         return sorted(
@@ -644,8 +660,8 @@ def sweep_thresholds_three_level(
     def _pick_balanced(entries: List[Dict[str, object]]) -> Dict[str, object]:
         def _score(c: Dict[str, object]) -> float:
             gen = c["gen_metrics"]
-            miss_norm = gen["miss_rate"] / max(miss_cap, 1e-8)
-            fpr_norm = gen["fpr"] / max(fpr_cap, 1e-8)
+            miss_norm = gen["miss_rate"] / max(balanced_miss_cap, 1e-8)
+            fpr_norm = gen["fpr"] / max(balanced_fpr_cap, 1e-8)
             return gen["f1"] - 0.5 * miss_norm - 0.5 * fpr_norm
 
         return max(
@@ -670,20 +686,24 @@ def sweep_thresholds_three_level(
         )[0]
 
     selections = {
-        "high_miss_low_fpr": _pick_high_miss_low_fpr(constrained),
-        "balanced": _pick_balanced(constrained),
-        "low_miss_high_fpr": _pick_low_miss_high_fpr(constrained),
+        "high_miss_low_fpr": _pick_high_miss_low_fpr(low_fpr_candidates),
+        "balanced": _pick_balanced(balanced_candidates),
+        "low_miss_high_fpr": _pick_low_miss_high_fpr(low_miss_candidates),
     }
 
     thresholds_out = {k: float(v["threshold"]) for k, v in selections.items()}
     val_metrics_out = {k: v["val_metrics"] for k, v in selections.items()}
     gen_metrics_out = {k: v["gen_metrics"] for k, v in selections.items()}
     info = {
-        "miss_cap": miss_cap,
-        "fpr_cap": fpr_cap,
+        "balanced_miss_cap": balanced_miss_cap,
+        "balanced_fpr_cap": balanced_fpr_cap,
+        "low_miss_fpr_cap": low_miss_fpr_cap,
+        "low_fpr_miss_cap": low_fpr_miss_cap,
         "warning": warning,
         "candidates": len(candidates),
-        "constrained_candidates": len(constrained),
+        "balanced_candidates": len(balanced_candidates),
+        "low_miss_candidates": len(low_miss_candidates),
+        "low_fpr_candidates": len(low_fpr_candidates),
     }
 
     return thresholds_out, val_metrics_out, gen_metrics_out, info
