@@ -64,17 +64,32 @@ def quantize_model_weights(model: SegmentAwareStudent, bits: int) -> SegmentAwar
     return quantized
 
 
+def _collect_peak_windows(beat: np.ndarray, baseline: float, peak_window: int, min_prominence: float) -> List[tuple[int, int]]:
+    windows: List[tuple[int, int]] = []
+    for idx in range(1, len(beat) - 1):
+        if beat[idx] > beat[idx - 1] and beat[idx] >= beat[idx + 1] and abs(beat[idx] - baseline) >= min_prominence:
+            start = max(0, idx - peak_window)
+            end = min(len(beat), idx + peak_window + 1)
+            windows.append((start, end))
+    if not windows:
+        peak_idx = int(np.argmax(np.abs(beat - baseline)))
+        start = max(0, peak_idx - peak_window)
+        end = min(len(beat), peak_idx + peak_window + 1)
+        windows.append((start, end))
+    return windows
+
+
 def attenuate_pbr(
     beat: np.ndarray,
     factor: float,
     peak_window: int = 12,
+    min_prominence: float = 0.05,
 ) -> np.ndarray:
     baseline = float(np.median(beat))
-    peak_idx = int(np.argmax(np.abs(beat - baseline)))
-    start = max(0, peak_idx - peak_window)
-    end = min(len(beat), peak_idx + peak_window + 1)
+    windows = _collect_peak_windows(beat, baseline, peak_window, min_prominence)
     adjusted = beat.copy()
-    adjusted[start:end] = baseline + factor * (adjusted[start:end] - baseline)
+    for start, end in windows:
+        adjusted[start:end] = baseline + factor * (adjusted[start:end] - baseline)
     return adjusted
 
 
@@ -82,9 +97,10 @@ def apply_pbr_attenuation(
     beats: torch.Tensor,
     factor: float,
     peak_window: int = 12,
+    min_prominence: float = 0.05,
 ) -> torch.Tensor:
     beats_np = beats.squeeze(1).cpu().numpy()
-    adjusted = np.stack([attenuate_pbr(b, factor, peak_window) for b in beats_np], axis=0)
+    adjusted = np.stack([attenuate_pbr(b, factor, peak_window, min_prominence) for b in beats_np], axis=0)
     adjusted = torch.from_numpy(adjusted).unsqueeze(1)
     return adjusted
 
@@ -113,6 +129,7 @@ def evaluate_model(
     pbr_factor: float,
     input_bits: int,
     peak_window: int,
+    min_prominence: float,
 ) -> Dict[str, float]:
     preds: List[int] = []
     trues: List[int] = []
@@ -120,7 +137,7 @@ def evaluate_model(
         for signals, labels in data_loader:
             signals = signals.to(device)
             labels = labels.to(device)
-            adjusted = apply_pbr_attenuation(signals, pbr_factor, peak_window).to(device)
+            adjusted = apply_pbr_attenuation(signals, pbr_factor, peak_window, min_prominence).to(device)
             adjusted = quantize_beats(adjusted, input_bits)
             logits, _ = model(adjusted)
             prob_pos = torch.softmax(logits, dim=1)[:, 1]
@@ -151,18 +168,21 @@ def plot_pbr_examples(
     output_path: str,
     pbr_values: List[float],
     peak_window: int,
+    min_prominence: float,
 ) -> None:
     titles = [f"{val:.1f}" for val in pbr_values]
     fig, axes = plt.subplots(2, 5, figsize=(14, 6), sharex=True, sharey=True)
     axes = axes.flatten()
 
     for idx, val in enumerate(pbr_values):
-        adjusted = attenuate_pbr(beat, val, peak_window)
+        adjusted = attenuate_pbr(beat, val, peak_window, min_prominence)
         axes[idx].plot(adjusted, linewidth=1.0)
         axes[idx].set_title(f"PBR {titles[idx]}")
+        axes[idx].set_ylim(0.0, 1.1)
 
     for ax in axes:
         ax.grid(True, linestyle="--", alpha=0.3)
+        ax.set_ylim(0.0, 1.1)
 
     fig.suptitle("Normal Beat with PBR Attenuation")
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
@@ -185,6 +205,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input_bits", type=int, default=8)
     parser.add_argument("--weight_bits", type=int, default=8)
     parser.add_argument("--peak_window", type=int, default=12)
+    parser.add_argument("--min_prominence", type=float, default=0.05, help="Minimum absolute prominence for peak detection")
     parser.add_argument("--output", type=str, default="artifacts/quantization_pbr_rates.png")
     parser.add_argument("--example_output", type=str, default="artifacts/quantization_pbr_examples.png")
     return parser.parse_args()
@@ -212,7 +233,7 @@ def main() -> None:
     pbr_values = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]
 
     os.makedirs(os.path.dirname(args.example_output) or ".", exist_ok=True)
-    plot_pbr_examples(normal_beat, args.example_output, pbr_values, args.peak_window)
+    plot_pbr_examples(normal_beat, args.example_output, pbr_values, args.peak_window, args.min_prominence)
     print(f"Saved PBR example plot to {args.example_output}")
 
     sweep_values = pbr_values[1:]
@@ -227,6 +248,7 @@ def main() -> None:
             val,
             args.input_bits,
             args.peak_window,
+            args.min_prominence,
         )
         fnr_list.append(metrics["miss_rate"])
         fpr_list.append(metrics["fpr"])
