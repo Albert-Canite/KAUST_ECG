@@ -72,6 +72,32 @@ def add_gaussian_noise_snr(x: torch.Tensor, snr_db: float) -> torch.Tensor:
     return x + noise
 
 
+def plot_noise_examples(
+    beat: torch.Tensor,
+    output_path: str,
+    snr_values: List[float],
+) -> None:
+    titles = ["Clean"] + [f"{snr:.0f} dB" for snr in snr_values]
+    fig, axes = plt.subplots(2, 3, figsize=(12, 6), sharex=True, sharey=True)
+    axes = axes.flatten()
+
+    axes[0].plot(beat.squeeze().cpu().numpy(), linewidth=1.0)
+    axes[0].set_title(titles[0])
+
+    for idx, snr in enumerate(snr_values, start=1):
+        noisy = add_gaussian_noise_snr(beat, snr)
+        axes[idx].plot(noisy.squeeze().cpu().numpy(), linewidth=1.0)
+        axes[idx].set_title(titles[idx])
+
+    for ax in axes:
+        ax.grid(True, linestyle="--", alpha=0.3)
+
+    fig.suptitle("Normal Beat with Gaussian Noise")
+    fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
 def load_student(model_path: str, device: torch.device) -> SegmentAwareStudent:
     checkpoint = torch.load(model_path, map_location=device)
     config = checkpoint.get("config", {})
@@ -146,6 +172,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--snr_max", type=float, default=40.0)
     parser.add_argument("--snr_step", type=float, default=5.0)
     parser.add_argument("--output", type=str, default="artifacts/quantization_noise_rates.png")
+    parser.add_argument("--example_output", type=str, default="artifacts/quantization_noise_examples.png")
     return parser.parse_args()
 
 
@@ -163,6 +190,15 @@ def main() -> None:
 
     dataset = ECGBeatDataset(beats, labels)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
+
+    normal_indices = (labels == 0).nonzero()[0]
+    if normal_indices.size == 0:
+        raise RuntimeError("No normal beats found in gen dataset for noise example plot.")
+    normal_beat = torch.from_numpy(beats[int(normal_indices[0])]).reshape(1, 1, -1)
+    example_snrs = [40.0, 30.0, 20.0, 10.0, 0.0]
+    os.makedirs(os.path.dirname(args.example_output) or ".", exist_ok=True)
+    plot_noise_examples(normal_beat, args.example_output, example_snrs)
+    print(f"Saved noise example plot to {args.example_output}")
 
     snr_list = []
     fnr_list: List[float] = []
