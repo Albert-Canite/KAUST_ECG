@@ -36,8 +36,8 @@ GENERALIZATION_RECORDS = [
 
 
 def quantize_tensor_symmetric(x: torch.Tensor, bits: int) -> torch.Tensor:
-    if bits < 1:
-        raise ValueError("bits must be >= 1")
+    if bits is None or bits < 1:
+        return x
     qmax = (2 ** (bits - 1)) - 1
     max_abs = x.abs().max()
     if max_abs < 1e-12 or qmax <= 0:
@@ -47,8 +47,8 @@ def quantize_tensor_symmetric(x: torch.Tensor, bits: int) -> torch.Tensor:
 
 
 def quantize_beats(x: torch.Tensor, bits: int) -> torch.Tensor:
-    if bits < 1:
-        raise ValueError("bits must be >= 1")
+    if bits is None or bits < 1:
+        return x
     levels = 2 ** bits
     x_clipped = torch.clamp(x, -1.0, 1.0)
     scaled = (x_clipped + 1.0) / 2.0
@@ -58,6 +58,8 @@ def quantize_beats(x: torch.Tensor, bits: int) -> torch.Tensor:
 
 def quantize_model_weights(model: SegmentAwareStudent, bits: int) -> SegmentAwareStudent:
     quantized = copy.deepcopy(model)
+    if bits is None or bits < 1:
+        return quantized
     with torch.no_grad():
         for _, param in quantized.named_parameters():
             param.copy_(quantize_tensor_symmetric(param, bits))
@@ -105,6 +107,12 @@ def apply_pbr_attenuation(
     return adjusted
 
 
+def renormalize_to_unit(beats: torch.Tensor) -> torch.Tensor:
+    max_abs = beats.abs().amax(dim=2, keepdim=True)
+    safe = torch.where(max_abs > 1e-6, beats / max_abs, beats)
+    return torch.clamp(safe, -1.0, 1.0)
+
+
 def load_student(model_path: str, device: torch.device) -> SegmentAwareStudent:
     checkpoint = torch.load(model_path, map_location=device)
     config = checkpoint.get("config", {})
@@ -130,6 +138,7 @@ def evaluate_model(
     input_bits: int,
     peak_window: int,
     min_prominence: float,
+    renormalize: bool,
 ) -> Dict[str, float]:
     preds: List[int] = []
     trues: List[int] = []
@@ -137,8 +146,10 @@ def evaluate_model(
         for signals, labels in data_loader:
             signals = signals.to(device)
             labels = labels.to(device)
-            adjusted = apply_pbr_attenuation(signals, pbr_factor, peak_window, min_prominence).to(device)
-            adjusted = quantize_beats(adjusted, input_bits)
+            adjusted = apply_pbr_attenuation(signals, pbr_factor, peak_window, min_prominence)
+            if renormalize:
+                adjusted = renormalize_to_unit(adjusted)
+            adjusted = quantize_beats(adjusted.to(device), input_bits)
             logits, _ = model(adjusted)
             prob_pos = torch.softmax(logits, dim=1)[:, 1]
             pred = (prob_pos >= threshold).long()
@@ -169,6 +180,8 @@ def plot_pbr_examples(
     pbr_values: List[float],
     peak_window: int,
     min_prominence: float,
+    renormalize: bool,
+    input_bits: int,
 ) -> None:
     titles = [f"{val:.1f}" for val in pbr_values]
     fig, axes = plt.subplots(2, 5, figsize=(14, 6), sharex=True, sharey=True)
@@ -176,13 +189,18 @@ def plot_pbr_examples(
 
     for idx, val in enumerate(pbr_values):
         adjusted = attenuate_pbr(beat, val, peak_window, min_prominence)
-        axes[idx].plot(adjusted, linewidth=1.0)
+        adjusted_tensor = torch.from_numpy(adjusted).reshape(1, 1, -1)
+        if renormalize:
+            adjusted_tensor = renormalize_to_unit(adjusted_tensor)
+        adjusted_tensor = quantize_beats(adjusted_tensor, input_bits)
+        adjusted_np = adjusted_tensor.squeeze().cpu().numpy()
+        axes[idx].plot(adjusted_np, linewidth=1.0)
         axes[idx].set_title(f"PBR {titles[idx]}")
-        axes[idx].set_ylim(-0.8, 1.1)
+        axes[idx].set_ylim(0.0, 1.1)
 
     for ax in axes:
         ax.grid(True, linestyle="--", alpha=0.3)
-        ax.set_ylim(-0.8, 1.1)
+        ax.set_ylim(0.0, 1.1)
 
     fig.suptitle("Normal Beat with PBR Attenuation")
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
@@ -206,6 +224,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight_bits", type=int, default=8)
     parser.add_argument("--peak_window", type=int, default=12)
     parser.add_argument("--min_prominence", type=float, default=0.05, help="Minimum absolute prominence for peak detection")
+    parser.add_argument(
+        "--renormalize_after_pbr",
+        action="store_true",
+        default=True,
+        help="Renormalize each beat to unit amplitude after PBR attenuation (recommended for fair comparison)",
+    )
     parser.add_argument("--output", type=str, default="artifacts/quantization_pbr_rates.png")
     parser.add_argument("--example_output", type=str, default="artifacts/quantization_pbr_examples.png")
     return parser.parse_args()
@@ -233,7 +257,15 @@ def main() -> None:
     pbr_values = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]
 
     os.makedirs(os.path.dirname(args.example_output) or ".", exist_ok=True)
-    plot_pbr_examples(normal_beat, args.example_output, pbr_values, args.peak_window, args.min_prominence)
+    plot_pbr_examples(
+        normal_beat,
+        args.example_output,
+        pbr_values,
+        args.peak_window,
+        args.min_prominence,
+        args.renormalize_after_pbr,
+        args.input_bits,
+    )
     print(f"Saved PBR example plot to {args.example_output}")
 
     sweep_values = pbr_values[1:]
@@ -249,6 +281,7 @@ def main() -> None:
             args.input_bits,
             args.peak_window,
             args.min_prominence,
+            args.renormalize_after_pbr,
         )
         fnr_list.append(metrics["miss_rate"])
         fpr_list.append(metrics["fpr"])
