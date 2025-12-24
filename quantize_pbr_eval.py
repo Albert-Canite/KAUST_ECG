@@ -109,7 +109,7 @@ def apply_pbr_attenuation(
 ) -> torch.Tensor:
     beats_np = beats.squeeze(1).cpu().numpy()
     adjusted = np.stack([attenuate_pbr(b, factor, peak_window, min_prominence) for b in beats_np], axis=0)
-    adjusted = torch.from_numpy(adjusted).unsqueeze(1)
+    adjusted = torch.from_numpy(adjusted).to(dtype=torch.float32).unsqueeze(1)
     return adjusted
 
 
@@ -196,7 +196,7 @@ def plot_pbr_examples(
 
     for idx, val in enumerate(pbr_values):
         adjusted = attenuate_pbr(beat, val, peak_window, min_prominence)
-        adjusted_tensor = torch.from_numpy(adjusted).reshape(1, 1, -1)
+        adjusted_tensor = torch.from_numpy(adjusted).to(dtype=torch.float32).reshape(1, 1, -1)
         if renormalize:
             adjusted_tensor = renormalize_to_unit(adjusted_tensor)
         adjusted_tensor = quantize_beats(adjusted_tensor, input_bits)
@@ -236,13 +236,20 @@ def parse_args() -> argparse.Namespace:
         dest="renormalize_after_pbr",
         action="store_true",
         default=True,
-        help="Renormalize each beat to unit amplitude after PBR attenuation (recommended for fair comparison)",
+        help="Renormalize each beat to unit amplitude after PBR attenuation (recommended for evaluation)",
     )
     parser.add_argument(
         "--no-renormalize_after_pbr",
         dest="renormalize_after_pbr",
         action="store_false",
-        help="Disable post-PBR renormalization",
+        help="Disable post-PBR renormalization (evaluation)",
+    )
+    parser.add_argument(
+        "--plot_renormalize",
+        dest="plot_renormalize",
+        action="store_true",
+        default=False,
+        help="Apply renormalization to example plots (default: off to show raw attenuation)",
     )
     parser.add_argument("--output", type=str, default="artifacts/quantization_pbr_rates.png")
     parser.add_argument("--example_output", type=str, default="artifacts/quantization_pbr_examples.png")
@@ -277,7 +284,7 @@ def main() -> None:
         pbr_values,
         args.peak_window,
         args.min_prominence,
-        args.renormalize_after_pbr,
+        args.plot_renormalize,
         args.input_bits,
     )
     print(f"Saved PBR example plot to {args.example_output}")
