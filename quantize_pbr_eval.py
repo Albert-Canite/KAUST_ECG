@@ -178,11 +178,11 @@ def plot_pbr_examples(
         adjusted = attenuate_pbr(beat, val, peak_window, min_prominence)
         axes[idx].plot(adjusted, linewidth=1.0)
         axes[idx].set_title(f"PBR {titles[idx]}")
-        axes[idx].set_ylim(0.0, 1.1)
+        axes[idx].set_ylim(-0.8, 1.1)
 
     for ax in axes:
         ax.grid(True, linestyle="--", alpha=0.3)
-        ax.set_ylim(0.0, 1.1)
+        ax.set_ylim(-0.8, 1.1)
 
     fig.suptitle("Normal Beat with PBR Attenuation")
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
