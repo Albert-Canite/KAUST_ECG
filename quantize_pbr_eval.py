@@ -89,9 +89,15 @@ def attenuate_pbr(
 ) -> np.ndarray:
     baseline = float(np.median(beat))
     windows = _collect_peak_windows(beat, baseline, peak_window, min_prominence)
-    adjusted = beat.copy()
+    mask = np.ones_like(beat, dtype=np.float32)
     for start, end in windows:
-        adjusted[start:end] = baseline + factor * (adjusted[start:end] - baseline)
+        mask[start:end] = np.minimum(mask[start:end], factor)
+    smooth_len = 9 if len(beat) >= 9 else len(beat) | 1
+    kernel = np.hanning(smooth_len)
+    kernel = kernel / np.sum(kernel) if kernel.sum() != 0 else kernel
+    smoothed = np.convolve(mask, kernel, mode="same")
+    smoothed = np.clip(smoothed, factor, 1.0)
+    adjusted = baseline + smoothed * (beat - baseline)
     return adjusted
 
 
@@ -166,7 +172,8 @@ def plot_rates(pbr_values: List[float], fnr: List[float], fpr: List[float], outp
     ax.set_ylabel("Rate")
     ax.set_title("FNR/FPR vs. PBR Attenuation (8-bit input/weights)")
     ax.set_xticks(pbr_values)
-    ax.set_ylim(0.0, max(fnr + fpr) * 1.1 if fnr or fpr else 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xlim(1.0, 0.1)
     ax.grid(True, linestyle="--", alpha=0.4)
     ax.legend()
     fig.tight_layout()
@@ -196,11 +203,11 @@ def plot_pbr_examples(
         adjusted_np = adjusted_tensor.squeeze().cpu().numpy()
         axes[idx].plot(adjusted_np, linewidth=1.0)
         axes[idx].set_title(f"PBR {titles[idx]}")
-        axes[idx].set_ylim(0.0, 1.1)
+        axes[idx].set_ylim(-1.0, 1.1)
 
     for ax in axes:
         ax.grid(True, linestyle="--", alpha=0.3)
-        ax.set_ylim(0.0, 1.1)
+        ax.set_ylim(-1.0, 1.1)
 
     fig.suptitle("Normal Beat with PBR Attenuation")
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
@@ -226,9 +233,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min_prominence", type=float, default=0.05, help="Minimum absolute prominence for peak detection")
     parser.add_argument(
         "--renormalize_after_pbr",
+        dest="renormalize_after_pbr",
         action="store_true",
         default=True,
         help="Renormalize each beat to unit amplitude after PBR attenuation (recommended for fair comparison)",
+    )
+    parser.add_argument(
+        "--no-renormalize_after_pbr",
+        dest="renormalize_after_pbr",
+        action="store_false",
+        help="Disable post-PBR renormalization",
     )
     parser.add_argument("--output", type=str, default="artifacts/quantization_pbr_rates.png")
     parser.add_argument("--example_output", type=str, default="artifacts/quantization_pbr_examples.png")
