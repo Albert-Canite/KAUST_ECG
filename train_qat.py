@@ -1,11 +1,14 @@
-"""QAT fine-tuning with 5-bit activation/weight fake quantization and noise/PBR augmentation."""
+"""QAT fine-tuning with 5-bit activation/weight fake quantization and noise/PBR augmentation.
+
+Adds curriculum warmup for quantization与增广、动态阈值重标定，以及带 warmup 的学习率调度，
+便于在低 SNR/低 PBR + 量化场景下更平稳收敛。
+"""
 from __future__ import annotations
 
 import argparse
 import os
 from typing import Dict, List, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -48,6 +51,32 @@ def apply_random_pbr(signals: torch.Tensor, pbr_min: float, pbr_max: float) -> t
     factors = torch.empty(signals.size(0), device=signals.device).uniform_(pbr_min, pbr_max).view(-1, 1, 1)
     baseline = signals.median(dim=2, keepdim=True).values
     return baseline + factors * (signals - baseline)
+
+
+def interpolate_curriculum(start: float, end: float, epoch: int, warmup_epochs: int) -> float:
+    if warmup_epochs <= 0:
+        return end
+    progress = min(max(epoch, 0), warmup_epochs) / float(warmup_epochs)
+    return start + (end - start) * progress
+
+
+def adjust_learning_rate(
+    optimizer: torch.optim.Optimizer,
+    base_lr: float,
+    epoch: int,
+    max_epochs: int,
+    warmup_epochs: int,
+    min_lr_ratio: float = 0.1,
+) -> float:
+    if epoch <= warmup_epochs:
+        lr = base_lr * epoch / max(1, warmup_epochs)
+    else:
+        progress = (epoch - warmup_epochs) / max(1, max_epochs - warmup_epochs)
+        cosine = 0.5 * (1 + torch.cos(torch.tensor(progress * torch.pi)))
+        lr = base_lr * (min_lr_ratio + (1 - min_lr_ratio) * cosine.item())
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr
+    return lr
 
 
 class QATStudent(SegmentAwareStudent):
@@ -160,6 +189,8 @@ def train_one_epoch(
     snr_max: float,
     pbr_min: float,
     pbr_max: float,
+    activation_bits: int,
+    weight_bits: int,
 ) -> float:
     model.train()
     ce = nn.CrossEntropyLoss()
@@ -173,11 +204,20 @@ def train_one_epoch(
         signals = add_random_noise(signals, snr_min, snr_max)
         signals = clamp_unit(signals)
 
+        # 动态量化位宽（curriculum warmup）
+        orig_act_bits = model.activation_bits
+        orig_w_bits = model.weight_bits
+        model.activation_bits = activation_bits
+        model.weight_bits = weight_bits
+
         logits, _ = model(signals)
         loss = ce(logits, labels)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
+        model.activation_bits = orig_act_bits
+        model.weight_bits = orig_w_bits
 
         running += loss.item() * labels.size(0)
         total += labels.size(0)
@@ -196,9 +236,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--activation_bits", type=int, default=5)
     parser.add_argument("--weight_bits", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--min_lr_ratio", type=float, default=0.1, help="Cosine decay floor as fraction of base lr")
+    parser.add_argument("--warmup_epochs", type=int, default=3, help="Warmup epochs for LR and quant/aug curriculum")
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--max_epochs", type=int, default=25)
+    parser.add_argument("--max_epochs", type=int, default=40)
     parser.add_argument("--threshold", type=float, default=0.346)
     parser.add_argument("--snr_min", type=float, default=10.0)
     parser.add_argument("--snr_max", type=float, default=30.0)
@@ -207,6 +249,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--save_path", type=str, default="saved_models/student_model_qat5bit.pth")
     return parser.parse_args()
+
+
+def calibrate_threshold(model: QATStudent, loader: DataLoader, device: torch.device) -> float:
+    model.eval()
+    all_probs: List[float] = []
+    all_labels: List[int] = []
+    with torch.no_grad():
+        for signals, labels in loader:
+            signals = signals.to(device)
+            labels = labels.to(device)
+            logits, _ = model(signals)
+            prob_pos = torch.softmax(logits, dim=1)[:, 1]
+            all_probs.extend(prob_pos.cpu().tolist())
+            all_labels.extend(labels.cpu().tolist())
+
+    # 选择使 FNR+FPR 最小的阈值（简单 grid）
+    probs_tensor = torch.tensor(all_probs)
+    labels_tensor = torch.tensor(all_labels)
+    candidate = torch.quantile(probs_tensor, torch.linspace(0.05, 0.95, steps=19))
+    best_thr = 0.5
+    best_err = float("inf")
+    for thr in candidate:
+        pred = (probs_tensor >= thr).long()
+        tn = ((pred == 0) & (labels_tensor == 0)).sum().item()
+        fp = ((pred == 1) & (labels_tensor == 0)).sum().item()
+        fn = ((pred == 0) & (labels_tensor == 1)).sum().item()
+        tp = ((pred == 1) & (labels_tensor == 1)).sum().item()
+        fnr = fn / max(fn + tp, 1)
+        fpr = fp / max(fp + tn, 1)
+        err = fnr + fpr
+        if err < best_err:
+            best_err = err
+            best_thr = float(thr.item())
+    return best_thr
 
 
 def main() -> None:
@@ -234,22 +310,38 @@ def main() -> None:
 
     best_val = float("inf")
     best_state = None
+    current_threshold = args.threshold
     for epoch in range(1, args.max_epochs + 1):
+        # curriculum：逐步放开量化和增广强度
+        act_bits = int(round(interpolate_curriculum(8.0, args.activation_bits, epoch, args.warmup_epochs)))
+        w_bits = int(round(interpolate_curriculum(8.0, args.weight_bits, epoch, args.warmup_epochs)))
+        snr_min = interpolate_curriculum(20.0, args.snr_min, epoch, args.warmup_epochs)
+        snr_max = interpolate_curriculum(30.0, args.snr_max, epoch, args.warmup_epochs)
+        pbr_min = interpolate_curriculum(0.9, args.pbr_min, epoch, args.warmup_epochs)
+        pbr_max = interpolate_curriculum(0.9, args.pbr_max, epoch, args.warmup_epochs)
+        lr_now = adjust_learning_rate(optimizer, args.lr, epoch, args.max_epochs, args.warmup_epochs, args.min_lr_ratio)
+
         train_loss = train_one_epoch(
             model,
             train_loader,
             optimizer,
             device,
-            args.snr_min,
-            args.snr_max,
-            args.pbr_min,
-            args.pbr_max,
+            snr_min,
+            snr_max,
+            pbr_min,
+            pbr_max,
+            act_bits,
+            w_bits,
         )
-        val_loss, val_metrics = evaluate(model, val_loader, device, args.threshold)
-        gen_loss, gen_metrics = evaluate(model, gen_loader, device, args.threshold)
+
+        current_threshold = calibrate_threshold(model, val_loader, device)
+        val_loss, val_metrics = evaluate(model, val_loader, device, current_threshold)
+        gen_loss, gen_metrics = evaluate(model, gen_loader, device, current_threshold)
 
         print(
-            f"Epoch {epoch:02d} | train_loss={train_loss:.4f} "
+            f"Epoch {epoch:02d} | lr={lr_now:.5f} act_bits={act_bits} w_bits={w_bits} "
+            f"snr=[{snr_min:.1f},{snr_max:.1f}] pbr=[{pbr_min:.2f},{pbr_max:.2f}] "
+            f"thr={current_threshold:.3f} train_loss={train_loss:.4f} "
             f"val_loss={val_loss:.4f} val_fnr={val_metrics['miss_rate']:.4f} val_fpr={val_metrics['fpr']:.4f} "
             f"gen_fnr={gen_metrics['miss_rate']:.4f} gen_fpr={gen_metrics['fpr']:.4f}"
         )
@@ -267,7 +359,7 @@ def main() -> None:
                 },
                 "activation_bits": args.activation_bits,
                 "weight_bits": args.weight_bits,
-                "threshold": args.threshold,
+                "threshold": current_threshold,
             }
 
     if best_state is not None:
