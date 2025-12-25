@@ -206,6 +206,7 @@ def train_one_epoch(
         signals = apply_random_pbr(signals, pbr_min, pbr_max)
         signals = add_random_noise(signals, snr_min, snr_max)
         signals = clamp_unit(signals)
+        signals = torch.nan_to_num(signals)
 
         # 动态量化位宽（curriculum warmup）
         orig_act_bits = model.activation_bits
@@ -214,9 +215,16 @@ def train_one_epoch(
         model.weight_bits = weight_bits
 
         logits, _ = model(signals)
+        logits = torch.nan_to_num(logits)
         loss = ce(logits, labels)
+        if torch.isnan(loss):
+            # 跳过异常 batch，避免梯度爆炸/NaN 传播
+            model.activation_bits = orig_act_bits
+            model.weight_bits = orig_w_bits
+            continue
         optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         model.activation_bits = orig_act_bits
