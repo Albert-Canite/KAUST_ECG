@@ -186,7 +186,12 @@ def train_one_epoch(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="5-bit QAT fine-tune with noise & PBR augmentation")
-    parser.add_argument("--data_path", type=str, required=True, help="Path to MIT-BIH dataset")
+    parser.add_argument(
+        "--data_path",
+        type=str,
+        default="E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/",
+        help="Path to MIT-BIH dataset",
+    )
     parser.add_argument("--init_checkpoint", type=str, default="saved_models/student_model.pth")
     parser.add_argument("--activation_bits", type=int, default=5)
     parser.add_argument("--weight_bits", type=int, default=5)
