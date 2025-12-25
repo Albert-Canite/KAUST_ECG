@@ -168,9 +168,11 @@ def evaluate(model: QATStudent, loader: DataLoader, device: torch.device, thresh
     trues: List[int] = []
     with torch.no_grad():
         for signals, labels in loader:
-            signals = signals.to(device)
+            signals = torch.nan_to_num(signals.to(device), nan=0.0, posinf=0.0, neginf=0.0)
             labels = labels.to(device)
             logits, _ = model(signals)
+            logits = torch.nan_to_num(logits, nan=0.0, posinf=10.0, neginf=-10.0)
+            logits = torch.clamp(logits, -10.0, 10.0)
             loss = ce(logits, labels)
             total_loss += loss.item() * labels.size(0)
             total += labels.size(0)
@@ -206,7 +208,7 @@ def train_one_epoch(
         signals = apply_random_pbr(signals, pbr_min, pbr_max)
         signals = add_random_noise(signals, snr_min, snr_max)
         signals = clamp_unit(signals)
-        signals = torch.nan_to_num(signals)
+        signals = torch.nan_to_num(signals, nan=0.0, posinf=0.0, neginf=0.0)
 
         # 动态量化位宽（curriculum warmup）
         orig_act_bits = model.activation_bits
@@ -215,7 +217,8 @@ def train_one_epoch(
         model.weight_bits = weight_bits
 
         logits, _ = model(signals)
-        logits = torch.nan_to_num(logits)
+        logits = torch.nan_to_num(logits, nan=0.0, posinf=10.0, neginf=-10.0)
+        logits = torch.clamp(logits, -10.0, 10.0)
         loss = ce(logits, labels)
         if torch.isnan(loss):
             # 跳过异常 batch，避免梯度爆炸/NaN 传播
