@@ -2,6 +2,9 @@
 
 Adds curriculum warmup for quantization与增广、动态阈值重标定，以及带 warmup 的学习率调度，
 便于在低 SNR/低 PBR + 量化场景下更平稳收敛。
+
+本版进一步放缓 curriculum（先 FP32、弱增广，再逐步切换到 5-bit 与强噪声/PBR），
+并改进阈值校准避免极端阈值导致的全正/全负预测。
 """
 from __future__ import annotations
 
@@ -236,11 +239,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--activation_bits", type=int, default=5)
     parser.add_argument("--weight_bits", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--min_lr_ratio", type=float, default=0.1, help="Cosine decay floor as fraction of base lr")
-    parser.add_argument("--warmup_epochs", type=int, default=3, help="Warmup epochs for LR and quant/aug curriculum")
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--min_lr_ratio", type=float, default=0.2, help="Cosine decay floor as fraction of base lr")
+    parser.add_argument("--warmup_epochs", type=int, default=5, help="Warmup epochs for LR and quant/aug curriculum")
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--max_epochs", type=int, default=40)
+    parser.add_argument("--max_epochs", type=int, default=50)
     parser.add_argument("--threshold", type=float, default=0.346)
     parser.add_argument("--snr_min", type=float, default=10.0)
     parser.add_argument("--snr_max", type=float, default=30.0)
@@ -251,7 +254,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def calibrate_threshold(model: QATStudent, loader: DataLoader, device: torch.device) -> float:
+def calibrate_threshold(model: QATStudent, loader: DataLoader, device: torch.device, default_thr: float = 0.346) -> float:
     model.eval()
     all_probs: List[float] = []
     all_labels: List[int] = []
@@ -264,11 +267,11 @@ def calibrate_threshold(model: QATStudent, loader: DataLoader, device: torch.dev
             all_probs.extend(prob_pos.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
 
-    # 选择使 FNR+FPR 最小的阈值（简单 grid）
+    # 选择使 FNR+FPR 最小的阈值（致密 grid + 下限），避免全正/全负
     probs_tensor = torch.tensor(all_probs)
     labels_tensor = torch.tensor(all_labels)
-    candidate = torch.quantile(probs_tensor, torch.linspace(0.05, 0.95, steps=19))
-    best_thr = 0.5
+    candidate = torch.linspace(0.05, 0.95, steps=91)
+    best_thr = default_thr
     best_err = float("inf")
     for thr in candidate:
         pred = (probs_tensor >= thr).long()
@@ -282,7 +285,8 @@ def calibrate_threshold(model: QATStudent, loader: DataLoader, device: torch.dev
         if err < best_err:
             best_err = err
             best_thr = float(thr.item())
-    return best_thr
+    # 避免阈值过低/过高导致极端预测
+    return float(max(0.15, min(0.85, best_thr)))
 
 
 def main() -> None:
@@ -301,7 +305,7 @@ def main() -> None:
     val_ds: Dataset[Tuple[torch.Tensor, int]] = ECGBeatDataset(val_split_x, val_split_y)
     gen_ds: Dataset[Tuple[torch.Tensor, int]] = ECGBeatDataset(val_x, val_y)
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
     gen_loader = DataLoader(gen_ds, batch_size=args.batch_size, shuffle=False)
 
@@ -312,13 +316,13 @@ def main() -> None:
     best_state = None
     current_threshold = args.threshold
     for epoch in range(1, args.max_epochs + 1):
-        # curriculum：逐步放开量化和增广强度
-        act_bits = int(round(interpolate_curriculum(8.0, args.activation_bits, epoch, args.warmup_epochs)))
-        w_bits = int(round(interpolate_curriculum(8.0, args.weight_bits, epoch, args.warmup_epochs)))
-        snr_min = interpolate_curriculum(20.0, args.snr_min, epoch, args.warmup_epochs)
-        snr_max = interpolate_curriculum(30.0, args.snr_max, epoch, args.warmup_epochs)
-        pbr_min = interpolate_curriculum(0.9, args.pbr_min, epoch, args.warmup_epochs)
-        pbr_max = interpolate_curriculum(0.9, args.pbr_max, epoch, args.warmup_epochs)
+        # curriculum：先 FP32/弱增广，再逐步放开量化和噪声/PBR
+        act_bits = int(round(interpolate_curriculum(-1.0, args.activation_bits, epoch, args.warmup_epochs)))
+        w_bits = int(round(interpolate_curriculum(-1.0, args.weight_bits, epoch, args.warmup_epochs)))
+        snr_min = interpolate_curriculum(35.0, args.snr_min, epoch, args.warmup_epochs)
+        snr_max = interpolate_curriculum(35.0, args.snr_max, epoch, args.warmup_epochs)
+        pbr_min = interpolate_curriculum(0.95, args.pbr_min, epoch, args.warmup_epochs)
+        pbr_max = interpolate_curriculum(0.95, args.pbr_max, epoch, args.warmup_epochs)
         lr_now = adjust_learning_rate(optimizer, args.lr, epoch, args.max_epochs, args.warmup_epochs, args.min_lr_ratio)
 
         train_loss = train_one_epoch(
@@ -334,7 +338,7 @@ def main() -> None:
             w_bits,
         )
 
-        current_threshold = calibrate_threshold(model, val_loader, device)
+        current_threshold = calibrate_threshold(model, val_loader, device, default_thr=args.threshold)
         val_loss, val_metrics = evaluate(model, val_loader, device, current_threshold)
         gen_loss, gen_metrics = evaluate(model, gen_loader, device, current_threshold)
 
