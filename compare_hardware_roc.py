@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from typing import List, Tuple
 
 import numpy as np
@@ -67,29 +68,75 @@ def _collect_probs(
     return trues, probs
 
 
+def _infer_model_overrides(state_dict: dict) -> dict:
+    overrides: dict[str, object] = {}
+    if not isinstance(state_dict, dict):
+        return overrides
+
+    keys = list(state_dict.keys())
+    if "classifier.weight_param" in keys:
+        overrides["use_constrained_classifier"] = True
+    elif "classifier.weight" in keys:
+        overrides["use_constrained_classifier"] = False
+
+    if any(key.endswith("weight_param") for key in keys):
+        overrides["use_value_constraint"] = True
+    elif any(key.endswith(".weight") for key in keys):
+        overrides["use_value_constraint"] = False
+
+    if any(key.endswith("bias_param") or key.endswith(".bias") for key in keys):
+        overrides["use_bias"] = True
+
+    mlp_indices = set()
+    for key in keys:
+        match = re.match(r"mlp_layers\.(\d+)\.", key)
+        if match:
+            mlp_indices.add(int(match.group(1)))
+    if mlp_indices:
+        overrides["num_mlp_layers"] = max(mlp_indices) + 1
+
+    return overrides
+
+
+def _build_model_args(config: dict | None, state_dict: dict | None) -> argparse.Namespace:
+    defaults = {
+        "num_mlp_layers": 1,
+        "dropout_rate": 0.1,
+        "use_value_constraint": True,
+        "use_tanh_activations": False,
+        "constraint_scale": 1.0,
+        "use_bias": True,
+        "use_constrained_classifier": False,
+    }
+    if config:
+        for key in defaults:
+            if key in config:
+                defaults[key] = config[key]
+    if state_dict is not None:
+        overrides = _infer_model_overrides(state_dict)
+        for key, value in overrides.items():
+            if config is None or key not in config:
+                defaults[key] = value
+    return argparse.Namespace(**defaults)
+
+
 def _load_model(checkpoint_path: str, device: torch.device) -> torch.nn.Module:
-    model = build_student(
-        argparse.Namespace(
-            num_mlp_layers=1,
-            dropout_rate=0.2,
-            use_value_constraint=True,
-            use_tanh_activations=False,
-            constraint_scale=1.0,
-            use_bias=False,
-            use_constrained_classifier=True,
-        ),
-        device,
-    )
     state = torch.load(checkpoint_path, map_location=device)
-    if isinstance(state, dict) and "state_dict" in state:
-        state = state["state_dict"]
-    model.load_state_dict(state)
+    config = state.get("config") if isinstance(state, dict) else None
+    state_dict = state
+    if isinstance(state, dict):
+        for key in ("state_dict", "student_state_dict", "model_state_dict"):
+            if key in state:
+                state_dict = state[key]
+                break
+    model = build_student(_build_model_args(config, state_dict), device)
+    model.load_state_dict(state_dict)
     return model
 
 
 DEFAULT_DATA_PATH = "E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/"
-DEFAULT_ORIGINAL_MODEL = os.path.join("artifacts", "original_model.pt")
-DEFAULT_HARDWARE_MODEL = os.path.join("artifacts", "hardware_model.pt")
+DEFAULT_ORIGINAL_MODEL = os.path.join("saved_models", "student_model.pth")
+DEFAULT_HARDWARE_MODEL = os.path.join("saved_models", "student_model_hardware.pth")
 
 
 def parse_args() -> argparse.Namespace:
