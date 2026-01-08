@@ -217,13 +217,20 @@ def main() -> None:
         args.zero_mean_inputs,
     )
 
-    orig_fpr, orig_tpr, _ = roc_curve(orig_true, orig_probs)
-    hw_fpr, hw_tpr, _ = roc_curve(hw_true, hw_probs)
+    orig_fpr, orig_tpr, orig_thresholds = roc_curve(orig_true, orig_probs)
+    hw_fpr, hw_tpr, hw_thresholds = roc_curve(hw_true, hw_probs)
     orig_auc = auc(orig_fpr, orig_tpr)
     hw_auc = auc(hw_fpr, hw_tpr)
 
-    orig_pred = (np.array(orig_probs) >= args.threshold).astype(int).tolist()
-    hw_pred = (np.array(hw_probs) >= args.threshold).astype(int).tolist()
+    orig_j = orig_tpr - orig_fpr
+    hw_j = hw_tpr - hw_fpr
+    orig_best_idx = int(np.argmax(orig_j))
+    hw_best_idx = int(np.argmax(hw_j))
+    orig_best_threshold = float(orig_thresholds[orig_best_idx])
+    hw_best_threshold = float(hw_thresholds[hw_best_idx])
+
+    orig_pred = (np.array(orig_probs) >= orig_best_threshold).astype(int).tolist()
+    hw_pred = (np.array(hw_probs) >= hw_best_threshold).astype(int).tolist()
     orig_metrics = confusion_metrics(orig_true, orig_pred)
     hw_metrics = confusion_metrics(hw_true, hw_pred)
 
@@ -233,6 +240,22 @@ def main() -> None:
     plt.figure(figsize=(6, 5))
     plt.plot(orig_fpr, orig_tpr, label=f"Original AUC={orig_auc:.3f}")
     plt.plot(hw_fpr, hw_tpr, label=f"Hardware AUC={hw_auc:.3f}")
+    plt.scatter(
+        [orig_fpr[orig_best_idx]],
+        [orig_tpr[orig_best_idx]],
+        color="tab:blue",
+        s=40,
+        zorder=3,
+        label=f"Orig best thr={orig_best_threshold:.3f}",
+    )
+    plt.scatter(
+        [hw_fpr[hw_best_idx]],
+        [hw_tpr[hw_best_idx]],
+        color="tab:orange",
+        s=40,
+        zorder=3,
+        label=f"HW best thr={hw_best_threshold:.3f}",
+    )
     plt.plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
     plt.xlabel("False Positive Rate")
     plt.ylabel("True Positive Rate")
@@ -243,7 +266,8 @@ def main() -> None:
 
     print("Fixed hardware conditions:")
     print(f"  SNR={args.snr_db:.2f}dB, PBR={args.pbr_factor:.2f}, seed={args.seed}")
-    print(f"Threshold={args.threshold:.3f}")
+    print(f"Original best threshold={orig_best_threshold:.3f}")
+    print(f"Hardware best threshold={hw_best_threshold:.3f}")
     print(
         f"Original: miss={orig_metrics['miss_rate'] * 100:.2f}% "
         f"fpr={orig_metrics['fpr'] * 100:.2f}% auc={orig_auc:.3f}"
