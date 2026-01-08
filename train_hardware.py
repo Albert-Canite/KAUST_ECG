@@ -343,6 +343,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--constraint_scale", type=float, default=1.0)
     parser.add_argument("--class_weight_abnormal", type=float, default=1.35)
     parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
+    parser.add_argument(
+        "--selection_metric",
+        type=str,
+        default="balanced",
+        choices=("f1", "balanced"),
+        help="Metric to select best model: f1 or balanced (penalize miss/FPR).",
+    )
+    parser.add_argument(
+        "--selection_miss_weight",
+        type=float,
+        default=1.0,
+        help="Miss-rate penalty weight when selection_metric=balanced.",
+    )
+    parser.add_argument(
+        "--selection_fpr_weight",
+        type=float,
+        default=1.0,
+        help="FPR penalty weight when selection_metric=balanced.",
+    )
     parser.add_argument("--generalization_score_weight", type=float, default=0.35)
     parser.add_argument("--threshold_target_miss", type=float, default=0.10)
     parser.add_argument("--threshold_max_fpr", type=float, default=0.10)
@@ -568,7 +587,7 @@ def main() -> None:
 
     print(f"Preprocessed input range: [{data_min:.3f}, {data_max:.3f}] (expected within [-1, 1])")
 
-    best_val_f1 = -float("inf")
+    best_score = -float("inf")
     best_state = None
     best_threshold = 0.5
     patience_counter = 0
@@ -684,13 +703,21 @@ def main() -> None:
 
         miss_ema = 0.8 * miss_ema + 0.2 * val_metrics["miss_rate"]
 
+        if args.selection_metric == "f1":
+            selection_score = val_metrics["f1"]
+        else:
+            selection_score = val_metrics["f1"] - (
+                args.selection_miss_weight * val_metrics["miss_rate"]
+                + args.selection_fpr_weight * val_metrics["fpr"]
+            )
+
         scheduler.step(val_loss)
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
             f"Val F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}% | "
             f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}% | "
-            f"Thr {best_thr_epoch:.4f}"
+            f"Thr {best_thr_epoch:.4f} | SelScore {selection_score:.4f}"
         )
 
         history.append(
@@ -705,6 +732,7 @@ def main() -> None:
                 "gen_miss": gen_metrics["miss_rate"],
                 "gen_fpr": gen_metrics["fpr"],
                 "threshold": best_thr_epoch,
+                "selection_score": selection_score,
             }
         )
 
@@ -721,11 +749,12 @@ def main() -> None:
                 "gen_miss": gen_metrics["miss_rate"],
                 "gen_fpr": gen_metrics["fpr"],
                 "threshold": best_thr_epoch,
+                "selection_score": selection_score,
             }
         )
 
-        if val_metrics["f1"] > best_val_f1:
-            best_val_f1 = val_metrics["f1"]
+        if selection_score > best_score:
+            best_score = selection_score
             best_state = student.state_dict()
             best_threshold = best_thr_epoch
             patience_counter = 0
@@ -737,6 +766,7 @@ def main() -> None:
                     "val_f1": val_metrics["f1"],
                     "val_miss": val_metrics["miss_rate"],
                     "val_fpr": val_metrics["fpr"],
+                    "selection_score": selection_score,
                     "gen_f1": gen_metrics["f1"],
                     "gen_miss": gen_metrics["miss_rate"],
                     "gen_fpr": gen_metrics["fpr"],
