@@ -116,6 +116,16 @@ def add_gaussian_noise_snr(x: torch.Tensor, snr_db: float) -> torch.Tensor:
     return x + noise
 
 
+def weight_target_regularizer(model: nn.Module, target: float) -> torch.Tensor:
+    penalties: List[torch.Tensor] = []
+    for param in model.parameters():
+        if param.dim() >= 2:
+            penalties.append((param.abs() - target).pow(2).mean())
+    if not penalties:
+        return torch.tensor(0.0, device=next(model.parameters()).device)
+    return torch.stack(penalties).mean()
+
+
 @contextmanager
 def quantized_weights(model: nn.Module, bits: int) -> None:
     if bits is None or bits < 1:
@@ -143,6 +153,24 @@ def build_student(args: argparse.Namespace, device: torch.device) -> nn.Module:
         constraint_scale=args.constraint_scale,
     ).to(device)
     return student
+
+
+def export_weights_csv(model: nn.Module, output_path: str) -> None:
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["param_name", "kernel_index", "flat_index", "value"])
+        for name, param in model.named_parameters():
+            data = param.detach().cpu()
+            if data.dim() >= 2:
+                for kernel_idx in range(data.shape[0]):
+                    flat = data[kernel_idx].reshape(-1)
+                    for flat_idx, value in enumerate(flat.tolist()):
+                        writer.writerow([name, kernel_idx, flat_idx, value])
+            else:
+                flat = data.reshape(-1)
+                for flat_idx, value in enumerate(flat.tolist()):
+                    writer.writerow([name, 0, flat_idx, value])
 
 
 def _sample_uniform(min_val: float, max_val: float, device: torch.device) -> float:
@@ -335,6 +363,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pbr_peak_window", type=int, default=12)
     parser.add_argument("--pbr_min_prominence", type=float, default=0.05)
     parser.add_argument(
+        "--weight_target",
+        type=float,
+        default=1.0,
+        help="Target magnitude for weight regularization (encourage |w| near this value)",
+    )
+    parser.add_argument(
+        "--weight_target_strength",
+        type=float,
+        default=1e-4,
+        help="Strength of weight-target regularization (use small value to avoid hurting accuracy)",
+    )
+    parser.add_argument(
         "--hardware_prob",
         type=float,
         default=1.0,
@@ -482,7 +522,9 @@ def main() -> None:
             with quantized_weights(student, bits=args.weight_bits):
                 logits, _ = student(signals)
                 loss = ce_loss_fn(logits, labels)
-                loss.backward()
+                reg_loss = weight_target_regularizer(student, args.weight_target)
+                total_loss = loss + args.weight_target_strength * reg_loss
+                total_loss.backward()
 
             torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
             optimizer.step()
@@ -894,6 +936,10 @@ def main() -> None:
         save_path,
     )
     print(f"Saved student checkpoint to {save_path}")
+
+    weights_csv_path = os.path.join("artifacts", "hardware_weights.csv")
+    export_weights_csv(student, weights_csv_path)
+    print(f"Saved hardware-trained weights CSV to {weights_csv_path}")
 
     os.makedirs("artifacts", exist_ok=True)
 
