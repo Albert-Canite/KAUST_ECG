@@ -81,8 +81,11 @@ def _load_model(checkpoint_path: str, device: torch.device) -> torch.nn.Module:
         device,
     )
     state = torch.load(checkpoint_path, map_location=device)
-    if isinstance(state, dict) and "state_dict" in state:
-        state = state["state_dict"]
+    if isinstance(state, dict):
+        for key in ("state_dict", "student_state_dict", "model_state_dict"):
+            if key in state:
+                state = state[key]
+                break
     model.load_state_dict(state)
     return model
 
