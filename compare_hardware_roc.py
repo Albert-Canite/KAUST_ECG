@@ -67,20 +67,27 @@ def _collect_probs(
     return trues, probs
 
 
+def _build_model_args(config: dict | None) -> argparse.Namespace:
+    defaults = {
+        "num_mlp_layers": 1,
+        "dropout_rate": 0.2,
+        "use_value_constraint": True,
+        "use_tanh_activations": False,
+        "constraint_scale": 1.0,
+        "use_bias": False,
+        "use_constrained_classifier": True,
+    }
+    if config:
+        for key in defaults:
+            if key in config:
+                defaults[key] = config[key]
+    return argparse.Namespace(**defaults)
+
+
 def _load_model(checkpoint_path: str, device: torch.device) -> torch.nn.Module:
-    model = build_student(
-        argparse.Namespace(
-            num_mlp_layers=1,
-            dropout_rate=0.2,
-            use_value_constraint=True,
-            use_tanh_activations=False,
-            constraint_scale=1.0,
-            use_bias=False,
-            use_constrained_classifier=True,
-        ),
-        device,
-    )
     state = torch.load(checkpoint_path, map_location=device)
+    config = state.get("config") if isinstance(state, dict) else None
+    model = build_student(_build_model_args(config), device)
     if isinstance(state, dict):
         for key in ("state_dict", "student_state_dict", "model_state_dict"):
             if key in state:
