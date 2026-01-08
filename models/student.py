@@ -21,6 +21,8 @@ class SegmentAwareStudent(nn.Module):
         use_value_constraint: bool = True,
         use_tanh_activations: bool = False,
         constraint_scale: float = 1.0,
+        use_bias: bool = True,
+        use_constrained_classifier: bool = False,
     ) -> None:
         super().__init__()
         mlp_layers = max(0, num_mlp_layers)
@@ -28,7 +30,7 @@ class SegmentAwareStudent(nn.Module):
         self.use_tanh_activations = use_tanh_activations
 
         conv_layer = ConstrainedConv1d if use_value_constraint else nn.Conv1d
-        conv_kwargs = dict(kernel_size=4, stride=1, padding=0, bias=True)
+        conv_kwargs = dict(kernel_size=4, stride=1, padding=0, bias=use_bias)
         if use_value_constraint:
             conv_kwargs["scale"] = constraint_scale
 
@@ -40,12 +42,16 @@ class SegmentAwareStudent(nn.Module):
         linear_cls = ConstrainedLinear if use_value_constraint else nn.Linear
         self.mlp_layers = nn.ModuleList()
         for _ in range(mlp_layers):
-            layer_kwargs = {"bias": True, "scale": constraint_scale} if use_value_constraint else {"bias": True}
+            layer_kwargs = {"bias": use_bias, "scale": constraint_scale} if use_value_constraint else {"bias": use_bias}
             self.mlp_layers.append(linear_cls(4, 4, **layer_kwargs))
 
         self.dropout = nn.Dropout(dropout_rate) if dropout_rate > 0 else nn.Identity()
         self.token_dropout = nn.Dropout(dropout_rate) if dropout_rate > 0 else nn.Identity()
-        self.classifier = nn.Linear(4, num_classes)
+        if use_constrained_classifier:
+            classifier_kwargs = {"bias": use_bias, "scale": constraint_scale} if use_value_constraint else {"bias": use_bias}
+            self.classifier = ConstrainedLinear(4, num_classes, **classifier_kwargs)
+        else:
+            self.classifier = nn.Linear(4, num_classes, bias=use_bias)
 
     def _activate(self, x: torch.Tensor) -> torch.Tensor:
         return torch.tanh(x) if self.use_tanh_activations else F.relu(x)
