@@ -378,9 +378,23 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help_text="auto-scale selection penalties from target miss/FPR when selection_metric=balanced_norm",
     )
+    parser.add_argument(
+        "--best_metric",
+        type=str,
+        default="selection",
+        choices=("f1", "selection", "val_loss"),
+        help="Metric used to select and save the best model.",
+    )
+    parser.add_argument(
+        "--early_stop_metric",
+        type=str,
+        default="best_metric",
+        choices=("best_metric", "f1", "selection", "val_loss"),
+        help="Metric used for early stopping (defaults to best_metric).",
+    )
     parser.add_argument("--generalization_score_weight", type=float, default=0.35)
     parser.add_argument("--threshold_target_miss", type=float, default=0.10)
-    parser.add_argument("--threshold_max_fpr", type=float, default=0.10)
+    parser.add_argument("--threshold_max_fpr", type=float, default=0.15)
     parser.add_argument(
         "--threshold_recall_gain",
         type=float,
@@ -639,6 +653,7 @@ def main() -> None:
     best_score = -float("inf")
     best_state = None
     best_threshold = 0.5
+    best_early_stop_score = -float("inf")
     patience_counter = 0
 
     history: List[Dict[str, float]] = []
@@ -790,13 +805,28 @@ def main() -> None:
                 + args.selection_fpr_weight * val_metrics["fpr"]
             )
 
+        best_metric_score = selection_score if args.best_metric == "selection" else val_metrics["f1"]
+        if args.best_metric == "val_loss":
+            best_metric_score = -val_loss
+
+        early_stop_metric = args.early_stop_metric
+        if early_stop_metric == "best_metric":
+            early_stop_metric = args.best_metric
+        early_stop_score = selection_score if early_stop_metric == "selection" else val_metrics["f1"]
+        if early_stop_metric == "val_loss":
+            early_stop_score = -val_loss
+
+        improved_early_stop = early_stop_score > best_early_stop_score
+        if improved_early_stop:
+            best_early_stop_score = early_stop_score
+
         scheduler.step(val_loss)
 
         print(
             f"Epoch {epoch:03d} | TrainLoss {train_loss:.4f} | ValLoss {val_loss:.4f} | "
             f"Val F1 {val_metrics['f1']:.3f} Miss {val_metrics['miss_rate'] * 100:.2f}% FPR {val_metrics['fpr'] * 100:.2f}% | "
             f"Gen F1 {gen_metrics['f1']:.3f} Miss {gen_metrics['miss_rate'] * 100:.2f}% FPR {gen_metrics['fpr'] * 100:.2f}% | "
-            f"Thr {best_thr_epoch:.4f} | SelScore {selection_score:.4f}"
+            f"Thr {best_thr_epoch:.4f} | SelScore {selection_score:.4f} | BestScore {best_metric_score:.4f}"
         )
 
         history.append(
@@ -812,6 +842,7 @@ def main() -> None:
                 "gen_fpr": gen_metrics["fpr"],
                 "threshold": best_thr_epoch,
                 "selection_score": selection_score,
+                "best_metric_score": best_metric_score,
             }
         )
 
@@ -829,11 +860,12 @@ def main() -> None:
                 "gen_fpr": gen_metrics["fpr"],
                 "threshold": best_thr_epoch,
                 "selection_score": selection_score,
+                "best_metric_score": best_metric_score,
             }
         )
 
-        if selection_score > best_score:
-            best_score = selection_score
+        if best_metric_score > best_score:
+            best_score = best_metric_score
             best_state = student.state_dict()
             best_threshold = best_thr_epoch
             patience_counter = 0
@@ -846,6 +878,7 @@ def main() -> None:
                     "val_miss": val_metrics["miss_rate"],
                     "val_fpr": val_metrics["fpr"],
                     "selection_score": selection_score,
+                    "best_metric_score": best_metric_score,
                     "gen_f1": gen_metrics["f1"],
                     "gen_miss": gen_metrics["miss_rate"],
                     "gen_fpr": gen_metrics["fpr"],
@@ -853,10 +886,13 @@ def main() -> None:
                 }
             )
         else:
-            patience_counter += 1
-            if patience_counter >= args.patience and epoch >= args.min_epochs:
-                print("Early stopping triggered.")
-                break
+            if improved_early_stop:
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= args.patience and epoch >= args.min_epochs:
+                    print("Early stopping triggered.")
+                    break
 
     if best_state is not None:
         student.load_state_dict(best_state)
