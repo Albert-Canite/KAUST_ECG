@@ -87,11 +87,16 @@ def _load_model(checkpoint_path: str, device: torch.device) -> torch.nn.Module:
     return model
 
 
+DEFAULT_DATA_PATH = "E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/"
+DEFAULT_ORIGINAL_MODEL = os.path.join("artifacts", "original_model.pt")
+DEFAULT_HARDWARE_MODEL = os.path.join("artifacts", "hardware_model.pt")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare ROC curves under fixed hardware conditions")
-    parser.add_argument("--data_path", type=str, required=True)
-    parser.add_argument("--original_model", type=str, required=True)
-    parser.add_argument("--hardware_model", type=str, required=True)
+    parser.add_argument("--data_path", type=str, default=DEFAULT_DATA_PATH)
+    parser.add_argument("--original_model", type=str, default=DEFAULT_ORIGINAL_MODEL)
+    parser.add_argument("--hardware_model", type=str, default=DEFAULT_HARDWARE_MODEL)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--input_bits", type=int, default=5)
     parser.add_argument("--weight_bits", type=int, default=5)
@@ -113,6 +118,18 @@ def main() -> None:
     args = parse_args()
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    for label, path in (("original_model", args.original_model), ("hardware_model", args.hardware_model)):
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"{label} checkpoint not found: {path}. Update DEFAULT_* paths in compare_hardware_roc.py or "
+                "pass --original_model/--hardware_model."
+            )
+    if not os.path.isdir(args.data_path):
+        raise FileNotFoundError(
+            f"data_path not found: {args.data_path}. Update DEFAULT_DATA_PATH in compare_hardware_roc.py or "
+            "pass --data_path."
+        )
 
     gen_x, gen_y = load_records(GENERALIZATION_RECORDS, args.data_path)
     if gen_x.size == 0:
