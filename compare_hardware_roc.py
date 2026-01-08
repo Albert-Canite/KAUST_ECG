@@ -8,7 +8,7 @@ from typing import List, Tuple
 
 import numpy as np
 import torch
-from sklearn.metrics import auc, roc_curve
+from sklearn.metrics import auc
 
 from data import ECGBeatDataset, load_records, set_seed
 from train_hardware import (
@@ -66,6 +66,22 @@ def _collect_probs(
                 trues.extend(labels.cpu().tolist())
                 probs.extend(prob_pos.cpu().tolist())
     return trues, probs
+
+
+def _sweep_roc(
+    trues: List[int],
+    probs: List[float],
+    thresholds: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    fprs: List[float] = []
+    tprs: List[float] = []
+    probs_arr = np.array(probs)
+    for threshold in thresholds:
+        pred = (probs_arr >= threshold).astype(int).tolist()
+        metrics = confusion_metrics(trues, pred)
+        tprs.append(metrics["sensitivity"])
+        fprs.append(metrics["fpr"])
+    return np.array(fprs), np.array(tprs)
 
 
 def _infer_model_overrides(state_dict: dict) -> dict:
@@ -217,17 +233,21 @@ def main() -> None:
         args.zero_mean_inputs,
     )
 
-    orig_fpr, orig_tpr, orig_thresholds = roc_curve(orig_true, orig_probs)
-    hw_fpr, hw_tpr, hw_thresholds = roc_curve(hw_true, hw_probs)
-    orig_auc = auc(orig_fpr, orig_tpr)
-    hw_auc = auc(hw_fpr, hw_tpr)
+    thresholds = np.linspace(0.0, 1.0, num=1001)
+    orig_fpr, orig_tpr = _sweep_roc(orig_true, orig_probs, thresholds)
+    hw_fpr, hw_tpr = _sweep_roc(hw_true, hw_probs, thresholds)
+
+    orig_order = np.argsort(orig_fpr)
+    hw_order = np.argsort(hw_fpr)
+    orig_auc = auc(orig_fpr[orig_order], orig_tpr[orig_order])
+    hw_auc = auc(hw_fpr[hw_order], hw_tpr[hw_order])
 
     orig_j = orig_tpr - orig_fpr
     hw_j = hw_tpr - hw_fpr
     orig_best_idx = int(np.argmax(orig_j))
     hw_best_idx = int(np.argmax(hw_j))
-    orig_best_threshold = float(orig_thresholds[orig_best_idx])
-    hw_best_threshold = float(hw_thresholds[hw_best_idx])
+    orig_best_threshold = float(thresholds[orig_best_idx])
+    hw_best_threshold = float(thresholds[hw_best_idx])
 
     orig_pred = (np.array(orig_probs) >= orig_best_threshold).astype(int).tolist()
     hw_pred = (np.array(hw_probs) >= hw_best_threshold).astype(int).tolist()
@@ -238,8 +258,8 @@ def main() -> None:
     import matplotlib.pyplot as plt
 
     plt.figure(figsize=(6, 5))
-    plt.plot(orig_fpr, orig_tpr, label=f"Original AUC={orig_auc:.3f}")
-    plt.plot(hw_fpr, hw_tpr, label=f"Hardware AUC={hw_auc:.3f}")
+    plt.plot(orig_fpr[orig_order], orig_tpr[orig_order], label=f"Original AUC={orig_auc:.3f}")
+    plt.plot(hw_fpr[hw_order], hw_tpr[hw_order], label=f"Hardware AUC={hw_auc:.3f}")
     plt.scatter(
         [orig_fpr[orig_best_idx]],
         [orig_tpr[orig_best_idx]],
