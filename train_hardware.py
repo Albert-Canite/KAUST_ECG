@@ -117,6 +117,12 @@ def add_gaussian_noise_snr(x: torch.Tensor, snr_db: float) -> torch.Tensor:
     return x + noise
 
 
+def renormalize_to_unit(beats: torch.Tensor) -> torch.Tensor:
+    max_abs = beats.abs().amax(dim=2, keepdim=True)
+    safe = torch.where(max_abs > 1e-6, beats / max_abs, beats)
+    return torch.clamp(safe, -1.0, 1.0)
+
+
 def _iter_effective_weights(model: nn.Module) -> List[Tuple[str, torch.Tensor]]:
     weights: List[Tuple[str, torch.Tensor]] = []
     for name, module in model.named_modules():
@@ -218,6 +224,8 @@ def apply_hardware_effects(
     pbr_min_prominence: float,
     hardware_prob: float,
     training: bool,
+    renormalize: bool = True,
+    zero_mean: bool = True,
 ) -> torch.Tensor:
     apply_effects = True
     if training and hardware_prob < 1.0:
@@ -227,11 +235,19 @@ def apply_hardware_effects(
         pbr_factor = _sample_uniform(pbr_min, pbr_max, device)
         signals = apply_pbr_attenuation(signals, pbr_factor, pbr_peak_window, pbr_min_prominence)
         signals = signals.to(device)
+        if zero_mean:
+            signals = signals - signals.mean(dim=-1, keepdim=True)
+        if renormalize:
+            signals = renormalize_to_unit(signals)
         snr_db = _sample_uniform(snr_min, snr_max, device)
         signals = add_gaussian_noise_snr(signals, snr_db)
     else:
         signals = signals.to(device)
 
+    if zero_mean:
+        signals = signals - signals.mean(dim=-1, keepdim=True)
+    if renormalize:
+        signals = renormalize_to_unit(signals)
     return quantize_beats(signals, input_bits)
 
 
@@ -242,6 +258,8 @@ def evaluate(
     return_probs: bool = False,
     threshold: float | None = None,
     use_hardware: bool = True,
+    renormalize_inputs: bool = True,
+    zero_mean_inputs: bool = True,
     input_bits: int = 5,
     weight_bits: int = 5,
     snr_min: float = 10.0,
@@ -274,6 +292,8 @@ def evaluate(
                     pbr_min_prominence,
                     hardware_prob=1.0,
                     training=False,
+                    renormalize=renormalize_inputs,
+                    zero_mean=zero_mean_inputs,
                 )
             else:
                 signals = quantize_beats(signals.to(device), input_bits)
@@ -319,7 +339,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min_epochs", type=int, default=25, help="Minimum epochs before early stopping")
     parser.add_argument("--scheduler_patience", type=int, default=3)
     parser.add_argument("--dropout_rate", type=float, default=0.2)
-    parser.add_argument("--num_mlp_layers", type=int, default=0)
+    parser.add_argument("--num_mlp_layers", type=int, default=1)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
     parser.add_argument("--class_weight_abnormal", type=float, default=1.35)
     parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
@@ -409,6 +429,44 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Probability of applying noise/PBR per batch during training (input quantization always applies)",
     )
+    parser.add_argument(
+        "--hardware_warmup_epochs",
+        type=int,
+        default=15,
+        help="Linearly ramp hardware probability and perturbation strength for this many epochs",
+    )
+    parser.add_argument(
+        "--hardware_prob_start",
+        type=float,
+        default=0.4,
+        help="Starting hardware probability during warmup",
+    )
+    parser.add_argument(
+        "--snr_min_start",
+        type=float,
+        default=20.0,
+        help="Starting minimum SNR during warmup (higher is cleaner)",
+    )
+    parser.add_argument(
+        "--snr_max_start",
+        type=float,
+        default=35.0,
+        help="Starting maximum SNR during warmup (higher is cleaner)",
+    )
+    parser.add_argument(
+        "--pbr_min_start",
+        type=float,
+        default=0.8,
+        help="Starting minimum PBR attenuation factor during warmup (closer to 1.0 is cleaner)",
+    )
+    parser.add_argument(
+        "--pbr_max_start",
+        type=float,
+        default=0.95,
+        help="Starting maximum PBR attenuation factor during warmup (closer to 1.0 is cleaner)",
+    )
+    _add_bool_arg(parser, "renormalize_inputs", default=True, help_text="renormalize beats after hardware effects")
+    _add_bool_arg(parser, "zero_mean_inputs", default=True, help_text="zero-mean beats after hardware effects")
     _add_bool_arg(parser, "hardware_eval", default=True, help_text="hardware effects during validation")
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
@@ -522,6 +580,16 @@ def main() -> None:
         running_loss = 0.0
         total = 0
 
+        if args.hardware_warmup_epochs > 0:
+            warmup_progress = min(1.0, epoch / args.hardware_warmup_epochs)
+        else:
+            warmup_progress = 1.0
+        warmup_prob = args.hardware_prob_start + warmup_progress * (args.hardware_prob - args.hardware_prob_start)
+        warmup_snr_min = args.snr_min_start + warmup_progress * (args.snr_min - args.snr_min_start)
+        warmup_snr_max = args.snr_max_start + warmup_progress * (args.snr_max - args.snr_max_start)
+        warmup_pbr_min = args.pbr_min_start + warmup_progress * (args.pbr_min - args.pbr_min_start)
+        warmup_pbr_max = args.pbr_max_start + warmup_progress * (args.pbr_max - args.pbr_max_start)
+
         adaptive_pos_boost = 1.0 + miss_ema * 0.8
         epoch_weights = base_weights.clone()
         epoch_weights[1] = torch.clamp(
@@ -537,14 +605,16 @@ def main() -> None:
                 signals,
                 device,
                 args.input_bits,
-                args.snr_min,
-                args.snr_max,
-                args.pbr_min,
-                args.pbr_max,
+                warmup_snr_min,
+                warmup_snr_max,
+                warmup_pbr_min,
+                warmup_pbr_max,
                 args.pbr_peak_window,
                 args.pbr_min_prominence,
-                args.hardware_prob,
+                warmup_prob,
                 training=True,
+                renormalize=args.renormalize_inputs,
+                zero_mean=args.zero_mean_inputs,
             )
             optimizer.zero_grad()
 
@@ -569,6 +639,8 @@ def main() -> None:
             device,
             return_probs=True,
             use_hardware=args.hardware_eval,
+            renormalize_inputs=args.renormalize_inputs,
+            zero_mean_inputs=args.zero_mean_inputs,
             input_bits=args.input_bits,
             weight_bits=args.weight_bits,
             snr_min=args.snr_min,
@@ -584,6 +656,8 @@ def main() -> None:
             device,
             return_probs=True,
             use_hardware=args.hardware_eval,
+            renormalize_inputs=args.renormalize_inputs,
+            zero_mean_inputs=args.zero_mean_inputs,
             input_bits=args.input_bits,
             weight_bits=args.weight_bits,
             snr_min=args.snr_min,
@@ -684,6 +758,8 @@ def main() -> None:
         device,
         return_probs=True,
         use_hardware=args.hardware_eval,
+        renormalize_inputs=args.renormalize_inputs,
+        zero_mean_inputs=args.zero_mean_inputs,
         input_bits=args.input_bits,
         weight_bits=args.weight_bits,
         snr_min=args.snr_min,
@@ -699,6 +775,8 @@ def main() -> None:
         device,
         return_probs=True,
         use_hardware=args.hardware_eval,
+        renormalize_inputs=args.renormalize_inputs,
+        zero_mean_inputs=args.zero_mean_inputs,
         input_bits=args.input_bits,
         weight_bits=args.weight_bits,
         snr_min=args.snr_min,
