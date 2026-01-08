@@ -24,6 +24,7 @@ from utils import (
     BalancedBatchSampler,
     compute_class_weights,
     confusion_metrics,
+    soft_miss_fpr,
     make_weighted_sampler,
     sweep_thresholds,
     sweep_thresholds_min_fpr,
@@ -156,6 +157,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--class_weight_abnormal", type=float, default=1.35)
     parser.add_argument("--class_weight_max_ratio", type=float, default=2.0)
     parser.add_argument("--generalization_score_weight", type=float, default=0.35)
+    parser.add_argument("--loss_miss_weight", type=float, default=0.35)
+    parser.add_argument("--loss_fpr_weight", type=float, default=0.65)
     parser.add_argument("--threshold_target_miss", type=float, default=0.10)
     parser.add_argument("--threshold_max_fpr", type=float, default=0.10)
     parser.add_argument(
@@ -314,12 +317,24 @@ def main() -> None:
 
     print(f"Preprocessed input range: [{data_min:.3f}, {data_max:.3f}] (expected within [-1, 1])")
 
-    best_val_f1 = -float("inf")
+    best_score = -float("inf")
     best_state = None
     best_threshold = 0.5
     patience_counter = 0
 
     history: List[Dict[str, float]] = []
+
+    def _score_metrics(metrics: Dict[str, float]) -> float:
+        return (
+            metrics["f1"]
+            + args.threshold_recall_gain * metrics["sensitivity"]
+            - args.threshold_miss_penalty * metrics["miss_rate"]
+            - metrics["fpr"]
+        )
+
+    def _selection_score(val_metrics: Dict[str, float], gen_metrics: Dict[str, float]) -> float:
+        gen_weight = float(np.clip(args.generalization_score_weight, 0.0, 1.0))
+        return (1 - gen_weight) * _score_metrics(val_metrics) + gen_weight * _score_metrics(gen_metrics)
 
     for epoch in range(1, args.max_epochs + 1):
         student.train()
@@ -340,7 +355,13 @@ def main() -> None:
             optimizer.zero_grad()
 
             logits, _ = student(signals)
-            loss = ce_loss_fn(logits, labels)
+            prob_pos = torch.softmax(logits, dim=1)[:, 1]
+            soft_miss, soft_fpr = soft_miss_fpr(prob_pos, labels)
+            loss = (
+                ce_loss_fn(logits, labels)
+                + args.loss_miss_weight * soft_miss
+                + args.loss_fpr_weight * soft_fpr
+            )
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
@@ -383,6 +404,8 @@ def main() -> None:
             f"Thr {best_thr_epoch:.4f}"
         )
 
+        selection_score = _selection_score(val_metrics, gen_metrics)
+
         history.append(
             {
                 "epoch": epoch,
@@ -395,6 +418,7 @@ def main() -> None:
                 "gen_miss": gen_metrics["miss_rate"],
                 "gen_fpr": gen_metrics["fpr"],
                 "threshold": best_thr_epoch,
+                "selection_score": selection_score,
             }
         )
 
@@ -411,11 +435,12 @@ def main() -> None:
                 "gen_miss": gen_metrics["miss_rate"],
                 "gen_fpr": gen_metrics["fpr"],
                 "threshold": best_thr_epoch,
+                "selection_score": selection_score,
             }
         )
 
-        if val_metrics["f1"] > best_val_f1:
-            best_val_f1 = val_metrics["f1"]
+        if selection_score > best_score:
+            best_score = selection_score
             best_state = student.state_dict()
             best_threshold = best_thr_epoch
             patience_counter = 0
@@ -431,6 +456,7 @@ def main() -> None:
                     "gen_miss": gen_metrics["miss_rate"],
                     "gen_fpr": gen_metrics["fpr"],
                     "threshold": best_thr_epoch,
+                    "selection_score": selection_score,
                 }
             )
         else:

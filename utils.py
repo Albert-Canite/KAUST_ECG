@@ -69,6 +69,26 @@ def confusion_metrics(y_true: List[int], y_pred: List[int]) -> Dict[str, float]:
     }
 
 
+def soft_miss_fpr(
+    probs: torch.Tensor,
+    labels: torch.Tensor,
+    eps: float = 1e-8,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Differentiable miss rate and FPR estimates using probabilities."""
+
+    labels = labels.float()
+    probs = probs.float()
+    pos_mask = labels
+    neg_mask = 1.0 - labels
+
+    pos_count = pos_mask.sum().clamp_min(eps)
+    neg_count = neg_mask.sum().clamp_min(eps)
+
+    soft_miss = ((1.0 - probs) * pos_mask).sum() / pos_count
+    soft_fpr = (probs * neg_mask).sum() / neg_count
+    return soft_miss, soft_fpr
+
+
 def sweep_thresholds(
     y_true: List[int],
     probs: List[float],
