@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 from matplotlib import pyplot as plt
 from sklearn.metrics import auc, confusion_matrix, roc_curve
 
+from constraints import ConstrainedConv1d, ConstrainedLinear
 from data import BEAT_LABEL_MAP, ECGBeatDataset, load_records, set_seed, split_dataset
 from models.student import SegmentAwareStudent
 from quantize_pbr_eval import apply_pbr_attenuation
@@ -116,11 +117,20 @@ def add_gaussian_noise_snr(x: torch.Tensor, snr_db: float) -> torch.Tensor:
     return x + noise
 
 
+def _iter_effective_weights(model: nn.Module) -> List[Tuple[str, torch.Tensor]]:
+    weights: List[Tuple[str, torch.Tensor]] = []
+    for name, module in model.named_modules():
+        if isinstance(module, (ConstrainedConv1d, ConstrainedLinear)):
+            weights.append((f"{name}.weight", module.weight))
+        elif isinstance(module, (nn.Conv1d, nn.Linear)):
+            weights.append((f"{name}.weight", module.weight))
+    return weights
+
+
 def weight_target_regularizer(model: nn.Module, target: float) -> torch.Tensor:
     penalties: List[torch.Tensor] = []
-    for param in model.parameters():
-        if param.dim() >= 2:
-            penalties.append((param.abs() - target).pow(2).mean())
+    for _, weight in _iter_effective_weights(model):
+        penalties.append((weight.abs() - target).pow(2).mean())
     if not penalties:
         return torch.tensor(0.0, device=next(model.parameters()).device)
     return torch.stack(penalties).mean()
@@ -151,26 +161,43 @@ def build_student(args: argparse.Namespace, device: torch.device) -> nn.Module:
         use_value_constraint=args.use_value_constraint,
         use_tanh_activations=args.use_tanh_activations,
         constraint_scale=args.constraint_scale,
+        use_bias=args.use_bias,
+        use_constrained_classifier=args.use_constrained_classifier,
     ).to(device)
     return student
 
 
-def export_weights_csv(model: nn.Module, output_path: str) -> None:
+def _quantize_export_tensor(x: torch.Tensor, bits: int | None) -> torch.Tensor:
+    if bits is None or bits < 1:
+        return x
+    return quantize_tensor_symmetric(x, bits)
+
+
+def export_weights_csv(model: nn.Module, output_path: str, weight_bits: int | None) -> None:
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     with open(output_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["param_name", "kernel_index", "flat_index", "value"])
-        for name, param in model.named_parameters():
-            data = param.detach().cpu()
-            if data.dim() >= 2:
-                for kernel_idx in range(data.shape[0]):
-                    flat = data[kernel_idx].reshape(-1)
-                    for flat_idx, value in enumerate(flat.tolist()):
-                        writer.writerow([name, kernel_idx, flat_idx, value])
-            else:
-                flat = data.reshape(-1)
+        for name, weight in _iter_effective_weights(model):
+            data = _quantize_export_tensor(weight.detach().cpu(), weight_bits)
+            for kernel_idx in range(data.shape[0]):
+                flat = data[kernel_idx].reshape(-1)
                 for flat_idx, value in enumerate(flat.tolist()):
-                    writer.writerow([name, 0, flat_idx, value])
+                    writer.writerow([name, kernel_idx, flat_idx, value])
+
+        for name, module in model.named_modules():
+            bias = None
+            if isinstance(module, (ConstrainedConv1d, ConstrainedLinear)):
+                bias = module.bias
+            elif isinstance(module, (nn.Conv1d, nn.Linear)):
+                bias = module.bias
+            if bias is None:
+                continue
+            bias_name = f"{name}.bias"
+            bias_data = _quantize_export_tensor(bias.detach().cpu(), weight_bits)
+            flat = bias_data.reshape(-1)
+            for flat_idx, value in enumerate(flat.tolist()):
+                writer.writerow([bias_name, 0, flat_idx, value])
 
 
 def _sample_uniform(min_val: float, max_val: float, device: torch.device) -> float:
@@ -374,6 +401,8 @@ def parse_args() -> argparse.Namespace:
         default=1e-4,
         help="Strength of weight-target regularization (use small value to avoid hurting accuracy)",
     )
+    _add_bool_arg(parser, "use_bias", default=False, help_text="bias terms in layers")
+    _add_bool_arg(parser, "use_constrained_classifier", default=True, help_text="constrained classifier weights")
     parser.add_argument(
         "--hardware_prob",
         type=float,
@@ -938,7 +967,7 @@ def main() -> None:
     print(f"Saved student checkpoint to {save_path}")
 
     weights_csv_path = os.path.join("artifacts", "hardware_weights.csv")
-    export_weights_csv(student, weights_csv_path)
+    export_weights_csv(student, weights_csv_path, args.weight_bits)
     print(f"Saved hardware-trained weights CSV to {weights_csv_path}")
 
     os.makedirs("artifacts", exist_ok=True)
