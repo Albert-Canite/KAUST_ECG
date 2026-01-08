@@ -346,9 +346,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--selection_metric",
         type=str,
-        default="balanced",
-        choices=("f1", "balanced"),
-        help="Metric to select best model: f1 or balanced (penalize miss/FPR).",
+        default="balanced_norm",
+        choices=("f1", "balanced", "balanced_norm"),
+        help=(
+            "Metric to select best model: f1, balanced (penalize miss/FPR), or "
+            "balanced_norm (penalize miss/FPR normalized by their targets)."
+        ),
     )
     parser.add_argument(
         "--selection_miss_weight",
@@ -361,6 +364,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="FPR penalty weight when selection_metric=balanced.",
+    )
+    _add_bool_arg(
+        parser,
+        "selection_auto_weights",
+        default=True,
+        help_text="auto-scale selection penalties from target miss/FPR when selection_metric=balanced_norm",
     )
     parser.add_argument("--generalization_score_weight", type=float, default=0.35)
     parser.add_argument("--threshold_target_miss", type=float, default=0.10)
@@ -705,6 +714,16 @@ def main() -> None:
 
         if args.selection_metric == "f1":
             selection_score = val_metrics["f1"]
+        elif args.selection_metric == "balanced_norm":
+            miss_weight = args.selection_miss_weight
+            fpr_weight = args.selection_fpr_weight
+            if args.selection_auto_weights:
+                miss_weight = 1.0 / max(args.threshold_target_miss, 1e-6)
+                fpr_weight = 1.0 / max(args.threshold_max_fpr, 1e-6)
+            selection_score = val_metrics["f1"] - (
+                miss_weight * (val_metrics["miss_rate"] / max(args.threshold_target_miss, 1e-6))
+                + fpr_weight * (val_metrics["fpr"] / max(args.threshold_max_fpr, 1e-6))
+            )
         else:
             selection_score = val_metrics["f1"] - (
                 args.selection_miss_weight * val_metrics["miss_rate"]
