@@ -67,29 +67,39 @@ def _collect_probs(
     return trues, probs
 
 
+def _build_model_args(config: dict | None) -> argparse.Namespace:
+    defaults = {
+        "num_mlp_layers": 1,
+        "dropout_rate": 0.2,
+        "use_value_constraint": True,
+        "use_tanh_activations": False,
+        "constraint_scale": 1.0,
+        "use_bias": False,
+        "use_constrained_classifier": True,
+    }
+    if config:
+        for key in defaults:
+            if key in config:
+                defaults[key] = config[key]
+    return argparse.Namespace(**defaults)
+
+
 def _load_model(checkpoint_path: str, device: torch.device) -> torch.nn.Module:
-    model = build_student(
-        argparse.Namespace(
-            num_mlp_layers=1,
-            dropout_rate=0.2,
-            use_value_constraint=True,
-            use_tanh_activations=False,
-            constraint_scale=1.0,
-            use_bias=False,
-            use_constrained_classifier=True,
-        ),
-        device,
-    )
     state = torch.load(checkpoint_path, map_location=device)
-    if isinstance(state, dict) and "state_dict" in state:
-        state = state["state_dict"]
+    config = state.get("config") if isinstance(state, dict) else None
+    model = build_student(_build_model_args(config), device)
+    if isinstance(state, dict):
+        for key in ("state_dict", "student_state_dict", "model_state_dict"):
+            if key in state:
+                state = state[key]
+                break
     model.load_state_dict(state)
     return model
 
 
 DEFAULT_DATA_PATH = "E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/"
-DEFAULT_ORIGINAL_MODEL = os.path.join("artifacts", "original_model.pt")
-DEFAULT_HARDWARE_MODEL = os.path.join("artifacts", "hardware_model.pt")
+DEFAULT_ORIGINAL_MODEL = os.path.join("saved_models", "student_model.pth")
+DEFAULT_HARDWARE_MODEL = os.path.join("saved_models", "student_model_hardware.pth")
 
 
 def parse_args() -> argparse.Namespace:
