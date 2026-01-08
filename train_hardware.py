@@ -345,7 +345,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=25, help="Early stopping patience on monitored metric")
     parser.add_argument("--min_epochs", type=int, default=25, help="Minimum epochs before early stopping")
     parser.add_argument("--scheduler_patience", type=int, default=3)
-    parser.add_argument("--dropout_rate", type=float, default=0.2)
+    parser.add_argument("--dropout_rate", type=float, default=0.1)
     parser.add_argument("--num_mlp_layers", type=int, default=1)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
     parser.add_argument("--class_weight_abnormal", type=float, default=1.35)
