@@ -258,6 +258,7 @@ def evaluate(
     return_probs: bool = False,
     threshold: float | None = None,
     use_hardware: bool = True,
+    seed: int | None = None,
     renormalize_inputs: bool = True,
     zero_mean_inputs: bool = True,
     input_bits: int = 5,
@@ -276,41 +277,47 @@ def evaluate(
     preds: List[int] = []
     trues: List[int] = []
     probs: List[float] = []
-    with torch.no_grad():
-        for signals, labels in data_loader:
-            labels = labels.to(device)
-            if use_hardware:
-                signals = apply_hardware_effects(
-                    signals,
-                    device,
-                    input_bits,
-                    snr_min,
-                    snr_max,
-                    pbr_min,
-                    pbr_max,
-                    pbr_peak_window,
-                    pbr_min_prominence,
-                    hardware_prob=1.0,
-                    training=False,
-                    renormalize=renormalize_inputs,
-                    zero_mean=zero_mean_inputs,
-                )
-            else:
-                signals = quantize_beats(signals.to(device), input_bits)
-            with quantized_weights(model, bits=weight_bits):
-                logits, _ = model(signals)
-            loss = criterion(logits, labels)
-            total_loss += loss.item() * labels.size(0)
-            total += labels.size(0)
-            prob_pos = torch.softmax(logits, dim=1)[:, 1]
-            if threshold is None:
-                pred = torch.argmax(logits, dim=1)
-            else:
-                pred = (prob_pos >= threshold).long()
-            preds.extend(pred.cpu().tolist())
-            trues.extend(labels.cpu().tolist())
-            if return_probs:
-                probs.extend(prob_pos.cpu().tolist())
+    rng_devices = [device] if device.type == "cuda" else []
+    with torch.random.fork_rng(devices=rng_devices, enabled=seed is not None):
+        if seed is not None:
+            torch.manual_seed(seed)
+            if device.type == "cuda":
+                torch.cuda.manual_seed_all(seed)
+        with torch.no_grad():
+            for signals, labels in data_loader:
+                labels = labels.to(device)
+                if use_hardware:
+                    signals = apply_hardware_effects(
+                        signals,
+                        device,
+                        input_bits,
+                        snr_min,
+                        snr_max,
+                        pbr_min,
+                        pbr_max,
+                        pbr_peak_window,
+                        pbr_min_prominence,
+                        hardware_prob=1.0,
+                        training=False,
+                        renormalize=renormalize_inputs,
+                        zero_mean=zero_mean_inputs,
+                    )
+                else:
+                    signals = quantize_beats(signals.to(device), input_bits)
+                with quantized_weights(model, bits=weight_bits):
+                    logits, _ = model(signals)
+                loss = criterion(logits, labels)
+                total_loss += loss.item() * labels.size(0)
+                total += labels.size(0)
+                prob_pos = torch.softmax(logits, dim=1)[:, 1]
+                if threshold is None:
+                    pred = torch.argmax(logits, dim=1)
+                else:
+                    pred = (prob_pos >= threshold).long()
+                preds.extend(pred.cpu().tolist())
+                trues.extend(labels.cpu().tolist())
+                if return_probs:
+                    probs.extend(prob_pos.cpu().tolist())
     avg_loss = total_loss / max(total, 1)
     metrics = confusion_metrics(trues, preds)
     return avg_loss, metrics, trues, preds, probs
@@ -437,6 +444,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pbr_max", type=float, default=0.9)
     parser.add_argument("--pbr_peak_window", type=int, default=12)
     parser.add_argument("--pbr_min_prominence", type=float, default=0.05)
+    _add_bool_arg(
+        parser,
+        "fixed_eval_hardware",
+        default=True,
+        help_text="fixed worst-case hardware during eval (uses eval_fixed_* values)",
+    )
+    parser.add_argument(
+        "--eval_fixed_snr",
+        type=float,
+        default=None,
+        help="Fixed SNR (dB) for eval when fixed_eval_hardware is enabled (defaults to snr_min).",
+    )
+    parser.add_argument(
+        "--eval_fixed_pbr",
+        type=float,
+        default=None,
+        help="Fixed PBR attenuation for eval when fixed_eval_hardware is enabled (defaults to pbr_min).",
+    )
+    parser.add_argument(
+        "--eval_fixed_seed",
+        type=int,
+        default=1234,
+        help="Random seed for eval noise generation when fixed_eval_hardware is enabled.",
+    )
     parser.add_argument(
         "--weight_target",
         type=float,
@@ -595,6 +626,15 @@ def main() -> None:
     )
 
     print(f"Preprocessed input range: [{data_min:.3f}, {data_max:.3f}] (expected within [-1, 1])")
+    if args.fixed_eval_hardware and args.hardware_eval:
+        fixed_snr = args.eval_fixed_snr if args.eval_fixed_snr is not None else args.snr_min
+        fixed_pbr = args.eval_fixed_pbr if args.eval_fixed_pbr is not None else args.pbr_min
+        print(
+            "Eval hardware set to fixed worst-case: "
+            f"SNR={fixed_snr:.2f}dB, PBR={fixed_pbr:.2f}, seed={args.eval_fixed_seed}"
+        )
+    elif args.hardware_eval:
+        print("Eval hardware set to random sampling across configured SNR/PBR ranges.")
 
     best_score = -float("inf")
     best_state = None
@@ -602,6 +642,22 @@ def main() -> None:
     patience_counter = 0
 
     history: List[Dict[str, float]] = []
+
+    def _eval_params() -> Tuple[float, float, float, float, int | None]:
+        eval_snr_min = args.snr_min
+        eval_snr_max = args.snr_max
+        eval_pbr_min = args.pbr_min
+        eval_pbr_max = args.pbr_max
+        eval_seed = None
+        if args.fixed_eval_hardware and args.hardware_eval:
+            fixed_snr = args.eval_fixed_snr if args.eval_fixed_snr is not None else args.snr_min
+            fixed_pbr = args.eval_fixed_pbr if args.eval_fixed_pbr is not None else args.pbr_min
+            eval_snr_min = fixed_snr
+            eval_snr_max = fixed_snr
+            eval_pbr_min = fixed_pbr
+            eval_pbr_max = fixed_pbr
+            eval_seed = args.eval_fixed_seed
+        return eval_snr_min, eval_snr_max, eval_pbr_min, eval_pbr_max, eval_seed
 
     for epoch in range(1, args.max_epochs + 1):
         student.train()
@@ -661,20 +717,23 @@ def main() -> None:
 
         train_loss = running_loss / max(total, 1)
 
+        eval_snr_min, eval_snr_max, eval_pbr_min, eval_pbr_max, eval_seed = _eval_params()
+
         val_loss, _, val_true, _, val_probs = evaluate(
             student,
             val_loader,
             device,
             return_probs=True,
             use_hardware=args.hardware_eval,
+            seed=eval_seed,
             renormalize_inputs=args.renormalize_inputs,
             zero_mean_inputs=args.zero_mean_inputs,
             input_bits=args.input_bits,
             weight_bits=args.weight_bits,
-            snr_min=args.snr_min,
-            snr_max=args.snr_max,
-            pbr_min=args.pbr_min,
-            pbr_max=args.pbr_max,
+            snr_min=eval_snr_min,
+            snr_max=eval_snr_max,
+            pbr_min=eval_pbr_min,
+            pbr_max=eval_pbr_max,
             pbr_peak_window=args.pbr_peak_window,
             pbr_min_prominence=args.pbr_min_prominence,
         )
@@ -684,14 +743,15 @@ def main() -> None:
             device,
             return_probs=True,
             use_hardware=args.hardware_eval,
+            seed=eval_seed,
             renormalize_inputs=args.renormalize_inputs,
             zero_mean_inputs=args.zero_mean_inputs,
             input_bits=args.input_bits,
             weight_bits=args.weight_bits,
-            snr_min=args.snr_min,
-            snr_max=args.snr_max,
-            pbr_min=args.pbr_min,
-            pbr_max=args.pbr_max,
+            snr_min=eval_snr_min,
+            snr_max=eval_snr_max,
+            pbr_min=eval_pbr_min,
+            pbr_max=eval_pbr_max,
             pbr_peak_window=args.pbr_peak_window,
             pbr_min_prominence=args.pbr_min_prominence,
         )
@@ -801,20 +861,22 @@ def main() -> None:
     if best_state is not None:
         student.load_state_dict(best_state)
 
+    eval_snr_min, eval_snr_max, eval_pbr_min, eval_pbr_max, eval_seed = _eval_params()
     val_loss, _, val_true, _, val_probs = evaluate(
         student,
         val_loader,
         device,
         return_probs=True,
         use_hardware=args.hardware_eval,
+        seed=eval_seed,
         renormalize_inputs=args.renormalize_inputs,
         zero_mean_inputs=args.zero_mean_inputs,
         input_bits=args.input_bits,
         weight_bits=args.weight_bits,
-        snr_min=args.snr_min,
-        snr_max=args.snr_max,
-        pbr_min=args.pbr_min,
-        pbr_max=args.pbr_max,
+        snr_min=eval_snr_min,
+        snr_max=eval_snr_max,
+        pbr_min=eval_pbr_min,
+        pbr_max=eval_pbr_max,
         pbr_peak_window=args.pbr_peak_window,
         pbr_min_prominence=args.pbr_min_prominence,
     )
@@ -824,14 +886,15 @@ def main() -> None:
         device,
         return_probs=True,
         use_hardware=args.hardware_eval,
+        seed=eval_seed,
         renormalize_inputs=args.renormalize_inputs,
         zero_mean_inputs=args.zero_mean_inputs,
         input_bits=args.input_bits,
         weight_bits=args.weight_bits,
-        snr_min=args.snr_min,
-        snr_max=args.snr_max,
-        pbr_min=args.pbr_min,
-        pbr_max=args.pbr_max,
+        snr_min=eval_snr_min,
+        snr_max=eval_snr_max,
+        pbr_min=eval_pbr_min,
+        pbr_max=eval_pbr_max,
         pbr_peak_window=args.pbr_peak_window,
         pbr_min_prominence=args.pbr_min_prominence,
     )
