@@ -23,7 +23,7 @@ class SegmentAwareStudent(nn.Module):
         constraint_scale: float = 1.0,
     ) -> None:
         super().__init__()
-        mlp_layers = max(1, num_mlp_layers)
+        mlp_layers = max(0, num_mlp_layers)
         self.use_value_constraint = use_value_constraint
         self.use_tanh_activations = use_tanh_activations
 

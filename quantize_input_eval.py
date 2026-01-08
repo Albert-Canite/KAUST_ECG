@@ -106,7 +106,7 @@ def parse_args() -> argparse.Namespace:
         default="E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/",
         help="Path to MIT-BIH dataset root",
     )
-    parser.add_argument("--model_path", type=str, default="saved_models/student_model.pth")
+    parser.add_argument("--model_path", type=str, default="saved_models/student_model_hardware.pth")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--threshold", type=float, default=0.346)
     parser.add_argument("--seed", type=int, default=7)
