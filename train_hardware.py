@@ -514,7 +514,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_strength_sweep",
         type=str,
-        default="1e-4,5e-4,1e-3",
+        default="1e-3,5e-3,1e-2",
         help=(
             "Comma-separated list of weight_target_strength values to train and compare. "
             "Leave empty to run a single model."
@@ -965,6 +965,11 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
         pbr_min_prominence=args.pbr_min_prominence,
     )
 
+    val_fpr_curve, val_tpr_curve, _ = roc_curve(val_true, val_probs)
+    val_auc = auc(val_fpr_curve, val_tpr_curve)
+    gen_fpr_curve, gen_tpr_curve, _ = roc_curve(gen_true, gen_probs)
+    gen_auc = auc(gen_fpr_curve, gen_tpr_curve)
+
     best_threshold, val_metrics, gen_metrics = sweep_thresholds_blended(
         val_true,
         val_probs,
@@ -1016,11 +1021,11 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
             gen_pred = (np.array(gen_probs) >= best_threshold).astype(int).tolist()
 
     print(
-        f"Final Val@thr={best_threshold:.4f}: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, "
+        f"Final Val@thr={best_threshold:.4f}: loss={val_loss:.4f}, F1={val_metrics['f1']:.3f}, AUC={val_auc:.3f}, "
         f"miss={val_metrics['miss_rate'] * 100:.2f}%, fpr={val_metrics['fpr'] * 100:.2f}%"
     )
     print(
-        f"Generalization@thr={gen_threshold:.4f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, "
+        f"Generalization@thr={gen_threshold:.4f}: loss={gen_loss:.4f}, F1={gen_metrics['f1']:.3f}, AUC={gen_auc:.3f}, "
         f"miss={gen_metrics['miss_rate'] * 100:.2f}%, fpr={gen_metrics['fpr'] * 100:.2f}%"
     )
     print(f"Generalization threshold source: {gen_threshold_source}")
@@ -1081,7 +1086,7 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
             -r["metrics"]["fpr"],
         ),
     )
-    best_roc_record = max(gen_records, key=lambda r: (r["roc"], -r["metrics"]["sensitivity"]))
+    best_j_record = max(gen_records, key=lambda r: (r["roc"], -r["metrics"]["sensitivity"]))
 
     coarse_step = 0.001
     coarse_thresholds = np.round(np.arange(0.0, 1.0 + coarse_step / 2, coarse_step), 3).tolist()
@@ -1126,10 +1131,12 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
             "val_f1": val_metrics["f1"],
             "val_miss": val_metrics["miss_rate"],
             "val_fpr": val_metrics["fpr"],
+            "val_auc": val_auc,
             "gen_loss": gen_loss,
             "gen_f1": gen_metrics["f1"],
             "gen_miss": gen_metrics["miss_rate"],
             "gen_fpr": gen_metrics["fpr"],
+            "gen_auc": gen_auc,
             "gen_threshold_options": {
                 "low_miss": {"threshold": gen_low_miss_thr, "metrics": gen_low_miss_metrics},
                 "balanced": {"threshold": gen_balanced_thr, "metrics": gen_balanced_metrics},
@@ -1308,8 +1315,9 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
 
     return {
         "weights": weight_values,
-        "best_roc": best_roc_record["roc"],
-        "best_roc_threshold": best_roc_record["threshold"],
+        "best_j": best_j_record["roc"],
+        "best_j_threshold": best_j_record["threshold"],
+        "gen_auc": gen_auc,
         "run_tag": run_tag,
         "strength": args.weight_target_strength,
     }
@@ -1324,15 +1332,16 @@ def _plot_weight_histograms(results: List[Dict[str, object]], output_path: str) 
         ax = axes[idx][0]
         ax.hist(weights, bins=60, color="#1f77b4", alpha=0.85)
         strength = result["strength"]
-        roc_score = result["best_roc"]
-        roc_thr = result["best_roc_threshold"]
+        best_j = result["best_j"]
+        best_j_thr = result["best_j_threshold"]
+        gen_auc = result["gen_auc"]
         ax.set_title(f"Weight Histogram (strength={strength:g})")
         ax.set_xlabel("Weight Value")
         ax.set_ylabel("Count")
         ax.text(
             0.02,
             0.95,
-            f"Best ROC={roc_score:.3f} @ thr={roc_thr:.4f}",
+            f"AUC={gen_auc:.3f}\nBest J={best_j:.3f} @ thr={best_j_thr:.4f}",
             transform=ax.transAxes,
             ha="left",
             va="top",
