@@ -512,6 +512,18 @@ def parse_args() -> argparse.Namespace:
         help="Strength of weight-target regularization (use small value to avoid hurting accuracy)",
     )
     parser.add_argument(
+        "--weight_target_strength_stage2",
+        type=float,
+        default=None,
+        help="Second-stage weight-target strength (defaults to weight_target_strength if unset).",
+    )
+    parser.add_argument(
+        "--weight_target_stage1_epochs",
+        type=int,
+        default=0,
+        help="Number of epochs to keep stage-1 regularization before switching to stage-2 strength.",
+    )
+    parser.add_argument(
         "--weight_strength_sweep",
         type=str,
         default="1e-3,5e-3,1e-2",
@@ -747,11 +759,18 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
             )
             optimizer.zero_grad()
 
+            stage2_strength = args.weight_target_strength_stage2
+            if stage2_strength is None:
+                stage2_strength = args.weight_target_strength
+            reg_strength = args.weight_target_strength
+            if args.weight_target_stage1_epochs > 0 and epoch > args.weight_target_stage1_epochs:
+                reg_strength = stage2_strength
+
             with quantized_weights(student, bits=args.weight_bits):
                 logits, _ = student(signals)
                 loss = ce_loss_fn(logits, labels)
                 reg_loss = weight_target_regularizer(student, args.weight_target)
-                total_loss = loss + args.weight_target_strength * reg_loss
+                total_loss = loss + reg_strength * reg_loss
                 total_loss.backward()
 
             torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
