@@ -190,8 +190,8 @@ def _infer_model_overrides(state_dict: dict) -> dict:
 
 def _build_model_args(config: dict | None, state_dict: dict | None) -> argparse.Namespace:
     defaults = {
-        "num_mlp_layers": 1,
-        "dropout_rate": 0.1,
+        "num_mlp_layers": 3,
+        "dropout_rate": 0,
         "use_value_constraint": True,
         "use_tanh_activations": False,
         "constraint_scale": 1.0,
@@ -226,7 +226,7 @@ def _load_model(checkpoint_path: str, device: torch.device) -> torch.nn.Module:
 
 DEFAULT_DATA_PATH = "E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/"
 DEFAULT_ORIGINAL_MODEL = os.path.join("saved_models", "student_model.pth")
-DEFAULT_HARDWARE_MODEL = os.path.join("saved_models", "student_model_hardware.pth")
+DEFAULT_HARDWARE_MODEL = os.path.join("saved_models", "student_model_hardware_reg_5e-03.pth")
 
 
 def parse_args() -> argparse.Namespace:
