@@ -134,10 +134,18 @@ def _iter_effective_weights(model: nn.Module) -> List[Tuple[str, torch.Tensor]]:
     return weights
 
 
-def weight_target_regularizer(model: nn.Module, target: float) -> torch.Tensor:
+def weight_regularizer(
+    model: nn.Module,
+    target: float,
+    mode: str,
+    epsilon: float,
+) -> torch.Tensor:
     penalties: List[torch.Tensor] = []
     for _, weight in _iter_effective_weights(model):
-        penalties.append((weight.abs() - target).pow(2).mean())
+        if mode == "repel_zero":
+            penalties.append((1.0 / (weight.abs() + epsilon)).mean())
+        else:
+            penalties.append((weight.abs() - target).pow(2).mean())
     if not penalties:
         return torch.tensor(0.0, device=next(model.parameters()).device)
     return torch.stack(penalties).mean()
@@ -506,6 +514,19 @@ def parse_args() -> argparse.Namespace:
         help="Target magnitude for weight regularization (encourage |w| near this value)",
     )
     parser.add_argument(
+        "--weight_reg_mode",
+        type=str,
+        default="target",
+        choices=("target", "repel_zero"),
+        help="Regularizer mode: target pushes |w| toward target; repel_zero discourages values near zero.",
+    )
+    parser.add_argument(
+        "--weight_zero_epsilon",
+        type=float,
+        default=1e-3,
+        help="Epsilon for zero-repulsion regularizer to avoid division by zero.",
+    )
+    parser.add_argument(
         "--weight_target_strength",
         type=float,
         default=1e-4,
@@ -528,6 +549,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Penalty weight for weight-distribution score (higher encourages |w| near target).",
+    )
+    _add_bool_arg(
+        parser,
+        "save_require_threshold_targets",
+        default=True,
+        help_text="require miss/FPR to meet target thresholds when saving the best model",
     )
     parser.add_argument(
         "--weight_strength_sweep",
@@ -777,7 +804,12 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
             with quantized_weights(student, bits=args.weight_bits):
                 logits, _ = student(signals)
                 loss = ce_loss_fn(logits, labels)
-                reg_loss = weight_target_regularizer(student, args.weight_target)
+                reg_loss = weight_regularizer(
+                    student,
+                    args.weight_target,
+                    mode=args.weight_reg_mode,
+                    epsilon=args.weight_zero_epsilon,
+                )
                 total_loss = loss + reg_strength * reg_loss
                 total_loss.backward()
 
@@ -927,7 +959,14 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
             }
         )
 
-        if best_metric_score > best_score:
+        meets_targets = True
+        if args.save_require_threshold_targets:
+            meets_targets = (
+                val_metrics["miss_rate"] <= args.threshold_target_miss
+                and val_metrics["fpr"] <= args.threshold_max_fpr
+            )
+
+        if best_metric_score > best_score and meets_targets:
             best_score = best_metric_score
             best_state = student.state_dict()
             best_threshold = best_thr_epoch
@@ -1353,6 +1392,7 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
         "best_j": best_j_record["roc"],
         "best_j_threshold": best_j_record["threshold"],
         "gen_auc": gen_auc,
+        "reg_mode": args.weight_reg_mode,
         "run_tag": run_tag,
         "strength": args.weight_target_strength,
     }
@@ -1370,7 +1410,7 @@ def _plot_weight_histograms(results: List[Dict[str, object]], output_path: str) 
         best_j = result["best_j"]
         best_j_thr = result["best_j_threshold"]
         gen_auc = result["gen_auc"]
-        ax.set_title(f"Weight Histogram (strength={strength:g})")
+        ax.set_title(f"Weight Histogram (strength={strength:g}, mode={result['reg_mode']})")
         ax.set_xlabel("Weight Value")
         ax.set_ylabel("Count")
         ax.text(
