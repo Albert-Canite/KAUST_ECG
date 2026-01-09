@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 import os
@@ -210,6 +211,22 @@ def _sample_uniform(min_val: float, max_val: float, device: torch.device) -> flo
     if max_val <= min_val:
         return min_val
     return float(torch.empty(1, device=device).uniform_(min_val, max_val).item())
+
+
+def _format_strength(strength: float) -> str:
+    formatted = f"{strength:.0e}"
+    return formatted.replace("+", "").replace(".", "p")
+
+
+def _parse_strength_sweep(raw: str) -> List[float]:
+    if not raw:
+        return []
+    strengths = []
+    for value in raw.split(","):
+        value = value.strip()
+        if value:
+            strengths.append(float(value))
+    return strengths
 
 
 def apply_hardware_effects(
@@ -494,6 +511,15 @@ def parse_args() -> argparse.Namespace:
         default=1e-4,
         help="Strength of weight-target regularization (use small value to avoid hurting accuracy)",
     )
+    parser.add_argument(
+        "--weight_strength_sweep",
+        type=str,
+        default="1e-4,5e-4,1e-3",
+        help=(
+            "Comma-separated list of weight_target_strength values to train and compare. "
+            "Leave empty to run a single model."
+        ),
+    )
     _add_bool_arg(parser, "use_bias", default=False, help_text="bias terms in layers")
     _add_bool_arg(parser, "use_constrained_classifier", default=True, help_text="constrained classifier weights")
     parser.add_argument(
@@ -547,8 +573,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def _run_suffix(run_tag: str) -> str:
+    return f"_{run_tag}" if run_tag else ""
+
+
+def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str, object]:
     set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -609,10 +638,11 @@ def main() -> None:
 
     miss_ema = 0.25
 
+    suffix = _run_suffix(run_tag)
     os.makedirs("artifacts", exist_ok=True)
     log_path = os.path.join(
         "artifacts",
-        f"training_log_hardware_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl",
+        f"training_log_hardware{suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl",
     )
 
     student = build_student(args, device)
@@ -1051,11 +1081,12 @@ def main() -> None:
             -r["metrics"]["fpr"],
         ),
     )
+    best_roc_record = max(gen_records, key=lambda r: (r["roc"], -r["metrics"]["sensitivity"]))
 
     coarse_step = 0.001
     coarse_thresholds = np.round(np.arange(0.0, 1.0 + coarse_step / 2, coarse_step), 3).tolist()
     coarse_records = _collect_threshold_records(gen_true, gen_probs, coarse_thresholds)
-    sweep_csv_path = os.path.join("artifacts", "gen_threshold_sweep_hardware.csv")
+    sweep_csv_path = os.path.join("artifacts", f"gen_threshold_sweep_hardware{suffix}.csv")
     with open(sweep_csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["threshold", "miss_rate", "fpr"])
@@ -1136,10 +1167,10 @@ def main() -> None:
         }
     )
 
-    np.save(os.path.join("artifacts", "val_probs_hardware.npy"), np.array(val_probs))
-    np.save(os.path.join("artifacts", "gen_probs_hardware.npy"), np.array(gen_probs))
-    np.save(os.path.join("artifacts", "val_labels_hardware.npy"), np.array(val_true))
-    np.save(os.path.join("artifacts", "gen_labels_hardware.npy"), np.array(gen_true))
+    np.save(os.path.join("artifacts", f"val_probs_hardware{suffix}.npy"), np.array(val_probs))
+    np.save(os.path.join("artifacts", f"gen_probs_hardware{suffix}.npy"), np.array(gen_probs))
+    np.save(os.path.join("artifacts", f"val_labels_hardware{suffix}.npy"), np.array(val_true))
+    np.save(os.path.join("artifacts", f"gen_labels_hardware{suffix}.npy"), np.array(gen_true))
 
     print("Gen sweep (low-miss, FPR < 20%) top10:")
     if low_miss_top10:
@@ -1175,7 +1206,7 @@ def main() -> None:
     )
 
     os.makedirs("saved_models", exist_ok=True)
-    save_path = os.path.join("saved_models", "student_model_hardware.pth")
+    save_path = os.path.join("saved_models", f"student_model_hardware{suffix}.pth")
     torch.save(
         {
             "student_state_dict": student.state_dict(),
@@ -1192,7 +1223,7 @@ def main() -> None:
     )
     print(f"Saved student checkpoint to {save_path}")
 
-    weights_csv_path = os.path.join("artifacts", "hardware_weights.csv")
+    weights_csv_path = os.path.join("artifacts", f"hardware_weights{suffix}.csv")
     export_weights_csv(student, weights_csv_path, args.weight_bits)
     print(f"Saved hardware-trained weights CSV to {weights_csv_path}")
 
@@ -1229,7 +1260,7 @@ def main() -> None:
         axes[1].set_title("Val Metrics")
         axes[1].legend()
         plt.tight_layout()
-        fig.savefig(os.path.join("artifacts", "training_curves_hardware.png"))
+        fig.savefig(os.path.join("artifacts", f"training_curves_hardware{suffix}.png"))
         plt.close(fig)
 
     def _save_roc(y_true: List[int], probs: List[float], name: str) -> None:
@@ -1242,7 +1273,7 @@ def main() -> None:
         ax.set_ylabel("True Positive Rate")
         ax.set_title(f"ROC - {name}")
         ax.legend()
-        fig.savefig(os.path.join("artifacts", f"roc_{name.lower()}_hardware.png"))
+        fig.savefig(os.path.join("artifacts", f"roc_{name.lower()}_hardware{suffix}.png"))
         plt.close(fig)
 
     def _save_confusion(y_true: List[int], y_pred: List[int], name: str) -> None:
@@ -1258,7 +1289,7 @@ def main() -> None:
             for j in range(2):
                 ax.text(j, i, cm[i, j], ha="center", va="center", color="black")
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        fig.savefig(os.path.join("artifacts", f"confusion_{name.lower()}_hardware.png"))
+        fig.savefig(os.path.join("artifacts", f"confusion_{name.lower()}_hardware{suffix}.png"))
         plt.close(fig)
 
     _save_training_curves()
@@ -1268,6 +1299,70 @@ def main() -> None:
     _save_confusion(gen_true, gen_pred, "Generalization")
     print("Saved training curves, ROC curves, and confusion matrices to ./artifacts")
     print(f"Training log saved to {log_path}")
+
+    weight_tensors = [weight.detach().cpu().reshape(-1) for _, weight in _iter_effective_weights(student)]
+    if weight_tensors:
+        weight_values = torch.cat(weight_tensors).numpy()
+    else:
+        weight_values = np.array([])
+
+    return {
+        "weights": weight_values,
+        "best_roc": best_roc_record["roc"],
+        "best_roc_threshold": best_roc_record["threshold"],
+        "run_tag": run_tag,
+        "strength": args.weight_target_strength,
+    }
+
+
+def _plot_weight_histograms(results: List[Dict[str, object]], output_path: str) -> None:
+    if not results:
+        return
+    fig, axes = plt.subplots(len(results), 1, figsize=(10, 4 * len(results)), squeeze=False)
+    for idx, result in enumerate(results):
+        weights = result["weights"]
+        ax = axes[idx][0]
+        ax.hist(weights, bins=60, color="#1f77b4", alpha=0.85)
+        strength = result["strength"]
+        roc_score = result["best_roc"]
+        roc_thr = result["best_roc_threshold"]
+        ax.set_title(f"Weight Histogram (strength={strength:g})")
+        ax.set_xlabel("Weight Value")
+        ax.set_ylabel("Count")
+        ax.text(
+            0.02,
+            0.95,
+            f"Best ROC={roc_score:.3f} @ thr={roc_thr:.4f}",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=10,
+            bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none"},
+        )
+        ax.axvline(-1.0, color="gray", linestyle="--", linewidth=1, alpha=0.6)
+        ax.axvline(1.0, color="gray", linestyle="--", linewidth=1, alpha=0.6)
+    plt.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
+def main() -> None:
+    args = parse_args()
+    strength_sweep = _parse_strength_sweep(args.weight_strength_sweep)
+    if strength_sweep:
+        results: List[Dict[str, object]] = []
+        for strength in strength_sweep:
+            run_args = copy.deepcopy(args)
+            run_args.weight_target_strength = strength
+            run_tag = f"reg_{_format_strength(strength)}"
+            print(f"Running sweep: weight_target_strength={strength:g} ({run_tag})")
+            results.append(train_and_evaluate(run_args, run_tag))
+        os.makedirs("artifacts", exist_ok=True)
+        hist_path = os.path.join("artifacts", "weight_strength_histograms.png")
+        _plot_weight_histograms(results, hist_path)
+        print(f"Saved weight histogram comparison to {hist_path}")
+    else:
+        train_and_evaluate(args)
 
 
 if __name__ == "__main__":
