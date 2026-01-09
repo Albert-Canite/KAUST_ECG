@@ -516,7 +516,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_reg_mode",
         type=str,
-        default="target",
+        default="repel_zero",
         choices=("target", "repel_zero"),
         help="Regularizer mode: target pushes |w| toward target; repel_zero discourages values near zero.",
     )
