@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+from contextlib import nullcontext
 from typing import List, Tuple
 
 import numpy as np
@@ -16,6 +17,7 @@ from train_hardware import (
     apply_hardware_effects,
     build_student,
     quantized_weights,
+    renormalize_to_unit,
 )
 from utils import confusion_metrics
 
@@ -33,6 +35,8 @@ def _collect_probs(
     seed: int,
     renormalize_inputs: bool,
     zero_mean_inputs: bool,
+    use_hardware: bool,
+    use_quantized_weights: bool,
 ) -> Tuple[List[int], List[float]]:
     model.eval()
     trues: List[int] = []
@@ -45,22 +49,34 @@ def _collect_probs(
         with torch.no_grad():
             for signals, labels in loader:
                 labels = labels.to(device)
-                signals = apply_hardware_effects(
-                    signals,
-                    device,
-                    input_bits,
-                    snr_db,
-                    snr_db,
-                    pbr_factor,
-                    pbr_factor,
-                    pbr_peak_window,
-                    pbr_min_prominence,
-                    hardware_prob=1.0,
-                    training=False,
-                    renormalize=renormalize_inputs,
-                    zero_mean=zero_mean_inputs,
+                if use_hardware:
+                    signals = apply_hardware_effects(
+                        signals,
+                        device,
+                        input_bits,
+                        snr_db,
+                        snr_db,
+                        pbr_factor,
+                        pbr_factor,
+                        pbr_peak_window,
+                        pbr_min_prominence,
+                        hardware_prob=1.0,
+                        training=False,
+                        renormalize=renormalize_inputs,
+                        zero_mean=zero_mean_inputs,
+                    )
+                else:
+                    signals = signals.to(device)
+                    if zero_mean_inputs:
+                        signals = signals - signals.mean(dim=-1, keepdim=True)
+                    if renormalize_inputs:
+                        signals = renormalize_to_unit(signals)
+                weight_context = (
+                    quantized_weights(model, bits=weight_bits)
+                    if use_quantized_weights
+                    else nullcontext()
                 )
-                with quantized_weights(model, bits=weight_bits):
+                with weight_context:
                     logits, _ = model(signals)
                 prob_pos = torch.softmax(logits, dim=1)[:, 1]
                 trues.extend(labels.cpu().tolist())
@@ -82,6 +98,64 @@ def _sweep_roc(
         tprs.append(metrics["sensitivity"])
         fprs.append(metrics["fpr"])
     return np.array(fprs), np.array(tprs)
+
+
+def _compute_roc_stats(
+    trues: List[int],
+    probs: List[float],
+    thresholds: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, float, int, float, dict]:
+    fpr, tpr = _sweep_roc(trues, probs, thresholds)
+    order = np.argsort(fpr)
+    roc_auc = auc(fpr[order], tpr[order])
+    j_scores = tpr - fpr
+    best_idx = int(np.argmax(j_scores))
+    best_threshold = float(thresholds[best_idx])
+    pred = (np.array(probs) >= best_threshold).astype(int).tolist()
+    metrics = confusion_metrics(trues, pred)
+    return fpr, tpr, roc_auc, best_idx, best_threshold, metrics
+
+
+def _plot_roc(
+    output_path: str,
+    title: str,
+    orig_stats: Tuple[np.ndarray, np.ndarray, float, int, float],
+    hw_stats: Tuple[np.ndarray, np.ndarray, float, int, float],
+) -> None:
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    import matplotlib.pyplot as plt
+
+    orig_fpr, orig_tpr, orig_auc, orig_best_idx, orig_best_threshold = orig_stats
+    hw_fpr, hw_tpr, hw_auc, hw_best_idx, hw_best_threshold = hw_stats
+    orig_order = np.argsort(orig_fpr)
+    hw_order = np.argsort(hw_fpr)
+
+    plt.figure(figsize=(6, 5))
+    plt.plot(orig_fpr[orig_order], orig_tpr[orig_order], label=f"Original AUC={orig_auc:.3f}")
+    plt.plot(hw_fpr[hw_order], hw_tpr[hw_order], label=f"Hardware AUC={hw_auc:.3f}")
+    plt.scatter(
+        [orig_fpr[orig_best_idx]],
+        [orig_tpr[orig_best_idx]],
+        color="tab:blue",
+        s=40,
+        zorder=3,
+        label=f"Orig best thr={orig_best_threshold:.3f}",
+    )
+    plt.scatter(
+        [hw_fpr[hw_best_idx]],
+        [hw_tpr[hw_best_idx]],
+        color="tab:orange",
+        s=40,
+        zorder=3,
+        label=f"HW best thr={hw_best_threshold:.3f}",
+    )
+    plt.plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title(title)
+    plt.legend(loc="lower right")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200)
 
 
 def _infer_model_overrides(state_dict: dict) -> dict:
@@ -170,6 +244,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--output_path", type=str, default=os.path.join("artifacts", "roc_compare.png"))
+    parser.add_argument(
+        "--software_output_path", type=str, default=os.path.join("artifacts", "roc_compare_software.png")
+    )
     parser.add_argument("--renormalize_inputs", dest="renormalize_inputs", action="store_true", default=True)
     parser.add_argument("--no-renormalize_inputs", dest="renormalize_inputs", action="store_false")
     parser.add_argument("--zero_mean_inputs", dest="zero_mean_inputs", action="store_true", default=True)
@@ -217,6 +294,8 @@ def main() -> None:
         args.seed,
         args.renormalize_inputs,
         args.zero_mean_inputs,
+        use_hardware=True,
+        use_quantized_weights=True,
     )
     hw_true, hw_probs = _collect_probs(
         hardware_model,
@@ -231,58 +310,24 @@ def main() -> None:
         args.seed,
         args.renormalize_inputs,
         args.zero_mean_inputs,
+        use_hardware=True,
+        use_quantized_weights=True,
     )
 
     thresholds = np.linspace(0.0, 1.0, num=1001)
-    orig_fpr, orig_tpr = _sweep_roc(orig_true, orig_probs, thresholds)
-    hw_fpr, hw_tpr = _sweep_roc(hw_true, hw_probs, thresholds)
-
-    orig_order = np.argsort(orig_fpr)
-    hw_order = np.argsort(hw_fpr)
-    orig_auc = auc(orig_fpr[orig_order], orig_tpr[orig_order])
-    hw_auc = auc(hw_fpr[hw_order], hw_tpr[hw_order])
-
-    orig_j = orig_tpr - orig_fpr
-    hw_j = hw_tpr - hw_fpr
-    orig_best_idx = int(np.argmax(orig_j))
-    hw_best_idx = int(np.argmax(hw_j))
-    orig_best_threshold = float(thresholds[orig_best_idx])
-    hw_best_threshold = float(thresholds[hw_best_idx])
-
-    orig_pred = (np.array(orig_probs) >= orig_best_threshold).astype(int).tolist()
-    hw_pred = (np.array(hw_probs) >= hw_best_threshold).astype(int).tolist()
-    orig_metrics = confusion_metrics(orig_true, orig_pred)
-    hw_metrics = confusion_metrics(hw_true, hw_pred)
-
-    os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
-    import matplotlib.pyplot as plt
-
-    plt.figure(figsize=(6, 5))
-    plt.plot(orig_fpr[orig_order], orig_tpr[orig_order], label=f"Original AUC={orig_auc:.3f}")
-    plt.plot(hw_fpr[hw_order], hw_tpr[hw_order], label=f"Hardware AUC={hw_auc:.3f}")
-    plt.scatter(
-        [orig_fpr[orig_best_idx]],
-        [orig_tpr[orig_best_idx]],
-        color="tab:blue",
-        s=40,
-        zorder=3,
-        label=f"Orig best thr={orig_best_threshold:.3f}",
+    orig_fpr, orig_tpr, orig_auc, orig_best_idx, orig_best_threshold, orig_metrics = _compute_roc_stats(
+        orig_true, orig_probs, thresholds
     )
-    plt.scatter(
-        [hw_fpr[hw_best_idx]],
-        [hw_tpr[hw_best_idx]],
-        color="tab:orange",
-        s=40,
-        zorder=3,
-        label=f"HW best thr={hw_best_threshold:.3f}",
+    hw_fpr, hw_tpr, hw_auc, hw_best_idx, hw_best_threshold, hw_metrics = _compute_roc_stats(
+        hw_true, hw_probs, thresholds
     )
-    plt.plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
-    plt.title("ROC on Generalization Set (Fixed Hardware)")
-    plt.legend(loc="lower right")
-    plt.tight_layout()
-    plt.savefig(args.output_path, dpi=200)
+
+    _plot_roc(
+        args.output_path,
+        "ROC on Generalization Set (Fixed Hardware)",
+        (orig_fpr, orig_tpr, orig_auc, orig_best_idx, orig_best_threshold),
+        (hw_fpr, hw_tpr, hw_auc, hw_best_idx, hw_best_threshold),
+    )
 
     print("Fixed hardware conditions:")
     print(f"  SNR={args.snr_db:.2f}dB, PBR={args.pbr_factor:.2f}, seed={args.seed}")
@@ -297,6 +342,76 @@ def main() -> None:
         f"fpr={hw_metrics['fpr'] * 100:.2f}% auc={hw_auc:.3f}"
     )
     print(f"Saved ROC plot to {args.output_path}")
+
+    orig_sw_true, orig_sw_probs = _collect_probs(
+        original_model,
+        gen_loader,
+        device,
+        args.input_bits,
+        args.weight_bits,
+        args.snr_db,
+        args.pbr_factor,
+        args.pbr_peak_window,
+        args.pbr_min_prominence,
+        args.seed,
+        args.renormalize_inputs,
+        args.zero_mean_inputs,
+        use_hardware=False,
+        use_quantized_weights=False,
+    )
+    hw_sw_true, hw_sw_probs = _collect_probs(
+        hardware_model,
+        gen_loader,
+        device,
+        args.input_bits,
+        args.weight_bits,
+        args.snr_db,
+        args.pbr_factor,
+        args.pbr_peak_window,
+        args.pbr_min_prominence,
+        args.seed,
+        args.renormalize_inputs,
+        args.zero_mean_inputs,
+        use_hardware=False,
+        use_quantized_weights=False,
+    )
+
+    (
+        orig_sw_fpr,
+        orig_sw_tpr,
+        orig_sw_auc,
+        orig_sw_best_idx,
+        orig_sw_best_threshold,
+        orig_sw_metrics,
+    ) = _compute_roc_stats(orig_sw_true, orig_sw_probs, thresholds)
+    (
+        hw_sw_fpr,
+        hw_sw_tpr,
+        hw_sw_auc,
+        hw_sw_best_idx,
+        hw_sw_best_threshold,
+        hw_sw_metrics,
+    ) = _compute_roc_stats(hw_sw_true, hw_sw_probs, thresholds)
+
+    _plot_roc(
+        args.software_output_path,
+        "ROC on Generalization Set (Software Ideal)",
+        (orig_sw_fpr, orig_sw_tpr, orig_sw_auc, orig_sw_best_idx, orig_sw_best_threshold),
+        (hw_sw_fpr, hw_sw_tpr, hw_sw_auc, hw_sw_best_idx, hw_sw_best_threshold),
+    )
+
+    print("Software ideal conditions:")
+    print(f"Original best threshold={orig_sw_best_threshold:.3f}")
+    print(f"Hardware best threshold={hw_sw_best_threshold:.3f}")
+    print(
+        f"Original: miss={orig_sw_metrics['miss_rate'] * 100:.2f}% "
+        f"fpr={orig_sw_metrics['fpr'] * 100:.2f}% auc={orig_sw_auc:.3f}"
+    )
+    print(
+        f"Hardware: miss={hw_sw_metrics['miss_rate'] * 100:.2f}% "
+        f"fpr={hw_sw_metrics['fpr'] * 100:.2f}% auc={hw_sw_auc:.3f}"
+    )
+    print(f"Saved ROC plot to {args.software_output_path}")
 
 
 if __name__ == "__main__":
