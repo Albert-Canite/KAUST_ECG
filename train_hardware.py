@@ -524,6 +524,12 @@ def parse_args() -> argparse.Namespace:
         help="Number of epochs to keep stage-1 regularization before switching to stage-2 strength.",
     )
     parser.add_argument(
+        "--weight_dist_score_weight",
+        type=float,
+        default=0.0,
+        help="Penalty weight for weight-distribution score (higher encourages |w| near target).",
+    )
+    parser.add_argument(
         "--weight_strength_sweep",
         type=str,
         default="1e-3,5e-3,1e-2",
@@ -697,7 +703,6 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
     best_threshold = 0.5
     best_early_stop_score = -float("inf")
     patience_counter = 0
-
     history: List[Dict[str, float]] = []
 
     def _eval_params() -> Tuple[float, float, float, float, int | None]:
@@ -740,6 +745,12 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
         )
         ce_loss_fn = nn.CrossEntropyLoss(weight=epoch_weights)
 
+        stage2_strength = args.weight_target_strength_stage2
+        if stage2_strength is None:
+            stage2_strength = args.weight_target_strength
+        stage2_active = args.weight_target_stage1_epochs > 0 and epoch > args.weight_target_stage1_epochs
+        epoch_reg_losses: List[float] = []
+
         for signals, labels in train_loader:
             labels = labels.to(device)
             signals = apply_hardware_effects(
@@ -759,11 +770,8 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
             )
             optimizer.zero_grad()
 
-            stage2_strength = args.weight_target_strength_stage2
-            if stage2_strength is None:
-                stage2_strength = args.weight_target_strength
             reg_strength = args.weight_target_strength
-            if args.weight_target_stage1_epochs > 0 and epoch > args.weight_target_stage1_epochs:
+            if stage2_active:
                 reg_strength = stage2_strength
 
             with quantized_weights(student, bits=args.weight_bits):
@@ -777,9 +785,11 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
             optimizer.step()
 
             running_loss += loss.item() * labels.size(0)
+            epoch_reg_losses.append(reg_loss.detach().item())
             total += labels.size(0)
 
         train_loss = running_loss / max(total, 1)
+        avg_reg_loss = float(np.mean(epoch_reg_losses)) if epoch_reg_losses else 0.0
 
         eval_snr_min, eval_snr_max, eval_pbr_min, eval_pbr_max, eval_seed = _eval_params()
 
@@ -853,6 +863,8 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
                 args.selection_miss_weight * val_metrics["miss_rate"]
                 + args.selection_fpr_weight * val_metrics["fpr"]
             )
+        if args.weight_dist_score_weight > 0.0:
+            selection_score -= args.weight_dist_score_weight * avg_reg_loss
 
         best_metric_score = selection_score if args.best_metric == "selection" else val_metrics["f1"]
         if args.best_metric == "val_loss":
@@ -886,6 +898,7 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
                 "val_f1": val_metrics["f1"],
                 "val_miss": val_metrics["miss_rate"],
                 "val_fpr": val_metrics["fpr"],
+                "avg_reg_loss": avg_reg_loss,
                 "gen_f1": gen_metrics["f1"],
                 "gen_miss": gen_metrics["miss_rate"],
                 "gen_fpr": gen_metrics["fpr"],
@@ -904,6 +917,7 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
                 "val_f1": val_metrics["f1"],
                 "val_miss": val_metrics["miss_rate"],
                 "val_fpr": val_metrics["fpr"],
+                "avg_reg_loss": avg_reg_loss,
                 "gen_f1": gen_metrics["f1"],
                 "gen_miss": gen_metrics["miss_rate"],
                 "gen_fpr": gen_metrics["fpr"],
@@ -932,6 +946,7 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
                     "gen_miss": gen_metrics["miss_rate"],
                     "gen_fpr": gen_metrics["fpr"],
                     "threshold": best_thr_epoch,
+                    "avg_reg_loss": avg_reg_loss,
                 }
             )
         else:
@@ -1156,6 +1171,7 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
             "gen_miss": gen_metrics["miss_rate"],
             "gen_fpr": gen_metrics["fpr"],
             "gen_auc": gen_auc,
+            "weight_dist_score_weight": args.weight_dist_score_weight,
             "gen_threshold_options": {
                 "low_miss": {"threshold": gen_low_miss_thr, "metrics": gen_low_miss_metrics},
                 "balanced": {"threshold": gen_balanced_thr, "metrics": gen_balanced_metrics},
