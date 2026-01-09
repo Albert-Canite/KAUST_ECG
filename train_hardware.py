@@ -362,7 +362,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=25, help="Early stopping patience on monitored metric")
     parser.add_argument("--min_epochs", type=int, default=25, help="Minimum epochs before early stopping")
     parser.add_argument("--scheduler_patience", type=int, default=3)
-    parser.add_argument("--dropout_rate", type=float, default=0.1)
+    parser.add_argument("--dropout_rate", type=float, default=0)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
     parser.add_argument("--class_weight_abnormal", type=float, default=1.35)
@@ -484,13 +484,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--eval_fixed_snr",
         type=float,
-        default=None,
+        default=15,
         help="Fixed SNR (dB) for eval when fixed_eval_hardware is enabled (defaults to snr_min).",
     )
     parser.add_argument(
         "--eval_fixed_pbr",
         type=float,
-        default=None,
+        default=0.6,
         help="Fixed PBR attenuation for eval when fixed_eval_hardware is enabled (defaults to pbr_min).",
     )
     parser.add_argument(
