@@ -260,10 +260,6 @@ def apply_hardware_effects(
         pbr_factor = _sample_uniform(pbr_min, pbr_max, device)
         signals = apply_pbr_attenuation(signals, pbr_factor, pbr_peak_window, pbr_min_prominence)
         signals = signals.to(device)
-        if zero_mean:
-            signals = signals - signals.mean(dim=-1, keepdim=True)
-        if renormalize:
-            signals = renormalize_to_unit(signals)
         snr_db = _sample_uniform(snr_min, snr_max, device)
         signals = add_gaussian_noise_snr(signals, snr_db)
     else:
@@ -562,39 +558,6 @@ def parse_args() -> argparse.Namespace:
         default="1e-3,5e-3,1e-2",
         help=(
             "Comma-separated list of stage-2 target strengths to train and compare. "
-            "Leave empty to run a single model."
-        ),
-    )
-    parser.add_argument(
-        "--weight_target_strength_stage2",
-        type=float,
-        default=5e-4,
-        help="Second-stage weight-target strength (defaults to weight_target_strength if unset).",
-    )
-    parser.add_argument(
-        "--weight_target_stage1_epochs",
-        type=int,
-        default=20,
-        help="Number of epochs to keep stage-1 regularization before switching to stage-2 strength.",
-    )
-    parser.add_argument(
-        "--weight_dist_score_weight",
-        type=float,
-        default=0.1,
-        help="Penalty weight for weight-distribution score (higher encourages |w| near target).",
-    )
-    _add_bool_arg(
-        parser,
-        "save_require_threshold_targets",
-        default=True,
-        help_text="require miss/FPR to meet target thresholds when saving the best model",
-    )
-    parser.add_argument(
-        "--weight_strength_sweep",
-        type=str,
-        default="1e-3,5e-3,1e-2",
-        help=(
-            "Comma-separated list of weight_target_strength values to train and compare. "
             "Leave empty to run a single model."
         ),
     )
@@ -1346,8 +1309,6 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
     weights_csv_path = os.path.join("artifacts", f"hardware_weights{suffix}.csv")
     export_weights_csv(student, weights_csv_path, args.weight_bits)
     print(f"Saved hardware-trained weights CSV to {weights_csv_path}")
-
-    os.makedirs("artifacts", exist_ok=True)
 
     def _save_training_curves() -> None:
         epochs = [h["epoch"] for h in history]
