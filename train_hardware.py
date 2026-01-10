@@ -288,8 +288,8 @@ def evaluate(
     zero_mean_inputs: bool = True,
     input_bits: int = 5,
     weight_bits: int = 5,
-    snr_min: float = 10.0,
-    snr_max: float = 30.0,
+    snr_min: float = 5.0,
+    snr_max: float = 25.0,
     pbr_min: float = 0.5,
     pbr_max: float = 0.9,
     pbr_peak_window: int = 12,
@@ -477,8 +477,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--input_bits", type=int, default=5)
     parser.add_argument("--weight_bits", type=int, default=5)
-    parser.add_argument("--snr_min", type=float, default=10.0)
-    parser.add_argument("--snr_max", type=float, default=30.0)
+    parser.add_argument("--snr_min", type=float, default=5.0)
+    parser.add_argument("--snr_max", type=float, default=25.0)
     parser.add_argument("--pbr_min", type=float, default=0.5)
     parser.add_argument("--pbr_max", type=float, default=0.9)
     parser.add_argument("--pbr_peak_window", type=int, default=12)
@@ -541,7 +541,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_target_stage1_epochs",
         type=int,
-        default=30,
+        default=20,
         help="Number of epochs to keep stage-1 regularization before switching to stage-2 strength.",
     )
     parser.add_argument(
@@ -588,7 +588,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--snr_min_start",
         type=float,
-        default=20.0,
+        default=15.0,
         help="Starting minimum SNR during warmup (higher is cleaner)",
     )
     parser.add_argument(
