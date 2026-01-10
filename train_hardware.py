@@ -535,19 +535,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_target_strength_stage2",
         type=float,
-        default=None,
+        default=5e-4,
         help="Second-stage weight-target strength (defaults to weight_target_strength if unset).",
     )
     parser.add_argument(
         "--weight_target_stage1_epochs",
         type=int,
-        default=0,
+        default=30,
         help="Number of epochs to keep stage-1 regularization before switching to stage-2 strength.",
     )
     parser.add_argument(
         "--weight_dist_score_weight",
         type=float,
-        default=0.0,
+        default=0.1,
         help="Penalty weight for weight-distribution score (higher encourages |w| near target).",
     )
     _add_bool_arg(
