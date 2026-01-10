@@ -415,7 +415,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--generalization_score_weight", type=float, default=0.35)
     parser.add_argument("--threshold_target_miss", type=float, default=0.10)
-    parser.add_argument("--threshold_max_fpr", type=float, default=0.15)
+    parser.add_argument("--threshold_max_fpr", type=float, default=0.18)
     parser.add_argument(
         "--threshold_recall_gain",
         type=float,
@@ -578,7 +578,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hardware_warmup_epochs",
         type=int,
-        default=15,
+        default=10,
         help="Linearly ramp hardware probability and perturbation strength for this many epochs",
     )
     parser.add_argument(
