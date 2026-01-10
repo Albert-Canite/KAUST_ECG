@@ -512,7 +512,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_reg_mode",
         type=str,
-        default="repel_zero",
+        default="target",
         choices=("target", "repel_zero"),
         help="Regularizer mode: target pushes |w| toward target; repel_zero discourages values near zero.",
     )
@@ -525,7 +525,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_target_strength",
         type=float,
-        default=1e-5,
+        default=5e-3,
         help="Initial (stage-1) regularization strength before ramping to stage-2.",
     )
     parser.add_argument(
@@ -537,13 +537,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_target_stage1_epochs",
         type=int,
-        default=5,
+        default=15,
         help="Epochs to hold stage-1 regularization strength before ramping.",
     )
     parser.add_argument(
         "--weight_target_ramp_epochs",
         type=int,
-        default=20,
+        default=25,
         help="Epochs to linearly ramp from stage-1 to stage-2 strength.",
     )
     parser.add_argument(
@@ -561,7 +561,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_strength_sweep",
         type=str,
-        default="5e-5,8e-5,1e-4",
+        default="",
         help=(
             "Comma-separated list of stage-2 target strengths to train and compare. "
             "Leave empty to run a single model."
