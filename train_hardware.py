@@ -537,8 +537,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_target_stage1_epochs",
         type=int,
-        default=30,
-        help="Number of epochs to keep stage-1 regularization before switching to stage-2 strength.",
+        default=15,
+        help="Epochs to hold stage-1 regularization strength before ramping.",
+    )
+    parser.add_argument(
+        "--weight_target_ramp_epochs",
+        type=int,
+        default=25,
+        help="Epochs to linearly ramp from stage-1 to stage-2 strength.",
     )
     parser.add_argument(
         "--weight_dist_score_weight",
@@ -555,7 +561,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_strength_sweep",
         type=str,
-        default="1e-3,5e-3,1e-2",
+        default="1e-4,5e-4,1e-3",
         help=(
             "Comma-separated list of stage-2 target strengths to train and compare. "
             "Leave empty to run a single model."
@@ -771,7 +777,10 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
         stage2_strength = args.weight_target_strength_stage2
         if stage2_strength is None:
             stage2_strength = args.weight_target_strength
-        stage2_active = args.weight_target_stage1_epochs > 0 and epoch > args.weight_target_stage1_epochs
+        stage1_epochs = max(args.weight_target_stage1_epochs, 0)
+        ramp_epochs = max(args.weight_target_ramp_epochs, 0)
+        ramp_end_epoch = stage1_epochs + ramp_epochs
+        stage2_active = ramp_epochs > 0 and epoch > stage1_epochs
         epoch_reg_losses: List[float] = []
 
         for signals, labels in train_loader:
@@ -795,13 +804,13 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
 
             reg_strength = args.weight_target_strength
             if stage2_active:
-                ramp = (epoch - args.weight_target_stage1_epochs) / max(
-                    1,
-                    args.max_epochs - args.weight_target_stage1_epochs,
-                )
-                reg_strength = args.weight_target_strength + ramp * (
-                    stage2_strength - args.weight_target_strength
-                )
+                if epoch <= ramp_end_epoch:
+                    ramp = (epoch - stage1_epochs) / max(1, ramp_epochs)
+                    reg_strength = args.weight_target_strength + ramp * (
+                        stage2_strength - args.weight_target_strength
+                    )
+                else:
+                    reg_strength = stage2_strength
 
             with quantized_weights(student, bits=args.weight_bits):
                 logits, _ = student(signals)
