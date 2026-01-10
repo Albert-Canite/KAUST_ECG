@@ -415,7 +415,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--generalization_score_weight", type=float, default=0.35)
     parser.add_argument("--threshold_target_miss", type=float, default=0.10)
-    parser.add_argument("--threshold_max_fpr", type=float, default=0.15)
+    parser.add_argument("--threshold_max_fpr", type=float, default=0.18)
     parser.add_argument(
         "--threshold_recall_gain",
         type=float,
@@ -525,7 +525,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_target_strength",
         type=float,
-        default=5e-5,
+        default=1e-5,
         help="Initial (stage-1) regularization strength before ramping to stage-2.",
     )
     parser.add_argument(
@@ -537,13 +537,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_target_stage1_epochs",
         type=int,
-        default=15,
+        default=5,
         help="Epochs to hold stage-1 regularization strength before ramping.",
     )
     parser.add_argument(
         "--weight_target_ramp_epochs",
         type=int,
-        default=25,
+        default=20,
         help="Epochs to linearly ramp from stage-1 to stage-2 strength.",
     )
     parser.add_argument(
@@ -561,7 +561,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_strength_sweep",
         type=str,
-        default="1e-4,5e-4,1e-3",
+        default="5e-5,8e-5,1e-4",
         help=(
             "Comma-separated list of stage-2 target strengths to train and compare. "
             "Leave empty to run a single model."
@@ -578,7 +578,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hardware_warmup_epochs",
         type=int,
-        default=15,
+        default=10,
         help="Linearly ramp hardware probability and perturbation strength for this many epochs",
     )
     parser.add_argument(
