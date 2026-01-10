@@ -529,8 +529,41 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_target_strength",
         type=float,
-        default=1e-4,
-        help="Strength of weight-target regularization (use small value to avoid hurting accuracy)",
+        default=5e-5,
+        help="Initial (stage-1) regularization strength before ramping to stage-2.",
+    )
+    parser.add_argument(
+        "--weight_target_strength_stage2",
+        type=float,
+        default=None,
+        help="Target (stage-2) regularization strength (defaults to weight_target_strength if unset).",
+    )
+    parser.add_argument(
+        "--weight_target_stage1_epochs",
+        type=int,
+        default=30,
+        help="Number of epochs to keep stage-1 regularization before switching to stage-2 strength.",
+    )
+    parser.add_argument(
+        "--weight_dist_score_weight",
+        type=float,
+        default=0.1,
+        help="Penalty weight for weight-distribution score (higher encourages |w| near target).",
+    )
+    _add_bool_arg(
+        parser,
+        "save_require_threshold_targets",
+        default=True,
+        help_text="require miss/FPR to meet target thresholds when saving the best model",
+    )
+    parser.add_argument(
+        "--weight_strength_sweep",
+        type=str,
+        default="1e-3,5e-3,1e-2",
+        help=(
+            "Comma-separated list of stage-2 target strengths to train and compare. "
+            "Leave empty to run a single model."
+        ),
     )
     parser.add_argument(
         "--weight_target_strength_stage2",
@@ -799,7 +832,13 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
 
             reg_strength = args.weight_target_strength
             if stage2_active:
-                reg_strength = stage2_strength
+                ramp = (epoch - args.weight_target_stage1_epochs) / max(
+                    1,
+                    args.max_epochs - args.weight_target_stage1_epochs,
+                )
+                reg_strength = args.weight_target_strength + ramp * (
+                    stage2_strength - args.weight_target_strength
+                )
 
             with quantized_weights(student, bits=args.weight_bits):
                 logits, _ = student(signals)
@@ -1437,7 +1476,7 @@ def main() -> None:
         results: List[Dict[str, object]] = []
         for strength in strength_sweep:
             run_args = copy.deepcopy(args)
-            run_args.weight_target_strength = strength
+            run_args.weight_target_strength_stage2 = strength
             run_tag = f"reg_{_format_strength(strength)}"
             print(f"Running sweep: weight_target_strength={strength:g} ({run_tag})")
             results.append(train_and_evaluate(run_args, run_tag))
