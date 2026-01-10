@@ -372,7 +372,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_epochs", type=int, default=90)
     parser.add_argument("--patience", type=int, default=25, help="Early stopping patience on monitored metric")
     parser.add_argument("--min_epochs", type=int, default=25, help="Minimum epochs before early stopping")
-    parser.add_argument("--scheduler_patience", type=int, default=3)
+    parser.add_argument("--scheduler_patience", type=int, default=5)
     parser.add_argument("--dropout_rate", type=float, default=0)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
@@ -544,13 +544,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_target_stage1_epochs",
         type=int,
-        default=10,
+        default=30,
         help="Epochs to hold stage-1 regularization strength before ramping.",
     )
     parser.add_argument(
         "--weight_target_ramp_epochs",
         type=int,
-        default=20,
+        default=30,
         help="Epochs to linearly ramp from stage-1 to stage-2 strength.",
     )
     parser.add_argument(
@@ -600,6 +600,12 @@ def parse_args() -> argparse.Namespace:
         "save_require_threshold_targets",
         default=True,
         help_text="require miss/FPR to meet target thresholds when saving the best model",
+    )
+    _add_bool_arg(
+        parser,
+        "use_early_stopping",
+        default=False,
+        help_text="early stopping based on the monitored metric",
     )
     parser.add_argument(
         "--weight_strength_sweep",
@@ -662,25 +668,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--distill_weight",
         type=float,
-        default=0.2,
+        default=0.4,
         help="Self-distillation weight (0 disables).",
     )
     parser.add_argument(
         "--distill_temperature",
         type=float,
-        default=2.0,
+        default=3.0,
         help="Temperature for self-distillation soft targets.",
     )
     parser.add_argument(
         "--distill_warmup_epochs",
         type=int,
-        default=10,
+        default=20,
         help="Epochs to wait before enabling self-distillation.",
     )
     parser.add_argument(
         "--ema_decay",
         type=float,
-        default=0.995,
+        default=0.997,
         help="EMA decay for self-distillation teacher.",
     )
 
@@ -1117,13 +1123,14 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
                 }
             )
         else:
-            if improved_early_stop:
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= args.patience and epoch >= args.min_epochs:
-                    print("Early stopping triggered.")
-                    break
+            if args.use_early_stopping:
+                if improved_early_stop:
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= args.patience and epoch >= args.min_epochs:
+                        print("Early stopping triggered.")
+                        break
 
     if best_state is not None:
         student.load_state_dict(best_state)
