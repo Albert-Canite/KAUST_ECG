@@ -288,8 +288,8 @@ def evaluate(
     zero_mean_inputs: bool = True,
     input_bits: int = 5,
     weight_bits: int = 5,
-    snr_min: float = 10.0,
-    snr_max: float = 30.0,
+    snr_min: float = 5.0,
+    snr_max: float = 25.0,
     pbr_min: float = 0.5,
     pbr_max: float = 0.9,
     pbr_peak_window: int = 12,
@@ -370,7 +370,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=25, help="Early stopping patience on monitored metric")
     parser.add_argument("--min_epochs", type=int, default=25, help="Minimum epochs before early stopping")
     parser.add_argument("--scheduler_patience", type=int, default=3)
-    parser.add_argument("--dropout_rate", type=float, default=0.1)
+    parser.add_argument("--dropout_rate", type=float, default=0)
     parser.add_argument("--num_mlp_layers", type=int, default=3)
     parser.add_argument("--constraint_scale", type=float, default=1.0)
     parser.add_argument("--class_weight_abnormal", type=float, default=1.35)
@@ -477,8 +477,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--input_bits", type=int, default=5)
     parser.add_argument("--weight_bits", type=int, default=5)
-    parser.add_argument("--snr_min", type=float, default=10.0)
-    parser.add_argument("--snr_max", type=float, default=30.0)
+    parser.add_argument("--snr_min", type=float, default=5.0)
+    parser.add_argument("--snr_max", type=float, default=25.0)
     parser.add_argument("--pbr_min", type=float, default=0.5)
     parser.add_argument("--pbr_max", type=float, default=0.9)
     parser.add_argument("--pbr_peak_window", type=int, default=12)
@@ -492,13 +492,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--eval_fixed_snr",
         type=float,
-        default=None,
+        default=15,
         help="Fixed SNR (dB) for eval when fixed_eval_hardware is enabled (defaults to snr_min).",
     )
     parser.add_argument(
         "--eval_fixed_pbr",
         type=float,
-        default=None,
+        default=0.6,
         help="Fixed PBR attenuation for eval when fixed_eval_hardware is enabled (defaults to pbr_min).",
     )
     parser.add_argument(
@@ -565,6 +565,39 @@ def parse_args() -> argparse.Namespace:
             "Leave empty to run a single model."
         ),
     )
+    parser.add_argument(
+        "--weight_target_strength_stage2",
+        type=float,
+        default=5e-4,
+        help="Second-stage weight-target strength (defaults to weight_target_strength if unset).",
+    )
+    parser.add_argument(
+        "--weight_target_stage1_epochs",
+        type=int,
+        default=20,
+        help="Number of epochs to keep stage-1 regularization before switching to stage-2 strength.",
+    )
+    parser.add_argument(
+        "--weight_dist_score_weight",
+        type=float,
+        default=0.1,
+        help="Penalty weight for weight-distribution score (higher encourages |w| near target).",
+    )
+    _add_bool_arg(
+        parser,
+        "save_require_threshold_targets",
+        default=True,
+        help_text="require miss/FPR to meet target thresholds when saving the best model",
+    )
+    parser.add_argument(
+        "--weight_strength_sweep",
+        type=str,
+        default="1e-3,5e-3,1e-2",
+        help=(
+            "Comma-separated list of weight_target_strength values to train and compare. "
+            "Leave empty to run a single model."
+        ),
+    )
     _add_bool_arg(parser, "use_bias", default=False, help_text="bias terms in layers")
     _add_bool_arg(parser, "use_constrained_classifier", default=True, help_text="constrained classifier weights")
     parser.add_argument(
@@ -588,7 +621,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--snr_min_start",
         type=float,
-        default=20.0,
+        default=15.0,
         help="Starting minimum SNR during warmup (higher is cleaner)",
     )
     parser.add_argument(
