@@ -544,13 +544,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_target_stage1_epochs",
         type=int,
-        default=15,
+        default=10,
         help="Epochs to hold stage-1 regularization strength before ramping.",
     )
     parser.add_argument(
         "--weight_target_ramp_epochs",
         type=int,
-        default=35,
+        default=20,
         help="Epochs to linearly ramp from stage-1 to stage-2 strength.",
     )
     parser.add_argument(
