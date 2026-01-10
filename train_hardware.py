@@ -13,6 +13,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
@@ -149,6 +150,12 @@ def weight_regularizer(
     if not penalties:
         return torch.tensor(0.0, device=next(model.parameters()).device)
     return torch.stack(penalties).mean()
+
+
+def update_ema(ema_model: nn.Module, model: nn.Module, decay: float) -> None:
+    with torch.no_grad():
+        for ema_param, param in zip(ema_model.parameters(), model.parameters()):
+            ema_param.mul_(decay).add_(param, alpha=1.0 - decay)
 
 
 @contextmanager
@@ -512,8 +519,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_reg_mode",
         type=str,
-        default="target",
-        choices=("target", "repel_zero"),
+        default="target_then_repel",
+        choices=("target", "repel_zero", "target_then_repel"),
         help="Regularizer mode: target pushes |w| toward target; repel_zero discourages values near zero.",
     )
     parser.add_argument(
@@ -543,14 +550,50 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight_target_ramp_epochs",
         type=int,
-        default=25,
+        default=35,
         help="Epochs to linearly ramp from stage-1 to stage-2 strength.",
+    )
+    parser.add_argument(
+        "--weight_repel_strength",
+        type=float,
+        default=1e-3,
+        help="Repel-zero strength used after target stage when weight_reg_mode=target_then_repel.",
+    )
+    parser.add_argument(
+        "--weight_repel_ramp_epochs",
+        type=int,
+        default=20,
+        help="Epochs to linearly ramp repel-zero strength after target stage.",
+    )
+    parser.add_argument(
+        "--weight_repel_start_epoch",
+        type=int,
+        default=None,
+        help="Epoch to start repel-zero stage (defaults to end of target ramp).",
     )
     parser.add_argument(
         "--weight_dist_score_weight",
         type=float,
         default=0.1,
         help="Penalty weight for weight-distribution score (higher encourages |w| near target).",
+    )
+    parser.add_argument(
+        "--repel_save_miss_slack",
+        type=float,
+        default=0.02,
+        help="Extra miss-rate slack allowed for saving during repel stage.",
+    )
+    parser.add_argument(
+        "--repel_save_fpr_slack",
+        type=float,
+        default=0.02,
+        help="Extra FPR slack allowed for saving during repel stage.",
+    )
+    parser.add_argument(
+        "--repel_save_min_f1",
+        type=float,
+        default=0.0,
+        help="Minimum F1 required to save during repel stage (0 disables).",
     )
     _add_bool_arg(
         parser,
@@ -616,6 +659,30 @@ def parse_args() -> argparse.Namespace:
     _add_bool_arg(parser, "hardware_eval", default=True, help_text="hardware effects during validation")
     _add_bool_arg(parser, "use_value_constraint", default=True, help_text="value-constrained weights/activations")
     _add_bool_arg(parser, "use_tanh_activations", default=False, help_text="tanh activations before constrained layers")
+    parser.add_argument(
+        "--distill_weight",
+        type=float,
+        default=0.2,
+        help="Self-distillation weight (0 disables).",
+    )
+    parser.add_argument(
+        "--distill_temperature",
+        type=float,
+        default=2.0,
+        help="Temperature for self-distillation soft targets.",
+    )
+    parser.add_argument(
+        "--distill_warmup_epochs",
+        type=int,
+        default=10,
+        help="Epochs to wait before enabling self-distillation.",
+    )
+    parser.add_argument(
+        "--ema_decay",
+        type=float,
+        default=0.995,
+        help="EMA decay for self-distillation teacher.",
+    )
 
     return parser.parse_args()
 
@@ -693,6 +760,10 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
     )
 
     student = build_student(args, device)
+    ema_student = copy.deepcopy(student).to(device)
+    ema_student.eval()
+    for param in ema_student.parameters():
+        param.requires_grad = False
 
     optimizer = Adam(student.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=args.scheduler_patience, verbose=True)
@@ -781,7 +852,15 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
         ramp_epochs = max(args.weight_target_ramp_epochs, 0)
         ramp_end_epoch = stage1_epochs + ramp_epochs
         stage2_active = ramp_epochs > 0 and epoch > stage1_epochs
+        repel_start_epoch = args.weight_repel_start_epoch
+        if repel_start_epoch is None:
+            repel_start_epoch = ramp_end_epoch
+        repel_ramp_epochs = max(args.weight_repel_ramp_epochs, 0)
+        using_target_then_repel = args.weight_reg_mode == "target_then_repel"
+        if using_target_then_repel and repel_start_epoch < 1:
+            repel_start_epoch = 1
         epoch_reg_losses: List[float] = []
+        epoch_distill_losses: List[float] = []
 
         for signals, labels in train_loader:
             labels = labels.to(device)
@@ -802,37 +881,65 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
             )
             optimizer.zero_grad()
 
-            reg_strength = args.weight_target_strength
-            if stage2_active:
-                if epoch <= ramp_end_epoch:
-                    ramp = (epoch - stage1_epochs) / max(1, ramp_epochs)
-                    reg_strength = args.weight_target_strength + ramp * (
-                        stage2_strength - args.weight_target_strength
-                    )
-                else:
-                    reg_strength = stage2_strength
-
             with quantized_weights(student, bits=args.weight_bits):
                 logits, _ = student(signals)
                 loss = ce_loss_fn(logits, labels)
+                reg_strength = args.weight_target_strength
+                reg_mode = args.weight_reg_mode
+                if using_target_then_repel and epoch >= repel_start_epoch:
+                    reg_mode = "repel_zero"
+                    if repel_ramp_epochs > 0:
+                        repel_progress = (epoch - repel_start_epoch) / max(1, repel_ramp_epochs)
+                        repel_progress = float(np.clip(repel_progress, 0.0, 1.0))
+                        reg_strength = repel_progress * args.weight_repel_strength
+                    else:
+                        reg_strength = args.weight_repel_strength
+                else:
+                    if stage2_active:
+                        if epoch <= ramp_end_epoch:
+                            ramp = (epoch - stage1_epochs) / max(1, ramp_epochs)
+                            reg_strength = args.weight_target_strength + ramp * (
+                                stage2_strength - args.weight_target_strength
+                            )
+                        else:
+                            reg_strength = stage2_strength
+
                 reg_loss = weight_regularizer(
                     student,
                     args.weight_target,
-                    mode=args.weight_reg_mode,
+                    mode=reg_mode,
                     epsilon=args.weight_zero_epsilon,
                 )
-                total_loss = loss + reg_strength * reg_loss
+                distill_loss = torch.tensor(0.0, device=device)
+                if args.distill_weight > 0.0 and epoch > args.distill_warmup_epochs:
+                    with torch.no_grad():
+                        with quantized_weights(ema_student, bits=args.weight_bits):
+                            teacher_logits, _ = ema_student(signals)
+                    temperature = max(args.distill_temperature, 1e-6)
+                    student_log_probs = F.log_softmax(logits / temperature, dim=1)
+                    teacher_probs = F.softmax(teacher_logits / temperature, dim=1)
+                    distill_loss = F.kl_div(
+                        student_log_probs,
+                        teacher_probs,
+                        reduction="batchmean",
+                    ) * (temperature**2)
+
+                total_loss = loss + reg_strength * reg_loss + args.distill_weight * distill_loss
                 total_loss.backward()
 
             torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
             optimizer.step()
+            if args.distill_weight > 0.0:
+                update_ema(ema_student, student, args.ema_decay)
 
             running_loss += loss.item() * labels.size(0)
             epoch_reg_losses.append(reg_loss.detach().item())
+            epoch_distill_losses.append(distill_loss.detach().item())
             total += labels.size(0)
 
         train_loss = running_loss / max(total, 1)
         avg_reg_loss = float(np.mean(epoch_reg_losses)) if epoch_reg_losses else 0.0
+        avg_distill_loss = float(np.mean(epoch_distill_losses)) if epoch_distill_losses else 0.0
 
         eval_snr_min, eval_snr_max, eval_pbr_min, eval_pbr_max, eval_seed = _eval_params()
 
@@ -942,6 +1049,7 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
                 "val_miss": val_metrics["miss_rate"],
                 "val_fpr": val_metrics["fpr"],
                 "avg_reg_loss": avg_reg_loss,
+                "avg_distill_loss": avg_distill_loss,
                 "gen_f1": gen_metrics["f1"],
                 "gen_miss": gen_metrics["miss_rate"],
                 "gen_fpr": gen_metrics["fpr"],
@@ -961,6 +1069,7 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
                 "val_miss": val_metrics["miss_rate"],
                 "val_fpr": val_metrics["fpr"],
                 "avg_reg_loss": avg_reg_loss,
+                "avg_distill_loss": avg_distill_loss,
                 "gen_f1": gen_metrics["f1"],
                 "gen_miss": gen_metrics["miss_rate"],
                 "gen_fpr": gen_metrics["fpr"],
@@ -972,10 +1081,17 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
 
         meets_targets = True
         if args.save_require_threshold_targets:
+            miss_target = args.threshold_target_miss
+            fpr_target = args.threshold_max_fpr
+            if using_target_then_repel and epoch >= repel_start_epoch:
+                miss_target += max(args.repel_save_miss_slack, 0.0)
+                fpr_target += max(args.repel_save_fpr_slack, 0.0)
             meets_targets = (
-                val_metrics["miss_rate"] <= args.threshold_target_miss
-                and val_metrics["fpr"] <= args.threshold_max_fpr
+                val_metrics["miss_rate"] <= miss_target
+                and val_metrics["fpr"] <= fpr_target
             )
+            if using_target_then_repel and epoch >= repel_start_epoch and args.repel_save_min_f1 > 0.0:
+                meets_targets = meets_targets and val_metrics["f1"] >= args.repel_save_min_f1
 
         if best_metric_score > best_score and meets_targets:
             best_score = best_metric_score
@@ -997,6 +1113,7 @@ def train_and_evaluate(args: argparse.Namespace, run_tag: str = "") -> Dict[str,
                     "gen_fpr": gen_metrics["fpr"],
                     "threshold": best_thr_epoch,
                     "avg_reg_loss": avg_reg_loss,
+                    "avg_distill_loss": avg_distill_loss,
                 }
             )
         else:
