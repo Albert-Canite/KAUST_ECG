@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 from typing import Dict, List, Tuple
 
@@ -93,7 +94,6 @@ def select_top_beats(beats: np.ndarray, labels: np.ndarray, num_per_class: int) 
         scores = quality_scores(beats[class_idx])
         top_k = class_idx[np.argsort(scores)[::-1][:num_per_class]]
         selected_idx.extend(top_k.tolist())
-    selected_idx = sorted(selected_idx)
     return beats[selected_idx], labels[selected_idx]
 
 
@@ -101,13 +101,14 @@ def label_names(labels: np.ndarray) -> List[str]:
     return ["normal" if int(v) == 0 else "abnormal" for v in labels]
 
 
-def write_segment_csv(output_dir: str, segment_name: str, segment: np.ndarray, labels: np.ndarray) -> None:
+def write_segment_csv(output_dir: str, segment_name: str, segment: np.ndarray, labels: List[str]) -> None:
     os.makedirs(output_dir, exist_ok=True)
-    labels_row = np.array(label_names(labels), dtype=object)
-    segment_t = segment.T.astype(object)
-    rows = [labels_row] + [segment_t[i] for i in range(segment_t.shape[0])]
-    df = pd.DataFrame(rows)
-    df.to_csv(os.path.join(output_dir, f"{segment_name}.csv"), header=False, index=False)
+    path = os.path.join(output_dir, f"{segment_name}.csv")
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(labels)
+        for row in segment.T:
+            writer.writerow(row.tolist())
 
 
 def safe_weight_token(value: float) -> str:
@@ -134,6 +135,10 @@ def main() -> None:
         raise RuntimeError("No generalization data loaded. Check data_path.")
 
     selected_beats, selected_labels = select_top_beats(beats, labels, args.num_per_class)
+    rng = np.random.default_rng(args.seed)
+    perm = rng.permutation(len(selected_beats))
+    selected_beats = selected_beats[perm]
+    selected_labels = selected_labels[perm]
     label_text = label_names(selected_labels)
 
     model = load_student(args.model_path, device)
@@ -144,7 +149,7 @@ def main() -> None:
 
     for segment_name, segment_slice in SEGMENT_SLICES.items():
         segment = selected_beats[:, segment_slice]
-        write_segment_csv(args.output_dir, segment_name, segment, selected_labels)
+        write_segment_csv(args.output_dir, segment_name, segment, label_text)
 
     segment_tensors: Dict[str, torch.Tensor] = {
         name: torch.from_numpy(selected_beats[:, seg].astype(np.float32)).unsqueeze(1).to(device)
@@ -187,9 +192,12 @@ def main() -> None:
     def write_matrix_csv(name: str, matrix: torch.Tensor) -> None:
         matrix_np = matrix.detach().cpu().numpy()
         flattened = matrix_np.reshape(matrix_np.shape[0], -1).T
-        rows = [label_text] + [flattened[i].tolist() for i in range(flattened.shape[0])]
-        df = pd.DataFrame(rows)
-        df.to_csv(os.path.join(args.output_dir, name), header=False, index=False)
+        path = os.path.join(args.output_dir, name)
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(label_text)
+            for row in flattened:
+                writer.writerow(row.tolist())
 
     write_matrix_csv("matrix_input.csv", tokens_matrix)
 
