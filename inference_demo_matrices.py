@@ -175,7 +175,7 @@ def main() -> None:
             pooled_values = pool_to_four(activated[:, kernel_idx : kernel_idx + 1, :])
             pooled_values = pooled_values.squeeze(1).detach().cpu().numpy()
 
-            pooled_tokens.append(pooled_values.T)
+            pooled_tokens.append(torch.from_numpy(pooled_values.T).to(device))
 
             conv_strings = [format_vector(row) for row in conv_values]
             pool_strings = [format_vector(row) for row in pooled_values]
