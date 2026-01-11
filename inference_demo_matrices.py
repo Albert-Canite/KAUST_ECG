@@ -172,23 +172,21 @@ def main() -> None:
             filename = f"{segment_name}_kernel{kernel_idx}_{weight_tokens}.csv"
 
             conv_values = conv_out[:, kernel_idx, :].detach().cpu().numpy()
-            pooled_values = pool_to_four(activated[:, kernel_idx : kernel_idx + 1, :])
-            pooled_values = pooled_values.squeeze(1).detach().cpu().numpy()
+            pooled_tensor = pool_to_four(activated[:, kernel_idx : kernel_idx + 1, :]).squeeze(1)
+            pooled_values = pooled_tensor.detach().cpu().numpy()
 
-            pooled_tokens.append(torch.from_numpy(pooled_values.T).to(device))
+            pooled_tokens.append(pooled_tensor)
 
             conv_strings = [format_vector(row) for row in conv_values]
             pool_strings = [format_vector(row) for row in pooled_values]
             kernel_df = pd.DataFrame({"conv_output": conv_strings, "pool_output": pool_strings})
             kernel_df.to_csv(os.path.join(args.output_dir, filename), index=False)
 
-    tokens_matrix = torch.stack(pooled_tokens, dim=0)
-    tokens_matrix = tokens_matrix.permute(1, 0, 2)
-    tokens_matrix = tokens_matrix.to(device)
+    tokens_matrix = torch.stack(pooled_tokens, dim=1)
 
     def write_matrix_csv(name: str, matrix: torch.Tensor) -> None:
         matrix_np = matrix.detach().cpu().numpy()
-        flattened = matrix_np.reshape(matrix_np.shape[0] * matrix_np.shape[1], matrix_np.shape[2])
+        flattened = matrix_np.reshape(matrix_np.shape[0], -1).T
         rows = [label_text] + [flattened[i].tolist() for i in range(flattened.shape[0])]
         df = pd.DataFrame(rows)
         df.to_csv(os.path.join(args.output_dir, name), header=False, index=False)
