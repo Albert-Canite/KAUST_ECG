@@ -226,7 +226,7 @@ def _load_model(checkpoint_path: str, device: torch.device) -> torch.nn.Module:
 
 DEFAULT_DATA_PATH = "E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/"
 DEFAULT_ORIGINAL_MODEL = os.path.join("saved_models", "student_model.pth")
-DEFAULT_HARDWARE_MODEL = os.path.join("saved_models", "student_model_hardware_reg_5e-03.pth")
+DEFAULT_HARDWARE_MODEL = os.path.join("saved_models", "student_model_hardware.pth")
 
 
 def parse_args() -> argparse.Namespace:
