@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--data_path",
-        required=True,
+        default="E:/OneDrive - KAUST/ONN codes/MIT-BIH/mit-bih-arrhythmia-database-1.0.0/",
         help="Path containing MIT-BIH *.dat/*.hea/*.atr files.",
     )
     parser.add_argument(
