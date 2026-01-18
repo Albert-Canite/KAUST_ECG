@@ -72,10 +72,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-renormalize_inputs", dest="renormalize_inputs", action="store_false")
     parser.add_argument("--zero_mean_inputs", dest="zero_mean_inputs", action="store_true", default=True)
     parser.add_argument("--no-zero_mean_inputs", dest="zero_mean_inputs", action="store_false")
+    parser.add_argument("--use_checkpoint_hardware", dest="use_checkpoint_hardware", action="store_true", default=True)
+    parser.add_argument("--no-use_checkpoint_hardware", dest="use_checkpoint_hardware", action="store_false")
     return parser.parse_args()
 
 
-def load_student(model_path: str, device: torch.device) -> SegmentAwareStudent:
+def load_student(model_path: str, device: torch.device) -> Tuple[SegmentAwareStudent, Dict[str, object]]:
     checkpoint = torch.load(model_path, map_location=device)
     config = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
     model = SegmentAwareStudent(
@@ -96,7 +98,32 @@ def load_student(model_path: str, device: torch.device) -> SegmentAwareStudent:
                 break
     model.load_state_dict(state_dict)
     model.eval()
-    return model
+    return model, config
+
+
+def apply_checkpoint_hardware_args(args: argparse.Namespace, config: Dict[str, object]) -> None:
+    if not config:
+        return
+    args.input_bits = int(config.get("input_bits", args.input_bits))
+    args.weight_bits = int(config.get("weight_bits", args.weight_bits))
+    args.renormalize_inputs = bool(config.get("renormalize_inputs", args.renormalize_inputs))
+    args.zero_mean_inputs = bool(config.get("zero_mean_inputs", args.zero_mean_inputs))
+    args.pbr_peak_window = int(config.get("pbr_peak_window", args.pbr_peak_window))
+    args.pbr_min_prominence = float(config.get("pbr_min_prominence", args.pbr_min_prominence))
+
+    if bool(config.get("fixed_eval_hardware", False)) and bool(config.get("hardware_eval", True)):
+        snr_db = config.get("eval_fixed_snr", None)
+        if snr_db is None:
+            snr_db = config.get("snr_min", args.snr_db)
+        pbr_factor = config.get("eval_fixed_pbr", None)
+        if pbr_factor is None:
+            pbr_factor = config.get("pbr_min", args.pbr_factor)
+        args.snr_db = float(snr_db)
+        args.pbr_factor = float(pbr_factor)
+        args.eval_seed = int(config.get("eval_fixed_seed", args.eval_seed))
+    else:
+        args.snr_db = float(config.get("snr_min", args.snr_db))
+        args.pbr_factor = float(config.get("pbr_min", args.pbr_factor))
 
 
 def select_top_beats_by_model(
@@ -226,11 +253,14 @@ def main() -> None:
     if beats.size == 0:
         raise RuntimeError("No generalization data loaded. Check data_path.")
 
-    model = load_student(args.model_path, device)
+    model, config = load_student(args.model_path, device)
     if len(model.mlp_layers) < 3:
         raise ValueError("Model must have at least 3 MLP layers for this demo.")
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.use_checkpoint_hardware:
+        apply_checkpoint_hardware_args(args, config)
 
     selected_beats, selected_labels = select_top_beats_by_model(
         beats,
