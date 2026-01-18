@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model_path", type=str, default="saved_models/student_model_hardware.pth")
     parser.add_argument("--output_dir", type=str, default="matrice")
-    parser.add_argument("--num_per_class", type=int, default=2)
+    parser.add_argument("--num_per_class", type=int, default=1)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--input_bits", type=int, default=5)
     parser.add_argument("--weight_bits", type=int, default=5)
@@ -101,7 +101,6 @@ def load_student(model_path: str, device: torch.device) -> SegmentAwareStudent:
 
 def select_top_beats_by_model(
     beats: np.ndarray,
-    labels: np.ndarray,
     model: SegmentAwareStudent,
     device: torch.device,
     num_per_class: int,
@@ -138,16 +137,13 @@ def select_top_beats_by_model(
 
     selected_idx: List[int] = []
     for label in (0, 1):
-        class_idx = np.where(labels == label)[0]
+        class_idx = np.where(preds == label)[0]
         if class_idx.size == 0:
             continue
-        correct_idx = class_idx[preds[class_idx] == label]
-        if correct_idx.size == 0:
-            continue
-        class_scores = probs[correct_idx, label]
-        ranked = correct_idx[np.argsort(class_scores)[::-1]]
+        class_scores = probs[class_idx, label]
+        ranked = class_idx[np.argsort(class_scores)[::-1]]
         selected_idx.extend(ranked[:num_per_class].tolist())
-    return beats[selected_idx], labels[selected_idx]
+    return beats[selected_idx], preds[selected_idx]
 
 
 def label_names(labels: np.ndarray) -> List[str]:
@@ -222,7 +218,6 @@ def main() -> None:
 
     selected_beats, selected_labels = select_top_beats_by_model(
         beats,
-        labels,
         model,
         device,
         args.num_per_class,
