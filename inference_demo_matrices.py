@@ -101,6 +101,7 @@ def load_student(model_path: str, device: torch.device) -> SegmentAwareStudent:
 
 def select_top_beats_by_model(
     beats: np.ndarray,
+    labels: np.ndarray,
     model: SegmentAwareStudent,
     device: torch.device,
     num_per_class: int,
@@ -135,15 +136,30 @@ def select_top_beats_by_model(
     preds = torch.argmax(probs, dim=1).cpu().numpy()
     probs = probs.cpu().numpy()
 
+    total_normals = int(np.sum(labels == 0))
+    total_abnormals = int(np.sum(labels == 1))
+    pred_normals = int(np.sum(preds == 0))
+    pred_abnormals = int(np.sum(preds == 1))
+    correct_normals = int(np.sum((labels == 0) & (preds == 0)))
+    correct_abnormals = int(np.sum((labels == 1) & (preds == 1)))
+    print(
+        "Selection stats -> "
+        f"total normals: {total_normals}, total abnormals: {total_abnormals}, "
+        f"pred normals: {pred_normals}, pred abnormals: {pred_abnormals}, "
+        f"correct normals: {correct_normals}, correct abnormals: {correct_abnormals}"
+    )
+
     selected_idx: List[int] = []
     for label in (0, 1):
-        class_idx = np.where(preds == label)[0]
+        class_idx = np.where((labels == label) & (preds == label))[0]
         if class_idx.size == 0:
             continue
         class_scores = probs[class_idx, label]
         ranked = class_idx[np.argsort(class_scores)[::-1]]
         selected_idx.extend(ranked[:num_per_class].tolist())
-    return beats[selected_idx], preds[selected_idx]
+    if not selected_idx:
+        raise RuntimeError("No correctly classified beats found for selection.")
+    return beats[selected_idx], labels[selected_idx]
 
 
 def label_names(labels: np.ndarray) -> List[str]:
@@ -218,6 +234,7 @@ def main() -> None:
 
     selected_beats, selected_labels = select_top_beats_by_model(
         beats,
+        labels,
         model,
         device,
         args.num_per_class,
@@ -231,8 +248,11 @@ def main() -> None:
         args.zero_mean_inputs,
         args.eval_seed,
     )
-    if len(selected_beats) == 0:
-        raise RuntimeError("No correctly classified beats found for selection.")
+    if len(selected_beats) < args.num_per_class * 2:
+        raise RuntimeError(
+            "Not enough correctly classified beats to cover both classes. "
+            "Check selection stats above."
+        )
     rng = np.random.default_rng(args.seed)
     perm = rng.permutation(len(selected_beats))
     selected_beats = selected_beats[perm]
