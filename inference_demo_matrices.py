@@ -59,11 +59,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model_path", type=str, default="saved_models/student_model_hardware.pth")
     parser.add_argument("--output_dir", type=str, default="matrice")
-    parser.add_argument("--num_per_class", type=int, default=200)
+    parser.add_argument("--num_per_class", type=int, default=1)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--min_std", type=float, default=0.02)
-    parser.add_argument("--max_saturation_ratio", type=float, default=0.5)
-    parser.add_argument("--saturation_weight", type=float, default=0.5)
     parser.add_argument("--input_bits", type=int, default=5)
     parser.add_argument("--weight_bits", type=int, default=5)
     parser.add_argument("--snr_db", type=float, default=15.0)
@@ -102,38 +99,66 @@ def load_student(model_path: str, device: torch.device) -> SegmentAwareStudent:
     return model
 
 
-def quality_scores(beats: np.ndarray) -> np.ndarray:
-    return np.std(beats, axis=1)
-
-
-def saturated_ratio(beats: np.ndarray, threshold: float = 0.99) -> np.ndarray:
-    return np.mean(np.abs(beats) >= threshold, axis=1)
-
-
-def select_top_beats(
+def select_top_beats_by_model(
     beats: np.ndarray,
     labels: np.ndarray,
+    model: SegmentAwareStudent,
+    device: torch.device,
     num_per_class: int,
-    min_std: float,
-    max_saturation_ratio: float,
-    saturation_weight: float,
+    input_bits: int,
+    weight_bits: int,
+    snr_db: float,
+    pbr_factor: float,
+    pbr_peak_window: int,
+    pbr_min_prominence: float,
+    renormalize_inputs: bool,
+    zero_mean_inputs: bool,
+    eval_seed: int | None,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    model.eval()
+    signals = torch.from_numpy(beats.astype(np.float32)).unsqueeze(1).to(device)
+    signals = apply_fixed_hardware_effects(
+        signals,
+        device,
+        input_bits,
+        snr_db,
+        pbr_factor,
+        pbr_peak_window,
+        pbr_min_prominence,
+        renormalize_inputs,
+        zero_mean_inputs,
+        eval_seed,
+    )
+    with torch.no_grad():
+        with quantized_weights(model, bits=weight_bits):
+            logits, _ = model(signals)
+        probs = torch.softmax(logits, dim=1)
+    preds = torch.argmax(probs, dim=1).cpu().numpy()
+    probs = probs.cpu().numpy()
+
+    total_normals = int(np.sum(labels == 0))
+    total_abnormals = int(np.sum(labels == 1))
+    pred_normals = int(np.sum(preds == 0))
+    pred_abnormals = int(np.sum(preds == 1))
+    correct_normals = int(np.sum((labels == 0) & (preds == 0)))
+    correct_abnormals = int(np.sum((labels == 1) & (preds == 1)))
+    print(
+        "Selection stats -> "
+        f"total normals: {total_normals}, total abnormals: {total_abnormals}, "
+        f"pred normals: {pred_normals}, pred abnormals: {pred_abnormals}, "
+        f"correct normals: {correct_normals}, correct abnormals: {correct_abnormals}"
+    )
+
     selected_idx: List[int] = []
     for label in (0, 1):
-        class_idx = np.where(labels == label)[0]
+        class_idx = np.where((labels == label) & (preds == label))[0]
         if class_idx.size == 0:
             continue
-        class_beats = beats[class_idx]
-        scores = quality_scores(class_beats)
-        sat = saturated_ratio(class_beats)
-        valid_mask = (scores >= min_std) & (sat <= max_saturation_ratio)
-        filtered_idx = class_idx[valid_mask]
-        filtered_scores = scores[valid_mask] - saturation_weight * sat[valid_mask]
-        if filtered_idx.size < num_per_class:
-            filtered_idx = class_idx
-            filtered_scores = scores - saturation_weight * sat
-        top_k = filtered_idx[np.argsort(filtered_scores)[::-1][:num_per_class]]
-        selected_idx.extend(top_k.tolist())
+        class_scores = probs[class_idx, label]
+        ranked = class_idx[np.argsort(class_scores)[::-1]]
+        selected_idx.extend(ranked[:num_per_class].tolist())
+    if not selected_idx:
+        raise RuntimeError("No correctly classified beats found for selection.")
     return beats[selected_idx], labels[selected_idx]
 
 
@@ -201,25 +226,38 @@ def main() -> None:
     if beats.size == 0:
         raise RuntimeError("No generalization data loaded. Check data_path.")
 
-    selected_beats, selected_labels = select_top_beats(
-        beats,
-        labels,
-        args.num_per_class,
-        args.min_std,
-        args.max_saturation_ratio,
-        args.saturation_weight,
-    )
-    rng = np.random.default_rng(args.seed)
-    perm = rng.permutation(len(selected_beats))
-    selected_beats = selected_beats[perm]
-    selected_labels = selected_labels[perm]
-    label_text = label_names(selected_labels)
-
     model = load_student(args.model_path, device)
     if len(model.mlp_layers) < 3:
         raise ValueError("Model must have at least 3 MLP layers for this demo.")
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    selected_beats, selected_labels = select_top_beats_by_model(
+        beats,
+        labels,
+        model,
+        device,
+        args.num_per_class,
+        args.input_bits,
+        args.weight_bits,
+        args.snr_db,
+        args.pbr_factor,
+        args.pbr_peak_window,
+        args.pbr_min_prominence,
+        args.renormalize_inputs,
+        args.zero_mean_inputs,
+        args.eval_seed,
+    )
+    if len(selected_beats) < args.num_per_class * 2:
+        raise RuntimeError(
+            "Not enough correctly classified beats to cover both classes. "
+            "Check selection stats above."
+        )
+    rng = np.random.default_rng(args.seed)
+    perm = rng.permutation(len(selected_beats))
+    selected_beats = selected_beats[perm]
+    selected_labels = selected_labels[perm]
+    label_text = label_names(selected_labels)
 
     signals = torch.from_numpy(selected_beats.astype(np.float32)).unsqueeze(1).to(device)
     signals = apply_fixed_hardware_effects(
