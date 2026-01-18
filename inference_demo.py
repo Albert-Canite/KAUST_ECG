@@ -92,43 +92,7 @@ def apply_checkpoint_hardware_args(args: argparse.Namespace, config: Dict[str, o
     args.pbr_min_prominence = float(config.get("pbr_min_prominence", args.pbr_min_prominence))
 
 
-def apply_fixed_hardware_effects(
-    signals: torch.Tensor,
-    device: torch.device,
-    input_bits: int,
-    snr_db: float,
-    pbr_factor: float,
-    pbr_peak_window: int,
-    pbr_min_prominence: float,
-    renormalize_inputs: bool,
-    zero_mean_inputs: bool,
-    eval_seed: int | None,
-) -> torch.Tensor:
-    rng_devices = [device] if device.type == "cuda" else []
-    with torch.random.fork_rng(devices=rng_devices, enabled=eval_seed is not None):
-        if eval_seed is not None:
-            torch.manual_seed(eval_seed)
-            if device.type == "cuda":
-                torch.cuda.manual_seed_all(eval_seed)
-        signals = apply_hardware_effects(
-            signals,
-            device,
-            input_bits,
-            snr_db,
-            snr_db,
-            pbr_factor,
-            pbr_factor,
-            pbr_peak_window,
-            pbr_min_prominence,
-            hardware_prob=1.0,
-            training=False,
-            renormalize=renormalize_inputs,
-            zero_mean=zero_mean_inputs,
-        )
-    return signals
-
-
-def _collect_probs(
+def _collect_processed_outputs(
     model: SegmentAwareStudent,
     loader: DataLoader,
     device: torch.device,
@@ -141,10 +105,12 @@ def _collect_probs(
     eval_seed: int | None,
     renormalize_inputs: bool,
     zero_mean_inputs: bool,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     model.eval()
     labels_all: List[int] = []
     probs_all: List[float] = []
+    logits_all: List[np.ndarray] = []
+    processed_all: List[np.ndarray] = []
     rng_devices = [device] if device.type == "cuda" else []
     with torch.random.fork_rng(devices=rng_devices, enabled=eval_seed is not None):
         if eval_seed is not None:
@@ -174,7 +140,11 @@ def _collect_probs(
                 prob_pos = torch.softmax(logits, dim=1)[:, 1]
                 labels_all.extend(labels.cpu().tolist())
                 probs_all.extend(prob_pos.cpu().tolist())
-    return np.array(labels_all), np.array(probs_all)
+                logits_all.append(logits.detach().cpu().numpy())
+                processed_all.append(signals.detach().cpu().numpy())
+    processed = np.concatenate(processed_all, axis=0)
+    logits = np.concatenate(logits_all, axis=0)
+    return np.array(labels_all), np.array(probs_all), processed, logits
 
 
 def compute_best_threshold(labels: np.ndarray, probs: np.ndarray) -> float:
@@ -202,7 +172,7 @@ def select_top_beats(
     probs: np.ndarray,
     threshold: float,
     num_per_class: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     preds = (probs >= threshold).astype(int)
     selected_indices: List[int] = []
     qualities: List[float] = []
@@ -224,7 +194,13 @@ def select_top_beats(
 
     selected_indices_arr = np.array(selected_indices)
     qualities_arr = np.array(qualities)
-    return beats[selected_indices_arr], labels[selected_indices_arr], qualities_arr
+    return (
+        beats[selected_indices_arr],
+        labels[selected_indices_arr],
+        qualities_arr,
+        preds[selected_indices_arr],
+        selected_indices_arr,
+    )
 
 
 def label_names(labels: Iterable[int]) -> List[str]:
@@ -285,7 +261,7 @@ def run_demo() -> None:
     dataset = ECGBeatDataset(beats, labels)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
 
-    labels_arr, probs_arr = _collect_probs(
+    labels_arr, probs_arr, processed_beats, logits_arr = _collect_processed_outputs(
         model,
         loader,
         device,
@@ -303,7 +279,7 @@ def run_demo() -> None:
     best_threshold = compute_best_threshold(labels_arr, probs_arr)
     print(f"Best threshold={best_threshold:.3f}")
 
-    selected_beats, selected_labels, qualities = select_top_beats(
+    _, selected_labels, qualities, selected_preds, selected_indices = select_top_beats(
         beats,
         labels_arr,
         probs_arr,
@@ -311,30 +287,18 @@ def run_demo() -> None:
         args.num_per_class,
     )
     label_text = label_names(selected_labels)
-
-    signals = torch.from_numpy(selected_beats.astype(np.float32)).unsqueeze(1).to(device)
-    signals = apply_fixed_hardware_effects(
-        signals,
-        device,
-        args.input_bits,
-        args.snr_db,
-        args.pbr_factor,
-        args.pbr_peak_window,
-        args.pbr_min_prominence,
-        args.renormalize_inputs,
-        args.zero_mean_inputs,
-        args.eval_seed,
-    )
-    processed_beats = signals.squeeze(1).detach().cpu().numpy()
+    selected_processed = processed_beats[selected_indices].squeeze(1)
+    selected_logits = logits_arr[selected_indices]
+    selected_probs = probs_arr[selected_indices]
 
     os.makedirs(args.output_dir, exist_ok=True)
 
     for segment_name, segment_slice in SEGMENT_SLICES.items():
-        segment = processed_beats[:, segment_slice]
+        segment = selected_processed[:, segment_slice]
         write_segment_csv(args.output_dir, segment_name, segment, label_text)
 
     segment_tensors: Dict[str, torch.Tensor] = {
-        name: torch.from_numpy(processed_beats[:, seg].astype(np.float32)).unsqueeze(1).to(device)
+        name: torch.from_numpy(selected_processed[:, seg].astype(np.float32)).unsqueeze(1).to(device)
         for name, seg in SEGMENT_SLICES.items()
     }
 
@@ -390,10 +354,10 @@ def run_demo() -> None:
         {
             "label": label_text,
             "quality": qualities,
-            "logit_normal": logits[:, 0].detach().cpu().numpy(),
-            "logit_abnormal": logits[:, 1].detach().cpu().numpy(),
-            "prob_abnormal": probs.detach().cpu().numpy(),
-            "pred_label": ["normal" if int(v) == 0 else "abnormal" for v in preds.cpu().numpy()],
+            "logit_normal": selected_logits[:, 0],
+            "logit_abnormal": selected_logits[:, 1],
+            "prob_abnormal": selected_probs,
+            "pred_label": ["normal" if int(v) == 0 else "abnormal" for v in selected_preds],
             "threshold": best_threshold,
         }
     )
