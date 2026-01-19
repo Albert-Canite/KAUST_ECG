@@ -247,13 +247,11 @@ def write_kernel_csv(
         for label in labels:
             pooled_header.extend([label] * features_per_beat)
         writer.writerow(pooled_header)
-        total_columns = features_per_beat * pooled_values.shape[0]
+        row_values: List[str] = []
         for beat_idx in range(pooled_values.shape[0]):
-            row_values = [""] * total_columns
-            start_idx = beat_idx * features_per_beat
             for feature_idx in range(features_per_beat):
-                row_values[start_idx + feature_idx] = f"{pooled_values[beat_idx, feature_idx]:.6f}"
-            writer.writerow(row_values)
+                row_values.append(f"{pooled_values[beat_idx, feature_idx]:.6f}")
+        writer.writerow(row_values)
         writer.writerow([])
         writer.writerow(labels)
         conv_matrix = conv_values.T
