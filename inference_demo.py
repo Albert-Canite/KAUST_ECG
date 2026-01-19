@@ -207,9 +207,14 @@ def label_names(labels: Iterable[int]) -> List[str]:
     return ["normal" if int(v) == 0 else "abnormal" for v in labels]
 
 
-def write_segment_csv(output_dir: str, segment_name: str, segment: np.ndarray, labels: List[str]) -> None:
+def write_segment_csv(
+    output_dir: str,
+    filename: str,
+    segment: np.ndarray,
+    labels: List[str],
+) -> None:
     os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, f"{segment_name}.csv")
+    path = os.path.join(output_dir, filename)
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(labels)
@@ -217,18 +222,34 @@ def write_segment_csv(output_dir: str, segment_name: str, segment: np.ndarray, l
             writer.writerow(row.tolist())
 
 
-def safe_weight_token(value: float) -> str:
-    text = f"{value:.4f}"
-    text = text.replace("-", "m").replace(".", "p")
-    return text
-
-
 def pool_to_four(values: torch.Tensor) -> torch.Tensor:
     return F.adaptive_avg_pool1d(values, 4)
 
 
-def format_vector(values: np.ndarray) -> str:
-    return ",".join(f"{v:.6f}" for v in values.tolist())
+def write_kernel_csv(
+    output_dir: str,
+    filename: str,
+    kernel_weights: np.ndarray,
+    pooled_values: np.ndarray,
+    conv_values: np.ndarray,
+) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, filename)
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["kernel_weights"])
+        writer.writerow([f"{w:.6f}" for w in kernel_weights.tolist()])
+        writer.writerow([])
+        writer.writerow(["pooling_output"])
+        pooled_matrix = pooled_values.T
+        for row in pooled_matrix:
+            writer.writerow([f"{v:.6f}" for v in row.tolist()])
+        writer.writerow([])
+        header = [f"ch{idx + 1}" for idx in range(conv_values.shape[0])]
+        writer.writerow(header)
+        conv_matrix = conv_values.T
+        for row in conv_matrix:
+            writer.writerow([f"{v:.6f}" for v in row.tolist()])
 
 
 def write_matrix_csv(name: str, matrix: torch.Tensor, output_dir: str, labels: List[str]) -> None:
@@ -293,9 +314,12 @@ def run_demo() -> None:
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    file_index = 1
     for segment_name, segment_slice in SEGMENT_SLICES.items():
         segment = selected_processed[:, segment_slice]
-        write_segment_csv(args.output_dir, segment_name, segment, label_text)
+        filename = f"{file_index:02d}_{segment_name}.csv"
+        write_segment_csv(args.output_dir, filename, segment, label_text)
+        file_index += 1
 
     segment_tensors: Dict[str, torch.Tensor] = {
         name: torch.from_numpy(selected_processed[:, seg].astype(np.float32)).unsqueeze(1).to(device)
@@ -320,30 +344,34 @@ def run_demo() -> None:
 
             for kernel_idx in range(conv_out.shape[1]):
                 kernel_weights = conv_layer.weight.detach().cpu().numpy()[kernel_idx, 0]
-                weight_tokens = "_".join(safe_weight_token(w) for w in kernel_weights)
-                filename = f"{segment_name}_kernel{kernel_idx}_{weight_tokens}.csv"
+                filename = f"{file_index:02d}_{segment_name}.csv"
 
                 conv_values = conv_out[:, kernel_idx, :].detach().cpu().numpy()
                 pooled_tensor = pool_to_four(activated[:, kernel_idx : kernel_idx + 1, :]).squeeze(1)
                 pooled_values = pooled_tensor.detach().cpu().numpy()
 
                 pooled_tokens.append(pooled_tensor)
-
-                conv_strings = [format_vector(row) for row in conv_values]
-                pool_strings = [format_vector(row) for row in pooled_values]
-                kernel_df = pd.DataFrame({"conv_output": conv_strings, "pool_output": pool_strings})
-                kernel_df.to_csv(os.path.join(args.output_dir, filename), index=False)
+                write_kernel_csv(
+                    args.output_dir,
+                    filename,
+                    kernel_weights,
+                    pooled_values,
+                    conv_values,
+                )
+                file_index += 1
 
         tokens_matrix = torch.stack(pooled_tokens, dim=1)
 
-    write_matrix_csv("matrix_input.csv", tokens_matrix, args.output_dir, label_text)
+    write_matrix_csv(f"{file_index:02d}_matrix_input.csv", tokens_matrix, args.output_dir, label_text)
+    file_index += 1
 
     h = tokens_matrix
     for idx, layer in enumerate(list(model.mlp_layers)[:3], start=1):
         h = model._scale_if_needed(h)
         h = layer(h)
         h = activation(h)
-        write_matrix_csv(f"mlp_{idx}.csv", h, args.output_dir, label_text)
+        write_matrix_csv(f"{file_index:02d}_mlp_{idx}.csv", h, args.output_dir, label_text)
+        file_index += 1
 
     pooled = h.mean(dim=1)
     logits = model.classifier(pooled)
@@ -361,7 +389,7 @@ def run_demo() -> None:
             "threshold": best_threshold,
         }
     )
-    result_df.to_csv(os.path.join(args.output_dir, "classification.csv"), index=False)
+    result_df.to_csv(os.path.join(args.output_dir, f"{file_index:02d}_classification.csv"), index=False)
 
 
 if __name__ == "__main__":
