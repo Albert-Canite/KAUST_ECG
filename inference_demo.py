@@ -232,6 +232,7 @@ def write_kernel_csv(
     kernel_weights: np.ndarray,
     pooled_values: np.ndarray,
     conv_values: np.ndarray,
+    labels: List[str],
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, filename)
@@ -241,12 +242,20 @@ def write_kernel_csv(
         writer.writerow([f"{w:.6f}" for w in kernel_weights.tolist()])
         writer.writerow([])
         writer.writerow(["pooling_output"])
-        pooled_matrix = pooled_values.T
-        for row in pooled_matrix:
-            writer.writerow([f"{v:.6f}" for v in row.tolist()])
+        features_per_beat = pooled_values.shape[1]
+        pooled_header = []
+        for label in labels:
+            pooled_header.extend([label] * features_per_beat)
+        writer.writerow(pooled_header)
+        total_columns = features_per_beat * pooled_values.shape[0]
+        for beat_idx in range(pooled_values.shape[0]):
+            row_values = [""] * total_columns
+            start_idx = beat_idx * features_per_beat
+            for feature_idx in range(features_per_beat):
+                row_values[start_idx + feature_idx] = f"{pooled_values[beat_idx, feature_idx]:.6f}"
+            writer.writerow(row_values)
         writer.writerow([])
-        header = [f"ch{idx + 1}" for idx in range(conv_values.shape[0])]
-        writer.writerow(header)
+        writer.writerow(labels)
         conv_matrix = conv_values.T
         for row in conv_matrix:
             writer.writerow([f"{v:.6f}" for v in row.tolist()])
@@ -357,6 +366,7 @@ def run_demo() -> None:
                     kernel_weights,
                     pooled_values,
                     conv_values,
+                    label_text,
                 )
                 file_index += 1
 
