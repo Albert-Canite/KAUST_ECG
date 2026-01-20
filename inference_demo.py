@@ -245,8 +245,13 @@ def write_kernel_csv(
         features_per_beat = pooled_values.shape[1]
         pooled_header = []
         for label in labels:
-            pooled_header.extend([label] * features_per_beat)
+            pooled_header.append(label)
+            pooled_header.extend([""] * (features_per_beat - 1))
         writer.writerow(pooled_header)
+        feature_header = []
+        for _ in labels:
+            feature_header.extend([f"feature{idx + 1}" for idx in range(features_per_beat)])
+        writer.writerow(feature_header)
         row_values: List[str] = []
         for beat_idx in range(pooled_values.shape[0]):
             for feature_idx in range(features_per_beat):
@@ -268,6 +273,34 @@ def write_matrix_csv(name: str, matrix: torch.Tensor, output_dir: str, labels: L
         writer.writerow(labels)
         for row in flattened:
             writer.writerow(row.tolist())
+
+
+def write_matrix_input_csv(
+    name: str,
+    matrix: torch.Tensor,
+    output_dir: str,
+    labels: List[str],
+) -> None:
+    matrix_np = matrix.detach().cpu().numpy()
+    num_beats, num_tokens, features_per_beat = matrix_np.shape
+    path = os.path.join(output_dir, name)
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        header = []
+        for label in labels:
+            header.append(label)
+            header.extend([""] * (features_per_beat - 1))
+        writer.writerow(header)
+        feature_header = []
+        for _ in labels:
+            feature_header.extend([f"feature{idx + 1}" for idx in range(features_per_beat)])
+        writer.writerow(feature_header)
+        for token_idx in range(num_tokens):
+            row_values: List[str] = []
+            for beat_idx in range(num_beats):
+                for feature_idx in range(features_per_beat):
+                    row_values.append(f"{matrix_np[beat_idx, token_idx, feature_idx]:.6f}")
+            writer.writerow(row_values)
 
 
 def run_demo() -> None:
@@ -370,7 +403,7 @@ def run_demo() -> None:
 
         tokens_matrix = torch.stack(pooled_tokens, dim=1)
 
-    write_matrix_csv(f"{file_index:02d}_matrix_input.csv", tokens_matrix, args.output_dir, label_text)
+    write_matrix_input_csv(f"{file_index:02d}_matrix_input.csv", tokens_matrix, args.output_dir, label_text)
     file_index += 1
 
     h = tokens_matrix
