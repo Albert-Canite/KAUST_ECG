@@ -535,41 +535,46 @@ def run_demo() -> None:
 
         tokens_matrix = torch.stack(pooled_tokens, dim=1)
 
-    write_matrix_input_csv(f"{file_index:02d}_matrix_input.csv", tokens_matrix, args.output_dir, label_text)
-    file_index += 1
-
-    h = tokens_matrix
-    for idx, layer in enumerate(list(model.mlp_layers)[:3], start=1):
-        h = model._scale_if_needed(h)
-        h = layer(h)
-        h = activation(h)
-        weights = layer.weight.detach().cpu().numpy()
-        write_mlp_csv(
-            f"{file_index:02d}_mlp_{idx}.csv",
-            h,
+        write_matrix_input_csv(
+            f"{file_index:02d}_matrix_input.csv",
+            tokens_matrix,
             args.output_dir,
             label_text,
-            weights,
         )
         file_index += 1
 
-    pooled = h.mean(dim=1)
-    logits = model.classifier(pooled)
-    probs = torch.softmax(logits, dim=1)[:, 1]
-    preds = (probs >= best_threshold).long()
+        h = tokens_matrix
+        for idx, layer in enumerate(list(model.mlp_layers)[:3], start=1):
+            h = model._scale_if_needed(h)
+            h = layer(h)
+            h = activation(h)
+            weights = layer.weight.detach().cpu().numpy()
+            write_mlp_csv(
+                f"{file_index:02d}_mlp_{idx}.csv",
+                h,
+                args.output_dir,
+                label_text,
+                weights,
+            )
+            file_index += 1
 
-    classifier_weights = model.classifier.weight.detach().cpu().numpy()
-    final_probs = torch.softmax(logits, dim=1)
-    write_classification_summary_csv(
-        f"{file_index:02d}_classification.csv",
-        pooled,
-        logits,
-        final_probs,
-        args.output_dir,
-        best_threshold,
-        label_text,
-        classifier_weights,
-    )
+        pooled = h.mean(dim=1)
+        logits = model.classifier(pooled)
+        probs = torch.softmax(logits, dim=1)[:, 1]
+        preds = (probs >= best_threshold).long()
+
+        classifier_weights = model.classifier.weight.detach().cpu().numpy()
+        final_probs = torch.softmax(logits, dim=1)
+        write_classification_summary_csv(
+            f"{file_index:02d}_classification.csv",
+            pooled,
+            logits,
+            final_probs,
+            args.output_dir,
+            best_threshold,
+            label_text,
+            classifier_weights,
+        )
 
 
 if __name__ == "__main__":
