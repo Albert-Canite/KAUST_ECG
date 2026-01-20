@@ -364,37 +364,6 @@ def write_mlp_csv(
             writer.writerow(row_values)
 
 
-def write_classifier_tokens_csv(
-    name: str,
-    token_logits: torch.Tensor,
-    output_dir: str,
-    labels: List[str],
-    weights: np.ndarray,
-) -> None:
-    logits_np = token_logits.detach().cpu().numpy()
-    num_beats, num_tokens, num_classes = logits_np.shape
-    path = os.path.join(output_dir, name)
-    with open(path, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["classifier_weights"])
-        for row in weights.T:
-            writer.writerow([f"{v:.6f}" for v in row.tolist()])
-        writer.writerow([])
-        header = []
-        for label in labels:
-            header.append(label)
-            header.extend([""] * (num_classes - 1))
-        writer.writerow(header)
-        feature_header = [f"logit{idx + 1}" for idx in range(num_classes)]
-        writer.writerow(feature_header * num_beats)
-        for token_idx in range(num_tokens):
-            row_values: List[str] = []
-            for beat_idx in range(num_beats):
-                for class_idx in range(num_classes):
-                    row_values.append(f"{logits_np[beat_idx, token_idx, class_idx]:.6f}")
-            writer.writerow(row_values)
-
-
 def write_classification_summary_csv(
     name: str,
     pooled: torch.Tensor,
@@ -460,6 +429,9 @@ def write_classification_summary_csv(
             for class_idx in range(num_classes):
                 prob_values.append(f"{probs_np[beat_idx, class_idx]:.6f}")
         writer.writerow(prob_values)
+        writer.writerow([])
+        writer.writerow(["prob_abnormal"])
+        writer.writerow([f"{v:.6f}" for v in probs_np[:, 1].tolist()])
         writer.writerow([])
         writer.writerow(["threshold", f"{threshold:.6f}"])
 
@@ -582,38 +554,14 @@ def run_demo() -> None:
         file_index += 1
 
     pooled = h.mean(dim=1)
-    token_logits = model.classifier(h)
     logits = model.classifier(pooled)
     probs = torch.softmax(logits, dim=1)[:, 1]
     preds = (probs >= best_threshold).long()
 
     classifier_weights = model.classifier.weight.detach().cpu().numpy()
-    write_classifier_tokens_csv(
-        f"{file_index:02d}_classifier_tokens.csv",
-        token_logits,
-        args.output_dir,
-        label_text,
-        classifier_weights,
-    )
-    file_index += 1
-
-    result_df = pd.DataFrame(
-        {
-            "label": label_text,
-            "quality": qualities,
-            "logit_normal": selected_logits[:, 0],
-            "logit_abnormal": selected_logits[:, 1],
-            "prob_abnormal": selected_probs,
-            "pred_label": ["normal" if int(v) == 0 else "abnormal" for v in selected_preds],
-            "threshold": best_threshold,
-        }
-    )
-    result_df.to_csv(os.path.join(args.output_dir, f"{file_index:02d}_classification.csv"), index=False)
-    file_index += 1
-
     final_probs = torch.softmax(logits, dim=1)
     write_classification_summary_csv(
-        f"{file_index:02d}_classification_summary.csv",
+        f"{file_index:02d}_classification.csv",
         pooled,
         logits,
         final_probs,
