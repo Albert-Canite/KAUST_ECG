@@ -303,6 +303,138 @@ def write_matrix_input_csv(
             writer.writerow(row_values)
 
 
+def write_mlp_csv(
+    name: str,
+    matrix: torch.Tensor,
+    output_dir: str,
+    labels: List[str],
+    weights: np.ndarray,
+) -> None:
+    matrix_np = matrix.detach().cpu().numpy()
+    num_beats, num_tokens, features_per_beat = matrix_np.shape
+    path = os.path.join(output_dir, name)
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["mlp_weights"])
+        for row in weights:
+            writer.writerow([f"{v:.6f}" for v in row.tolist()])
+        writer.writerow([])
+        header = []
+        for label in labels:
+            header.append(label)
+            header.extend([""] * (features_per_beat - 1))
+        writer.writerow(header)
+        feature_header = []
+        for _ in labels:
+            feature_header.extend([f"feature{idx + 1}" for idx in range(features_per_beat)])
+        writer.writerow(feature_header)
+        for token_idx in range(num_tokens):
+            row_values: List[str] = []
+            for beat_idx in range(num_beats):
+                for feature_idx in range(features_per_beat):
+                    row_values.append(f"{matrix_np[beat_idx, token_idx, feature_idx]:.6f}")
+            writer.writerow(row_values)
+
+
+def write_classifier_tokens_csv(
+    name: str,
+    token_logits: torch.Tensor,
+    output_dir: str,
+    labels: List[str],
+    weights: np.ndarray,
+) -> None:
+    logits_np = token_logits.detach().cpu().numpy()
+    num_beats, num_tokens, num_classes = logits_np.shape
+    path = os.path.join(output_dir, name)
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["classifier_weights"])
+        for row in weights:
+            writer.writerow([f"{v:.6f}" for v in row.tolist()])
+        writer.writerow([])
+        header = []
+        for label in labels:
+            header.append(label)
+            header.extend([""] * (num_classes - 1))
+        writer.writerow(header)
+        feature_header = [f"logit{idx + 1}" for idx in range(num_classes)]
+        writer.writerow(feature_header * num_beats)
+        for token_idx in range(num_tokens):
+            row_values: List[str] = []
+            for beat_idx in range(num_beats):
+                for class_idx in range(num_classes):
+                    row_values.append(f"{logits_np[beat_idx, token_idx, class_idx]:.6f}")
+            writer.writerow(row_values)
+
+
+def write_classification_summary_csv(
+    name: str,
+    pooled: torch.Tensor,
+    logits: torch.Tensor,
+    probs: torch.Tensor,
+    output_dir: str,
+    threshold: float,
+    labels: List[str],
+    weights: np.ndarray,
+) -> None:
+    pooled_np = pooled.detach().cpu().numpy()
+    logits_np = logits.detach().cpu().numpy()
+    probs_np = probs.detach().cpu().numpy()
+    num_beats, pooled_features = pooled_np.shape
+    num_classes = logits_np.shape[1]
+    path = os.path.join(output_dir, name)
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["classifier_weights"])
+        for row in weights:
+            writer.writerow([f"{v:.6f}" for v in row.tolist()])
+        writer.writerow([])
+        writer.writerow(["pooled_features"])
+        pooled_header = []
+        for label in labels:
+            pooled_header.append(label)
+            pooled_header.extend([""] * (pooled_features - 1))
+        writer.writerow(pooled_header)
+        pooled_feature_header = []
+        for _ in labels:
+            pooled_feature_header.extend([f"feature{idx + 1}" for idx in range(pooled_features)])
+        writer.writerow(pooled_feature_header)
+        pooled_values: List[str] = []
+        for beat_idx in range(num_beats):
+            for feature_idx in range(pooled_features):
+                pooled_values.append(f"{pooled_np[beat_idx, feature_idx]:.6f}")
+        writer.writerow(pooled_values)
+        writer.writerow([])
+        writer.writerow(["classifier_logits"])
+        logit_header = []
+        for label in labels:
+            logit_header.append(label)
+            logit_header.extend([""] * (num_classes - 1))
+        writer.writerow(logit_header)
+        logit_feature_header = [f"logit{idx + 1}" for idx in range(num_classes)]
+        writer.writerow(logit_feature_header * num_beats)
+        logit_values: List[str] = []
+        for beat_idx in range(num_beats):
+            for class_idx in range(num_classes):
+                logit_values.append(f"{logits_np[beat_idx, class_idx]:.6f}")
+        writer.writerow(logit_values)
+        writer.writerow([])
+        writer.writerow(["softmax_probabilities"])
+        prob_header = []
+        for label in labels:
+            prob_header.append(label)
+            prob_header.extend([""] * (num_classes - 1))
+        writer.writerow(prob_header)
+        prob_feature_header = [f"prob{idx + 1}" for idx in range(num_classes)]
+        writer.writerow(prob_feature_header * num_beats)
+        prob_values: List[str] = []
+        for beat_idx in range(num_beats):
+            for class_idx in range(num_classes):
+                prob_values.append(f"{probs_np[beat_idx, class_idx]:.6f}")
+        writer.writerow(prob_values)
+        writer.writerow([])
+        writer.writerow(["threshold", f"{threshold:.6f}"])
+
 def run_demo() -> None:
     args = parse_args()
     set_seed(args.seed)
@@ -411,13 +543,31 @@ def run_demo() -> None:
         h = model._scale_if_needed(h)
         h = layer(h)
         h = activation(h)
-        write_matrix_csv(f"{file_index:02d}_mlp_{idx}.csv", h, args.output_dir, label_text)
+        weights = layer.weight.detach().cpu().numpy()
+        write_mlp_csv(
+            f"{file_index:02d}_mlp_{idx}.csv",
+            h,
+            args.output_dir,
+            label_text,
+            weights,
+        )
         file_index += 1
 
     pooled = h.mean(dim=1)
+    token_logits = model.classifier(h)
     logits = model.classifier(pooled)
     probs = torch.softmax(logits, dim=1)[:, 1]
     preds = (probs >= best_threshold).long()
+
+    classifier_weights = model.classifier.weight.detach().cpu().numpy()
+    write_classifier_tokens_csv(
+        f"{file_index:02d}_classifier_tokens.csv",
+        token_logits,
+        args.output_dir,
+        label_text,
+        classifier_weights,
+    )
+    file_index += 1
 
     result_df = pd.DataFrame(
         {
@@ -431,6 +581,19 @@ def run_demo() -> None:
         }
     )
     result_df.to_csv(os.path.join(args.output_dir, f"{file_index:02d}_classification.csv"), index=False)
+    file_index += 1
+
+    final_probs = torch.softmax(logits, dim=1)
+    write_classification_summary_csv(
+        f"{file_index:02d}_classification_summary.csv",
+        pooled,
+        logits,
+        final_probs,
+        args.output_dir,
+        best_threshold,
+        label_text,
+        classifier_weights,
+    )
 
 
 if __name__ == "__main__":
