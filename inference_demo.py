@@ -207,19 +207,46 @@ def label_names(labels: Iterable[int]) -> List[str]:
     return ["normal" if int(v) == 0 else "abnormal" for v in labels]
 
 
+def _segment_to_windows(segment: np.ndarray, window_size: int = 4) -> np.ndarray:
+    num_beats, length = segment.shape
+    num_windows = length - window_size + 1
+    if num_windows <= 0:
+        raise ValueError("Segment length must be >= window size.")
+    windows = np.zeros((num_beats, num_windows, window_size), dtype=segment.dtype)
+    for beat_idx in range(num_beats):
+        for win_idx in range(num_windows):
+            windows[beat_idx, win_idx, :] = segment[beat_idx, win_idx : win_idx + window_size]
+    return windows
+
+
 def write_segment_csv(
     output_dir: str,
     filename: str,
     segment: np.ndarray,
     labels: List[str],
+    window_size: int = 4,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, filename)
+    windows = _segment_to_windows(segment, window_size=window_size)
+    num_beats, num_windows, _ = windows.shape
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(labels)
-        for row in segment.T:
-            writer.writerow(row.tolist())
+        header = []
+        for label in labels:
+            header.append(label)
+            header.extend([""] * (window_size - 1))
+        writer.writerow(header)
+        feature_header = []
+        for _ in labels:
+            feature_header.extend([f"sample{idx + 1}" for idx in range(window_size)])
+        writer.writerow(feature_header)
+        for win_idx in range(num_windows):
+            row_values: List[str] = []
+            for beat_idx in range(num_beats):
+                for sample_idx in range(window_size):
+                    row_values.append(f"{windows[beat_idx, win_idx, sample_idx]:.6f}")
+            writer.writerow(row_values)
 
 
 def pool_to_four(values: torch.Tensor) -> torch.Tensor:
@@ -239,7 +266,8 @@ def write_kernel_csv(
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["kernel_weights"])
-        writer.writerow([f"{w:.6f}" for w in kernel_weights.tolist()])
+        for weight in kernel_weights.tolist():
+            writer.writerow([f"{weight:.6f}"])
         writer.writerow([])
         writer.writerow(["pooling_output"])
         features_per_beat = pooled_values.shape[1]
@@ -316,7 +344,7 @@ def write_mlp_csv(
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["mlp_weights"])
-        for row in weights:
+        for row in weights.T:
             writer.writerow([f"{v:.6f}" for v in row.tolist()])
         writer.writerow([])
         header = []
@@ -349,7 +377,7 @@ def write_classifier_tokens_csv(
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["classifier_weights"])
-        for row in weights:
+        for row in weights.T:
             writer.writerow([f"{v:.6f}" for v in row.tolist()])
         writer.writerow([])
         header = []
@@ -386,7 +414,7 @@ def write_classification_summary_csv(
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["classifier_weights"])
-        for row in weights:
+        for row in weights.T:
             writer.writerow([f"{v:.6f}" for v in row.tolist()])
         writer.writerow([])
         writer.writerow(["pooled_features"])
