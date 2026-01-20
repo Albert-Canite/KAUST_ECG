@@ -105,11 +105,12 @@ def _collect_processed_outputs(
     eval_seed: int | None,
     renormalize_inputs: bool,
     zero_mean_inputs: bool,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     model.eval()
     labels_all: List[int] = []
     probs_all: List[float] = []
     logits_all: List[np.ndarray] = []
+    pooled_all: List[np.ndarray] = []
     processed_all: List[np.ndarray] = []
     rng_devices = [device] if device.type == "cuda" else []
     with torch.random.fork_rng(devices=rng_devices, enabled=eval_seed is not None):
@@ -136,15 +137,17 @@ def _collect_processed_outputs(
                     zero_mean=zero_mean_inputs,
                 )
                 with quantized_weights(model, bits=weight_bits):
-                    logits, _ = model(signals)
+                    logits, pooled = model(signals)
                 prob_pos = torch.softmax(logits, dim=1)[:, 1]
                 labels_all.extend(labels.cpu().tolist())
                 probs_all.extend(prob_pos.cpu().tolist())
                 logits_all.append(logits.detach().cpu().numpy())
+                pooled_all.append(pooled.detach().cpu().numpy())
                 processed_all.append(signals.detach().cpu().numpy())
     processed = np.concatenate(processed_all, axis=0)
     logits = np.concatenate(logits_all, axis=0)
-    return np.array(labels_all), np.array(probs_all), processed, logits
+    pooled = np.concatenate(pooled_all, axis=0)
+    return np.array(labels_all), np.array(probs_all), processed, logits, pooled
 
 
 def compute_best_threshold(labels: np.ndarray, probs: np.ndarray) -> float:
@@ -454,7 +457,7 @@ def run_demo() -> None:
     dataset = ECGBeatDataset(beats, labels)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
 
-    labels_arr, probs_arr, processed_beats, logits_arr = _collect_processed_outputs(
+    labels_arr, probs_arr, processed_beats, logits_arr, pooled_arr = _collect_processed_outputs(
         model,
         loader,
         device,
@@ -483,6 +486,7 @@ def run_demo() -> None:
     selected_processed = processed_beats[selected_indices].squeeze(1)
     selected_logits = logits_arr[selected_indices]
     selected_probs = probs_arr[selected_indices]
+    selected_pooled = pooled_arr[selected_indices]
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -558,17 +562,15 @@ def run_demo() -> None:
             )
             file_index += 1
 
-        pooled = h.mean(dim=1)
-        logits = model.classifier(pooled)
-        probs = torch.softmax(logits, dim=1)[:, 1]
-        preds = (probs >= best_threshold).long()
-
         classifier_weights = model.classifier.weight.detach().cpu().numpy()
-        final_probs = torch.softmax(logits, dim=1)
+        final_probs = torch.softmax(
+            torch.from_numpy(selected_logits).to(device),
+            dim=1,
+        )
         write_classification_summary_csv(
             f"{file_index:02d}_classification.csv",
-            pooled,
-            logits,
+            torch.from_numpy(selected_pooled).to(device),
+            torch.from_numpy(selected_logits).to(device),
             final_probs,
             args.output_dir,
             best_threshold,
